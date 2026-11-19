@@ -316,3 +316,81 @@ lines, which change the size without changing anything an inspector sees, and
 binary; a `.py` artifact is the inspectable build and its size is not a signal.
 
 
+## Packaging contracts (validate, pipeline)
+
+Internal interfaces, so they live here rather than in SIGNATURES.md, which stays a
+Win32 declaration surface and nothing else.
+
+- `validate.validate(cfg, *, mode, name=None, stub=None) -> list[Problem]` — the six
+  rules, never raises, never stops at the first failure. `Problem(rule, path,
+  message, blocking)` carries a dotted path so the UI can focus the offending field.
+- `validate.blocking(problems)` and `validate.describe(problems)` — the two things a
+  caller actually wants out of that list.
+- `pipeline.run(cfg, *, root, out_dir, mode, name=None, stub=None, progress=None,
+  cancel=None) -> Outcome` — validate, payload, seal, forge, rename.
+- `pipeline.Event(stage, message, fraction)` — a plain dataclass. `progress` is a
+  plain callable; the worker adapts a Qt signal to it. If `Event` ever needs Qt,
+  `core/` would have to import `app/` and the direction rule breaks.
+- `pipeline.Outcome(artifact, mode, size, seconds)` — returned, never printed.
+- `pipeline.PipelineError(stage, message, *, artifact=None, problems=())` with the
+  two subclasses `ValidationFailed` and `PipelineCancelled`.
+
+`name` is a stem or a filename, never a path: the destination directory is `out_dir`
+and `rename` cannot leave it.
+
+## Endpoint validation is keyed on kind
+
+One pattern that accepts either shape is how a bot token ends up in the https field
+and is only discovered at transmit time, by `relay._split_telegram`. So the rule
+branches: `https` requires a parseable `http`/`https` URL with a non-empty host,
+`telegram` requires exactly one `$`, a token matching `^\d+:[A-Za-z0-9_-]{20,}$` and
+a non-empty chat. Both reject embedded whitespace, which `urllib` would otherwise
+carry into the request line.
+
+An unknown `relay.kind` is reported under the same rule, because the kind and the
+endpoint are one form row and a kind that is not in `RELAY_KINDS` makes the endpoint
+unreadable rather than merely wrong.
+
+## The pipeline swallows progress-callback exceptions
+
+A UI slot that raises is the UI's bug, and losing a finished seal because a label
+update threw is the worse outcome. `_emit` catches `Exception` and continues; the
+build's own failures still raise. Nothing is logged, because `core/` has no logger
+and importing `agent.log` would add a dependency for one line.
+
+## Working name and final name
+
+The artifact is built as `sable-build-<8 hex>.<ext>` and renamed afterwards, because
+`forge.build` requires the destination to already carry the right suffix and
+`rename.rename` is the module that owns legality and collision. A rename that fails
+leaves the artifact under its working name and the raised `PipelineError` carries
+that path, so a cosmetic step never discards a completed build.
+
+`build` and `rename` are two stages rather than one because the rename target is
+generated after the payload exists: `rename.generate` derives the name from the
+finished file's own suffix.
+
+## `app/` is 14 slots, not 18 — the four deltas named
+
+These are gate-table rows the manifest does not carry, each with the listed file it
+folds into. No file is invented and the manifest stays at 50.
+
+1. `app/pages/base.py`, a shared page scaffold (title, description, reset) → folds
+   into `app/shell.py`, which already owns page construction and the rail contract.
+   The alternative, a base class in its own slot, is a module whose whole content is
+   four attributes.
+2. `app/widgets/path.py`, an entry row with a Browse button → folds into
+   `app/widgets/field.py`; the picker is a flag on the field, not a second widget.
+3. `app/theme/__init__.py`, QSS load and re-apply on the switch → folds into
+   `app/main.py`, which is already the only module that survives a theme change and
+   therefore the only one that can re-apply anything.
+4. `app/model.py`, form state to `RunConfig` and the validate call → folds into
+   `app/worker.py` on the build side and `core/validate.py` on the rules side. A
+   separate model object would be a third copy of a shape `schema.to_dict` already
+   defines, and the worker already owns the thread that carries it.
+
+The cost is that `app/shell.py` and `app/widgets/field.py` each carry more than one
+responsibility. If a fold proves wrong during Phase 6, the manifest changes and the
+count moves to 51; it is not pre-emptively padded now.
+
+
