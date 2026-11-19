@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build output — forge writes artifacts here, never commit them
+build/
+dist/
+*.part
+*.exe
+*.pyz
+
+# Test scratch
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Operator-local
+.env
+*.log

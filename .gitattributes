@@ -1,0 +1,7 @@
+# Normalise every text file to LF in the repository, regardless of the machine
+# that commits it. Python source and the shipped schema are read byte-for-byte by
+# core/forge.py, so a CRLF checkout would change payload bytes between machines.
+* text=auto eol=lf
+
+*.exe binary
+*.pyz binary
