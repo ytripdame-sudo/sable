@@ -393,4 +393,43 @@ The cost is that `app/shell.py` and `app/widgets/field.py` each carry more than 
 responsibility. If a fold proves wrong during Phase 6, the manifest changes and the
 count moves to 51; it is not pre-emptively padded now.
 
+## Binding is PySide6, and the names are used consistently
+
+PySide6 over PyQt6: LGPL, and its import paths are the ones already written into the
+signatures here (`Signal`, `Slot`, `exec`). The PyQt spellings are never used, so a
+module cannot half-work under one binding and fail under the other. `pyproject.toml`
+pins it as the single runtime dependency of the UI.
+
+## Qt is imported per function, not per module
+
+`app/__init__.py` has no imports at all and `app/main.py` imports Qt inside the
+function that needs it. That is what makes `import app` and `import app.main` succeed
+on a Linux box with no wheel and no display, which is the shape of the acceptance
+line rather than a workaround for it. The cost is an import statement per function;
+each one is called once per process, and the module namespace stays cheap.
+
+`app/shell.py` and the pages import Qt at module scope, because they cannot do
+anything without it. `main()` imports `shell` inside the function, so a broken page
+import fails after the application object exists and can be reported in a dialog
+rather than as a traceback before the window manager knows the process.
+
+## `app/__main__.py` is not a manifest slot
+
+`python -m app` needs a `__main__.py` and the manifest has none, so the entry point is
+the `app.main:main` console script in `pyproject.toml`. Adding `__main__.py` was the
+alternative; it is a second entry file whose entire content is three lines and a
+`raise SystemExit`, and the manifest is locked at 50.
+
+## A theme is a file read and a stylesheet set
+
+`apply_theme` reads the `.qss` and calls `setStyleSheet`, and a switch calls exactly
+the same function again — Qt re-polishes existing widgets when the string changes, so
+there is nothing to tear down and no restart. The name is persisted in `QSettings`
+under `ui/theme`, synced explicitly because the window manager can close the process
+immediately after a switch.
+
+A missing or empty stylesheet falls back to the default theme and then to no
+stylesheet at all: default widgets are ugly, not broken, and refusing to start over a
+`.qss` is the worse failure.
+
 
