@@ -913,5 +913,49 @@ compare the two shapes for byte equality, and having both is what proved the ref
 not change the wire format.
 
 
+## The archive that leaves the machine is encrypted with a real zip password
+
+The seal key only ever wrapped the bundle welded inside the exe. The archive handed to the
+relay was the plain one: on the `link` kind it landed on a public host, and the operator's
+own payload was opened from the Downloads folder with one double-click and no password at
+all. That is not a leak in a corner case — it is every delivery.
+
+Three choices were on the table, and the difference matters:
+
+- **ZipCrypto**, the traditional password zip. What a skidded builder ships because
+  `zipfile` pretends to support it. One known plaintext byte and the key falls out; the
+  attack is older than the average user. Rejected as security theatre.
+- **The existing `core/seal.py` format**, already AES-GCM and already authenticated. The
+  strongest of the three and 30 lines of work — but it needs our own opener on the
+  receiving side, and a tool the operator has to carry is a tool they will not have.
+- **WinZip AES-256 (AE-2)**, which 7-Zip, WinRAR and PeaZip all open by typing the
+  password. Chosen: portable, authenticated with HMAC-SHA1, and the password is the seal
+  key the operator already copied.
+
+The stdlib reads this format and cannot write it, and `agent/` may not import `core/`, so
+the writer is `agent/util.py::seal_zip`. Sixty lines of header maths plus the counter mode
+WinZip defined: **16-byte little-endian counter starting at 1**, which is not the
+big-endian counter every library ships. Key material is 66 bytes of PBKDF2-HMAC-SHA1 at
+1000 iterations — 32 encryption, 32 authentication, 2 password verifier.
+
+Two measurements shaped the implementation:
+
+- Storing members instead of deflating produced a **340 MB** file from a 182 MB source and
+  took 123 s. Deflating first gave **182,436,933 bytes in 33 s** — smaller than the plain
+  archive.
+- One AES call per 16-byte counter is 21 million calls on a 340 MB archive. Refilling
+  64 KiB of keystream per call divides that by 4096.
+
+Order in `agent/entry.py` is deliberate: the local copy is written **before** sealing, so
+`keep_local` still opens without a password, and a sealing failure falls back to the plain
+archive rather than costing the delivery.
+
+Verified against a third-party implementation, not against itself: 3,819-member archive
+sealed, `7z t` reports **Everything is Ok** with the key, and with no key it asks for a
+password. Wrong key fails all 3,819 members. End to end through a real artifact and a real
+socket: the relay received `payload-sealed.zip`, 7z opened it with the artifact's seal key,
+and listed the three system members inside.
+
+
 
 

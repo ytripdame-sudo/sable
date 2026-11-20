@@ -9,11 +9,14 @@ holds the rows the main file does not have yet.
 from __future__ import annotations
 
 import json
+import secrets
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -263,14 +266,250 @@ def self_remove(executable: Path) -> None:
         log.logger.debug("self-remove failed to spawn", exc_info=True)
 
 
+# --- encrypted archive --------------------------------------------------------
+#
+# WinZip AES-256, which is what 7-Zip, WinRAR and PeaZip all read when a zip asks for a
+# password. The alternative was the traditional ZipCrypto that skidded builders ship:
+# one known-plaintext byte and the key falls out in minutes, so it looks like a lock and
+# is not one. The stdlib can read this format but cannot write it, and the agent may not
+# import ``core/``, so the writer lives here.
+#
+# Layout per entry, from the WinZip AES specification:
+#   salt 16 | password verifier 2 | AES-256-CTR ciphertext | HMAC-SHA1 truncated to 10
+# The counter is 16 bytes, little endian, starting at 1. Key material is 66 bytes of
+# PBKDF2-HMAC-SHA1 over the password: 32 encryption, 32 authentication, 2 verifier.
+
+_METHOD_AES: Final[int] = 99
+_METHOD_STORE: Final[int] = 0
+_METHOD_DEFLATE: Final[int] = 8
+_AES_EXTRA_ID: Final[int] = 0x9901
+_AES_VERSION: Final[int] = 2
+_AES_VENDOR: Final[bytes] = b"AE"
+_AES_STRENGTH: Final[int] = 3
+_AES_SALT: Final[int] = 16
+_AES_AUTH: Final[int] = 10
+_AES_ITERATIONS: Final[int] = 1000
+_AES_NEEDED: Final[int] = 51
+_AES_FLAG: Final[int] = 0x0001
+_CHUNK_SEAL: Final[int] = 1 << 20
+# A counter is 16 bytes, so one AES call per counter would be 21 million calls for a
+# 340 MB archive. Refilling 64 KiB of keystream per call divides that by 4096.
+_CTR_BLOCKS: Final[int] = 4096
+
+
+class _Counter:
+    """AES-256 in the little-endian counter mode WinZip defined, applied in order."""
+
+    def __init__(self, key: bytes) -> None:
+        from Crypto.Cipher import AES
+
+        self._aes = AES.new(key, AES.MODE_ECB)
+        self._counter = 1
+        self._stream = b""
+
+    def _refill(self) -> None:
+        start = self._counter
+        blocks = b"".join(
+            (start + index).to_bytes(16, "little") for index in range(_CTR_BLOCKS)
+        )
+        self._stream = self._aes.encrypt(blocks)
+        self._counter = start + _CTR_BLOCKS
+
+    def apply(self, data: bytes) -> bytes:
+        if not data:
+            return b""
+        out = bytearray()
+        index = 0
+        while index < len(data):
+            if not self._stream:
+                self._refill()
+            take = min(len(self._stream), len(data) - index)
+            # Integer XOR keeps this off a per-byte Python loop.
+            mask = int.from_bytes(self._stream[:take], "big")
+            block = int.from_bytes(data[index:index + take], "big")
+            out += (mask ^ block).to_bytes(take, "big")
+            self._stream = self._stream[take:]
+            index += take
+        return bytes(out)
+
+
+def _deflate(bundle: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    """Raw deflate of one member, inside its own buffer.
+
+    Storing instead would be simpler and would double the archive: the source zip holds
+    a 338 MB tree in 182 MB, so an encrypted store-only copy came out at 340 MB and took
+    123 s. Bounded by the largest single member, not by the archive.
+    """
+    engine = zlib.compressobj(9, zlib.DEFLATED, -15)
+    parts: list[bytes] = []
+    with bundle.open(info) as member:
+        while True:
+            block = member.read(_CHUNK_SEAL)
+            if not block:
+                break
+            parts.append(engine.compress(block))
+    parts.append(engine.flush())
+    return b"".join(parts)
+
+
+def _aes_extra(method: int) -> bytes:
+    return struct.pack(
+        "<HHH2sBH", _AES_EXTRA_ID, 7, _AES_VERSION, _AES_VENDOR, _AES_STRENGTH, method
+    )
+
+
+def _aes_keys(password: str, salt: bytes) -> tuple[bytes, bytes, bytes]:
+    from Crypto.Hash import SHA1
+    from Crypto.Protocol.KDF import PBKDF2
+
+    material = PBKDF2(
+        password.encode("utf-8"),
+        salt,
+        dkLen=32 + 32 + 2,
+        count=_AES_ITERATIONS,
+        hmac_hash_module=SHA1,
+    )
+    return material[:32], material[32:64], material[64:66]
+
+
+def _dos_stamp(moment: tuple[int, int, int, int, int, int]) -> tuple[int, int]:
+    year, month, day, hour, minute, second = moment
+    year = min(max(year, 1980), 2107)
+    return (
+        (hour << 11) | (minute << 5) | (second // 2),
+        ((year - 1980) << 9) | (month << 5) | day,
+    )
+
+
+def seal_zip(source: Path, destination: Path, password: str) -> Path | None:
+    """Write ``source`` as a password-protected AES-256 zip. None on any failure.
+
+    Each member is deflated first and then encrypted, so the encrypted file is roughly
+    the size of the source rather than of the uncompressed tree.
+
+    Never raises. A caller that loses the encrypted copy still has the plain one.
+    """
+    if not password:
+        log.logger.debug("seal_zip called without a password")
+        return None
+
+    from Crypto.Hash import HMAC, SHA1
+
+    try:
+        with zipfile.ZipFile(source) as bundle, destination.open("wb") as handle:
+            central: list[bytes] = []
+            written = 0
+            count = 0
+
+            for info in bundle.infolist():
+                if info.is_dir():
+                    continue
+
+                salt = secrets.token_bytes(_AES_SALT)
+                encrypt_key, auth_key, verifier = _aes_keys(password, salt)
+                counter = _Counter(encrypt_key)
+                digest = HMAC.new(auth_key, digestmod=SHA1)
+
+                name = info.filename.encode("utf-8")
+                extra = _aes_extra(_METHOD_DEFLATE)
+                clock, day = _dos_stamp(info.date_time)
+                plain = info.file_size
+                packed = _deflate(bundle, info)
+                stored = _AES_SALT + len(verifier) + len(packed) + _AES_AUTH
+                offset = written
+
+                header = struct.pack(
+                    "<4sHHHHHIIIHH",
+                    b"PK\x03\x04",
+                    _AES_NEEDED,
+                    _AES_FLAG,
+                    _METHOD_AES,
+                    clock,
+                    day,
+                    0,  # AE-2 carries no CRC; the authentication code replaces it
+                    stored,
+                    plain,
+                    len(name),
+                    len(extra),
+                )
+                handle.write(header)
+                handle.write(name)
+                handle.write(extra)
+                handle.write(salt)
+                handle.write(verifier)
+                written += len(header) + len(name) + len(extra) + len(salt) + len(verifier)
+
+                for start in range(0, len(packed), _CHUNK_SEAL):
+                    cipher = counter.apply(packed[start:start + _CHUNK_SEAL])
+                    digest.update(cipher)
+                    handle.write(cipher)
+                    written += len(cipher)
+
+                tag = digest.digest()[:_AES_AUTH]
+                handle.write(tag)
+                written += len(tag)
+
+                central.append(
+                    struct.pack(
+                        "<4sHHHHHHIIIHHHHHII",
+                        b"PK\x01\x02",
+                        _AES_NEEDED,
+                        _AES_NEEDED,
+                        _AES_FLAG,
+                        _METHOD_AES,
+                        clock,
+                        day,
+                        0,
+                        stored,
+                        plain,
+                        len(name),
+                        len(extra),
+                        0,
+                        0,
+                        0,
+                        info.external_attr,
+                        offset,
+                    )
+                    + name
+                    + extra
+                )
+                count += 1
+
+            directory_offset = written
+            for record in central:
+                handle.write(record)
+                written += len(record)
+
+            handle.write(
+                struct.pack(
+                    "<4sHHHHIIH",
+                    b"PK\x05\x06",
+                    0,
+                    0,
+                    count,
+                    count,
+                    written - directory_offset,
+                    directory_offset,
+                    0,
+                )
+            )
+    except (OSError, ValueError, RuntimeError, KeyError, zipfile.BadZipFile):
+        log.logger.debug("sealing the archive failed", exc_info=True)
+        return None
+    return destination
+
+
 __all__ = [
     "chrome_time",
     "copy_with_sidecars",
     "executable_path",
+    "keep_archive",
     "make_archive",
     "read_json",
+    "seal_zip",
     "self_remove",
     "temp_workspace",
     "unix_time",
     "write_json",
+    "write_text",
 ]

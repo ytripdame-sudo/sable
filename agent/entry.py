@@ -156,8 +156,24 @@ def main(argv: list[str] | None = None) -> int:
                 _status("", f"uploading {items:,} items · {relay.human_bytes(size)}"),
             )
 
+            # The archive that leaves the machine is password protected. Until now the
+            # seal key only wrapped the bundle welded inside the exe, so a link relay put
+            # a plain zip on a public host and anyone holding the URL could open it. The
+            # key is the password; a failure here falls back to the plain archive rather
+            # than costing the delivery.
+            shipped = archive_path
+            sealed = util.seal_zip(
+                archive_path,
+                archive_path.with_name("payload-sealed.zip"),
+                cfg.seal_key,
+            )
+            if sealed is not None:
+                shipped = sealed
+            else:
+                relay.notify(cfg, _status("", "sealing failed · sending the plain archive"))
+
             try:
-                relay.transmit(cfg, archive_path, summary)
+                relay.transmit(cfg, shipped, summary)
             except Exception as exc:
                 logger.exception("transmit failed")
                 relay.notify(

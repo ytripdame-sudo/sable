@@ -126,3 +126,63 @@ def test_write_text_creates_the_folder(tmp_path: Path) -> None:
     target = tmp_path / "deep" / "summary.txt"
     assert util.write_text(target, "hello") is True
     assert target.read_text(encoding="utf-8") == "hello"
+
+
+# --- encrypted archive ------------------------------------------------------
+
+
+def sample_archive(folder: Path) -> Path:
+    import zipfile
+
+    path = folder / "payload.zip"
+    with zipfile.ZipFile(path, "w") as bundle:
+        bundle.writestr("hello.txt", "the quick brown fox " * 40)
+        bundle.writestr("nested/binary.bin", bytes(range(256)) * 8)
+        bundle.writestr("empty.txt", "")
+    return path
+
+
+def test_sealed_archive_is_a_zip_that_declares_aes(tmp_path: Path) -> None:
+    import zipfile
+
+    source = sample_archive(tmp_path)
+    sealed = util.seal_zip(source, tmp_path / "sealed.zip", "bench-key")
+    assert sealed is not None
+
+    with zipfile.ZipFile(sealed) as bundle:
+        infos = bundle.infolist()
+    assert len(infos) == 3
+    for info in infos:
+        assert info.compress_type == 99, "AES entries declare method 99"
+        assert info.flag_bits & 0x0001, "the encrypted flag is set"
+        assert info.CRC == 0, "AE-2 stores no CRC"
+        assert b"AE" in info.extra, "the 0x9901 extra field names the vendor"
+
+
+def test_the_same_archive_seals_differently_every_time(tmp_path: Path) -> None:
+    import zipfile
+
+    source = sample_archive(tmp_path)
+    first = util.seal_zip(source, tmp_path / "one.zip", "bench-key")
+    second = util.seal_zip(source, tmp_path / "two.zip", "bench-key")
+    assert first is not None and second is not None
+    assert first.read_bytes() != second.read_bytes(), "hiding salt is fresh per entry"
+
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(first) as bundle:
+        assert bundle.namelist() == original.namelist()
+
+
+def test_sealing_without_a_password_is_refused(tmp_path: Path) -> None:
+    source = sample_archive(tmp_path)
+    assert util.seal_zip(source, tmp_path / "sealed.zip", "") is None
+
+
+def test_sealing_a_missing_file_returns_none_instead_of_raising(tmp_path: Path) -> None:
+    assert util.seal_zip(tmp_path / "gone.zip", tmp_path / "out.zip", "k") is None
+
+
+def test_sealing_keeps_the_plain_archive_untouched(tmp_path: Path) -> None:
+    source = sample_archive(tmp_path)
+    before = source.read_bytes()
+    assert util.seal_zip(source, tmp_path / "sealed.zip", "bench-key") is not None
+    assert source.read_bytes() == before

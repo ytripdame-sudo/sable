@@ -97,10 +97,11 @@ can be read in place when `keep_local` is on. What remains is not code: one VM r
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **204 passed**. Manifest parity both directions, AST import direction,
+- `pytest` — **209 passed**. Manifest parity both directions, AST import direction,
   config error paths, archive assembly, relay delivery, status webhook pings, the
   readable caption block, link-host fallback, the local copy helper, the streamed upload
-  body, self-remove command shape, and the four inter-module contracts.
+  body, the AES-256 zip writer, self-remove command shape, and the four inter-module
+  contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -145,6 +146,12 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   the relay received — plus a UTF-8 `.txt` summary beside it, and posted the path to the
   status webhook before uploading. Default stays off; the four helper behaviours
   (naming, illegal characters, blocked folder, no overwrite) are unit-tested.
+- **Encrypted delivery, live and third-party verified.** The archive sent to the relay is
+  now a WinZip AES-256 zip keyed on the seal key. A 3,819-member, 182,436,933-byte archive
+  passed `7z t` with the key and failed all entries with the wrong one. End to end, the
+  receiver got `payload-sealed.zip`, 7z opened it with the artifact's seal key, and the
+  three system members were listed inside. `keep_local` copies the plain archive first, so
+  the local copy still opens without a password.
 
 ---
 
