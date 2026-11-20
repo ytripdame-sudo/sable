@@ -180,6 +180,17 @@ def self_remove(executable: Path) -> None:
     """Detach a cmd that waits for this process to die, then deletes it.
 
     The path is quoted because a username with a space in it is not an edge case.
+
+    The line is handed to ``CreateProcess`` as one string rather than as an argv list.
+    ``subprocess`` re-quotes a list for ``CreateProcess``, escaping the embedded quotes
+    of the path with backslashes — and ``cmd`` does not read backslashes as escapes, so
+    the ``del`` ran against a mangled path and silently failed. Measured on a real
+    artifact: the process detached, logged, exited clean, and the file was still there.
+
+    A rename is tried before a delete because Windows permits renaming a running image
+    while it refuses to delete one, and the renamed file is deleted a few seconds later
+    once the handle is gone. Deletion is attempted more than once for the same reason:
+    the image stays mapped briefly past process exit.
     """
     if sys.platform != "win32":
         return
@@ -187,16 +198,26 @@ def self_remove(executable: Path) -> None:
     if '"' in target:
         log.logger.warning("self-remove skipped: path contains a quote")
         return
-    command = f'ping -n 4 127.0.0.1 >nul & del /f /q "{target}"'
+
+    moved = target + ".old"
+    command = (
+        f'cmd /c ping -n 4 127.0.0.1 >nul'
+        f' & move /y "{target}" "{moved}" >nul 2>&1'
+        f' & ping -n 3 127.0.0.1 >nul'
+        f' & del /f /q "{moved}" >nul 2>&1'
+        f' & del /f /q "{moved}" >nul 2>&1'
+        f' & del /f /q "{target}" >nul 2>&1'
+    )
     try:
         subprocess.Popen(
-            ["cmd", "/c", command],
+            command,
             creationflags=_DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP,
             close_fds=True,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        log.logger.debug("self-remove: detached for %s", target)
     except OSError:
         log.logger.debug("self-remove failed to spawn", exc_info=True)
 

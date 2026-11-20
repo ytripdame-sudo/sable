@@ -754,5 +754,32 @@ still ends.
 A host answering 200 with an HTML error page is the failure this checks for by demanding
 a scheme in the response, not by testing for non-empty.
 
+## Self-remove reported success and deleted nothing
+
+`self_remove` logged `detached`, the process exited 0, and the artifact was still on
+disk afterwards. Two faults, both invisible without running it:
+
+**The command line was handed to `CreateProcess` as an argv list.** `subprocess`
+re-quotes a list, escaping the embedded quotes of the path with backslashes, and `cmd`
+does not read backslashes as escapes. The `del` therefore ran against a mangled path
+and failed silently, with every layer above it reporting success. The line is now one
+string.
+
+**A single `del` loses the race with Windows releasing the image.** Even with a correct
+line, deleting three seconds after spawn is a coin flip. The command now renames first —
+renaming a running image is permitted where deleting it is not — and deletes the renamed
+file twice with a delay between, so the original name is gone the moment the rename
+lands and the bytes follow.
+
+Verified end to end: a sealed artifact ran, delivered its archive, and removed itself.
+
+## The .py artifact runs
+
+Built and executed on the same machine: 3 s, exit 0, archive delivered. It is the same
+`agent.entry` behind a different container, and the earlier mutex fix is what makes it
+safe to run beside a frozen artifact. No further change was owed; it is recorded because
+"both modes work" is a claim that should have been measured once rather than inferred.
+
+
 
 
