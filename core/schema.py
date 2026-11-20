@@ -76,6 +76,11 @@ class RunConfig:
     sources: SourceConfig
     self_remove: bool = False
     ballast_mb: int = 0
+    # Opt-in and off by default. When on, the artifact copies the collected archive to
+    # Documents\Sable Results before it transmits, so a run on a machine you control can
+    # be opened and read in place. On somebody else's machine this is a footprint, which
+    # is why it is a decision rather than a habit.
+    keep_local: bool = False
 
 
 def _names(cls: type) -> tuple[str, ...]:
@@ -198,6 +203,9 @@ def from_dict(data: Mapping[str, Any]) -> RunConfig:
         if "ballast_mb" in document
         else 0
     )
+    keep_local = (
+        _as_bool(document["keep_local"], "keep_local") if "keep_local" in document else False
+    )
 
     return RunConfig(
         schema_version=version,
@@ -207,6 +215,7 @@ def from_dict(data: Mapping[str, Any]) -> RunConfig:
         sources=sources,
         self_remove=self_remove,
         ballast_mb=ballast_mb,
+        keep_local=keep_local,
     )
 
 
@@ -227,6 +236,7 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
         "seal_key": cfg.seal_key,
         "self_remove": cfg.self_remove,
         "ballast_mb": cfg.ballast_mb,
+        "keep_local": cfg.keep_local,
         "relay": {
             "kind": cfg.relay.kind,
             "endpoint": cfg.relay.endpoint,

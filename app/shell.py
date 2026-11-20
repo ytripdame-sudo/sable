@@ -117,6 +117,7 @@ class MainWindow(QWidget):
         self._forge._mode.currentIndexChanged.connect(self._revalidate)
         self._tuning._ballast.valueChanged.connect(self._revalidate)
         self._tuning._self_remove.toggled.connect(self._revalidate)
+        self._tuning._keep_local.toggled.connect(self._revalidate)
         for box in self._sources._boxes.values():
             box.toggled.connect(self._revalidate)
 
@@ -238,6 +239,7 @@ class MainWindow(QWidget):
             sources=sources,
             self_remove=bool(tuning["self_remove"]),
             ballast_mb=int(tuning["ballast_mb"]),
+            keep_local=bool(tuning["keep_local"]),
         )
 
     def _revalidate(self, *_args) -> None:

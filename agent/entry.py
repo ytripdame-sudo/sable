@@ -135,6 +135,22 @@ def main(argv: list[str] | None = None) -> int:
             except OSError:
                 size = 0
             items = sum(counts.values())
+
+            # Before transmission, so a failed upload still leaves something to open on
+            # a machine the operator controls. Off unless the build asked for it.
+            if cfg.keep_local:
+                kept = util.keep_archive(
+                    archive_path, str(summary.get("hostname") or "sable")
+                )
+                if kept is not None:
+                    util.write_text(
+                        kept.with_suffix(".txt"),
+                        f"{relay.describe(summary)}\n"
+                        f"**archive** {kept.name}\n"
+                        f"**items** {items:,}\n",
+                    )
+                    relay.notify(cfg, _status("", f"local copy · {kept}"))
+
             relay.notify(
                 cfg,
                 _status("", f"uploading {items:,} items · {relay.human_bytes(size)}"),

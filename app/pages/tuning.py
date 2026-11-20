@@ -1,4 +1,4 @@
-"""Tuning page: mutex, seal key, self-remove, ballast, output directory.
+"""Tuning page: mutex, seal key, self-remove, local copy, ballast, output directory.
 
 ``ballast_mb`` is clamped here to ``MAX_BALLAST_MB`` from the schema, because a spin box
 with a range of its own would be a second opinion about a number the schema already
@@ -10,7 +10,9 @@ between sessions is a key on disk that nobody asked to be there. The mutex and t
 output directory are remembered, because both are ordinary preferences.
 
 ``self_remove`` carries a warning line of its own, because it is the one setting that
-deletes the artifact after it runs and there is no undo.
+deletes the artifact after it runs and there is no undo. ``keep_local`` gets the same
+treatment from the other side: it leaves a copy on the target, which is exactly what a
+test run wants and exactly what a real run does not.
 """
 
 from __future__ import annotations
@@ -85,6 +87,16 @@ class TuningPage(QWidget):
         self._self_remove_note.setObjectName("hint")
         self._self_remove_note.setWordWrap(True)
 
+        self._keep_local = QCheckBox("Keep a copy of the results on the target")
+        self._keep_local.setObjectName("keepLocal")
+        self._keep_local_note = QLabel(
+            "Copies the collected zip to Documents\\Sable Results before sending, with "
+            "a readable summary beside it. Use it on a machine you control; leave it "
+            "off for a clean run."
+        )
+        self._keep_local_note.setObjectName("hint")
+        self._keep_local_note.setWordWrap(True)
+
         self._ballast = QSpinBox()
         self._ballast.setObjectName("ballast")
         self._ballast.setRange(0, MAX_BALLAST_MB)
@@ -116,6 +128,8 @@ class TuningPage(QWidget):
         column.addWidget(ballast_note)
         column.addWidget(self._self_remove)
         column.addWidget(self._self_remove_note)
+        column.addWidget(self._keep_local)
+        column.addWidget(self._keep_local_note)
         column.addWidget(self._output)
         column.addStretch(1)
 
@@ -129,6 +143,7 @@ class TuningPage(QWidget):
             "mutex": self._mutex.text().strip(),
             "seal_key": self._seal_key.text(),
             "self_remove": self._self_remove.isChecked(),
+            "keep_local": self._keep_local.isChecked(),
             "ballast_mb": int(self._ballast.value()),
             "out_dir": self._output.text().strip(),
         }
@@ -137,6 +152,7 @@ class TuningPage(QWidget):
         self._mutex.set_text(_DEFAULT_MUTEX)
         self._seal_key.set_text("")
         self._self_remove.setChecked(False)
+        self._keep_local.setChecked(False)
         self._ballast.setValue(0)
         self._mutex.clear_problem()
         self._seal_key.clear_problem()

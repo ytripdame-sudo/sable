@@ -92,6 +92,47 @@ def write_json(path: Path, payload: Any) -> bool:
     return True
 
 
+def write_text(path: Path, text: str) -> bool:
+    """Write UTF-8 text with parents created. False on any failure."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError:
+        log.logger.debug("text write failed: %s", path, exc_info=True)
+        return False
+    return True
+
+
+def keep_archive(archive: Path, label: str, base: Path | None = None) -> Path | None:
+    """Copy a finished archive to a folder a person can open.
+
+    The default base is ``Documents\\Sable Results`` on the account running the
+    artifact: the one folder on Windows that is both easy to find and normally
+    writable. The label is reduced to letters, digits, dash and underscore so a
+    hostname can never produce an illegal filename.
+
+    Never raises. A locked profile costs the local copy, not the delivery.
+    """
+    folder = base if base is not None else Path.home() / "Documents" / "Sable Results"
+    safe = "".join(
+        character for character in label if character.isalnum() or character in "-_"
+    )[:40] or "sable"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    target = folder / f"{safe}_{stamp}.zip"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        serial = 1
+        while target.exists():
+            target = folder / f"{safe}_{stamp}_{serial}.zip"
+            serial += 1
+        shutil.copy2(archive, target)
+    except OSError:
+        log.logger.debug("local archive copy failed", exc_info=True)
+        return None
+    return target
+
+
 def chrome_time(value: int) -> str | None:
     """Chrome's microseconds-since-1601 as an ISO 8601 UTC string."""
     if value <= 0:

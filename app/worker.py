@@ -49,6 +49,7 @@ def config_from(
     ballast_mb: int,
     ping: str = "",
     mention: str = "@here",
+    keep_local: bool = False,
 ) -> RunConfig:
     """Assemble a ``RunConfig`` from raw form values.
 
@@ -73,6 +74,7 @@ def config_from(
         sources=SourceConfig(**{name: bool(sources.get(name, True)) for name, _ in SOURCE_LABELS}),
         self_remove=self_remove,
         ballast_mb=ballast_mb,
+        keep_local=keep_local,
     )
 
 

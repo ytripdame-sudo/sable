@@ -75,3 +75,54 @@ def test_a_path_with_a_quote_is_refused_rather_than_escaped(
     monkeypatch.setattr(util.subprocess, "Popen", spawned)
     util.self_remove(Path('C:\\x\\sa"ble.exe'))
     assert spawned.calls == []
+
+
+# --- local copy -------------------------------------------------------------
+
+
+def test_keep_archive_copies_under_a_findable_name(tmp_path: Path) -> None:
+    source = tmp_path / "payload.zip"
+    source.write_bytes(b"PK\x03\x04sable")
+    base = tmp_path / "Sable Results"
+
+    kept = util.keep_archive(source, "DESKTOP-ABC", base=base)
+    assert kept is not None
+    assert kept.parent == base
+    assert kept.name.startswith("DESKTOP-ABC_")
+    assert kept.suffix == ".zip"
+    assert kept.read_bytes() == source.read_bytes()
+
+
+def test_keep_archive_cleans_an_illegal_label(tmp_path: Path) -> None:
+    source = tmp_path / "payload.zip"
+    source.write_bytes(b"x")
+
+    kept = util.keep_archive(source, "bad/name:*?", base=tmp_path)
+    assert kept is not None
+    for character in '/:*?"<>|':
+        assert character not in kept.name
+
+
+def test_keep_archive_never_raises_when_the_folder_is_a_file(tmp_path: Path) -> None:
+    source = tmp_path / "payload.zip"
+    source.write_bytes(b"x")
+    blocker = tmp_path / "blocked"
+    blocker.write_bytes(b"not a folder")
+
+    assert util.keep_archive(source, "BOX", base=blocker) is None
+
+
+def test_two_copies_in_one_second_do_not_overwrite(tmp_path: Path) -> None:
+    source = tmp_path / "payload.zip"
+    source.write_bytes(b"x")
+
+    first = util.keep_archive(source, "BOX", base=tmp_path)
+    second = util.keep_archive(source, "BOX", base=tmp_path)
+    assert first is not None and second is not None
+    assert first != second
+
+
+def test_write_text_creates_the_folder(tmp_path: Path) -> None:
+    target = tmp_path / "deep" / "summary.txt"
+    assert util.write_text(target, "hello") is True
+    assert target.read_text(encoding="utf-8") == "hello"

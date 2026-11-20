@@ -849,5 +849,39 @@ posted `https://gofile.io/d/xENhg2CW` to the local relay with the machine block 
 `@here`, and that page fetched 200.
 
 
+## The results land somewhere you can open them
+
+Every delivery path ends at the relay. That is correct for a run on somebody else's
+machine and wrong for a run on your own: a zip that has to survive discord before it can
+be opened is a zip with a failure mode in the middle of a test. `RunConfig.keep_local`
+is an opt-in copy of the archive, made on the target before transmission.
+
+The copy goes to `Documents\Sable Results`, named `<hostname>_<stamp>.zip`, with a
+`.txt` beside it carrying the same block the file message carries — hostname, user, OS,
+public IP and city, LAN address, CPU, GPU, RAM, architecture, uptime, gate, archive name
+and item count. That is the whole reason it exists: a run that failed at the upload still
+leaves something readable, and nothing about it needs the seal key to find.
+
+Three rules came out of it:
+
+- **Before transmission, not after.** A failed upload is the case where a local copy
+  matters most.
+- **Failure is quiet.** `util.keep_archive` returns `None` on any `OSError` and the run
+  continues to transmit. A locked `Documents` folder costs the copy, never the delivery.
+- **Never overwrites.** Two runs inside one second get `_1` appended rather than the
+  second silently replacing the first.
+
+The advertised cost is honest and written on the Tuning page: on a machine that is not
+yours, that copy is a footprint sitting in `Documents` after the artifact has gone. It
+is a checkbox rather than a default for exactly that reason.
+
+Verified live, not mocked: a local artifact with `keep_local=True` and only the machine
+source ran against the local receiver. `Documents\Sable Results\KUZE_20261120-003229.zip`
+appeared, SHA-256 identical to the archive the relay received, opened as a zip with the
+three system members inside. Beside it, `KUZE_20261120-003229.txt` in UTF-8 with CRLF.
+The status webhook carried `**status** local copy · C:\...\KUZE_20261120-003229.zip`
+between `collecting` and `uploading`.
+
+
 
 

@@ -123,6 +123,7 @@ def test_version_is_not_coerced_from_a_string() -> None:
         ("relay", "https://x", "relay"),
         ("ballast_mb", "lots", "ballast_mb"),
         ("self_remove", "yes", "self_remove"),
+        ("keep_local", "yes", "keep_local"),
         ("sources", [], "sources"),
     ],
 )
@@ -179,6 +180,7 @@ def test_optional_fields_take_their_defaults() -> None:
     cfg = from_dict(minimal())
     assert cfg.self_remove is False
     assert cfg.ballast_mb == 0
+    assert cfg.keep_local is False
     assert all(
         getattr(cfg.sources, name)
         for name in ("autofill", "documents", "wallets", "sessions", "system", "browsers")
@@ -194,6 +196,7 @@ def test_round_trip_is_lossless() -> None:
         sources=SourceConfig(system=False, documents=False),
         self_remove=True,
         ballast_mb=7,
+        keep_local=True,
     )
     again = from_dict(to_dict(cfg))
     assert again == cfg
