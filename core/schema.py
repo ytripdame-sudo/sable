@@ -33,6 +33,11 @@ MAX_BALLAST_MB: Final[int] = 4096
 # week is a machine somebody notices; one that collects once a day is not.
 MAX_PERSIST_HOURS: Final[int] = 24
 
+# Mirrors are a second and third route, not a broadcast list. Four keeps the worst case
+# in one run bounded: three attempts per target inside transmit, so a run with four dead
+# endpoints already spends nine backoffs before it gives up.
+MAX_RELAY_TARGETS: Final[int] = 4
+
 
 class ConfigError(ValueError):
     """Raised for any config that does not match the schema.
@@ -48,6 +53,19 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class RelayTarget:
+    """One place an archive can be sent: a transport and the address it speaks.
+
+    The primary target stays flat on ``RelayConfig`` — ``kind`` and ``endpoint`` — because
+    it is required and it is what every config written before this type existed already
+    meant. Mirrors live in a list, so a config that never mentions one still parses.
+    """
+
+    kind: Literal["https", "telegram", "link"]
+    endpoint: str
+
+
+@dataclass(frozen=True, slots=True)
 class RelayConfig:
     kind: Literal["https", "telegram", "link"]
     endpoint: str
@@ -60,6 +78,14 @@ class RelayConfig:
     # is why this travels with allowed_mentions rather than living in the body alone.
     # "@here", "@everyone" or "<@123456789012345678>" all work; empty sends nothing.
     mention: str = "@here"
+    # Ordered fallbacks. Empty means one target, which is what every earlier artifact
+    # had. A tuple rather than a list so the frozen config cannot be mutated by a
+    # caller that decides to reorder delivery halfway through a run.
+    targets: tuple[RelayTarget, ...] = ()
+
+    def deliveries(self) -> tuple[RelayTarget, ...]:
+        """Every target in the order it should be tried, primary first."""
+        return (RelayTarget(kind=self.kind, endpoint=self.endpoint), *self.targets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +188,40 @@ def _reject_unknown(mapping: Mapping[str, Any], allowed: tuple[str, ...], path: 
             raise ConfigError(path + str(key), "unknown key")
 
 
+def _as_list(value: Any, path: str) -> list[Any]:
+    # A JSON array arrives as list. A string is iterable and would silently become a
+    # list of characters, which is the failure this guards.
+    if type(value) is not list:
+        raise ConfigError(path, f"expected list, got {_kind_of(value)}")
+    return value
+
+
+def _target_from(value: Any, path: str) -> RelayTarget:
+    data = _as_mapping(value, path)
+    _reject_unknown(data, ("kind", "endpoint"), path)
+    kind = _as_str(_require(data, "kind", path), path + "kind")
+    if kind not in RELAY_KINDS:
+        raise ConfigError(
+            path + "kind",
+            f"expected one of {', '.join(RELAY_KINDS)}, got {kind!r}",
+        )
+    endpoint = _as_str(_require(data, "endpoint", path), path + "endpoint")
+    return RelayTarget(kind=cast(RelayKind, kind), endpoint=endpoint)
+
+
+def _targets_from(value: Any, path: str) -> tuple[RelayTarget, ...]:
+    listed = path.rstrip(".")
+    items = _as_list(value, listed)
+    if len(items) > MAX_RELAY_TARGETS:
+        raise ConfigError(
+            listed,
+            f"expected at most {MAX_RELAY_TARGETS} mirrors, got {len(items)}",
+        )
+    # The index is part of the path so a bad mirror names which one it is; "targets" alone
+    # would send the reader to a list of four and leave them to guess.
+    return tuple(_target_from(item, f"{listed}.{index}.") for index, item in enumerate(items))
+
+
 def _relay_from(value: Any, path: str) -> RelayConfig:
     data = _as_mapping(value, path)
     _reject_unknown(data, RELAY_FIELDS, path)
@@ -176,8 +236,15 @@ def _relay_from(value: Any, path: str) -> RelayConfig:
     # valid config, and rejecting it would break every artifact already built.
     ping = _as_str(data["ping"], path + "ping") if "ping" in data else ""
     mention = _as_str(data["mention"], path + "mention") if "mention" in data else "@here"
+    targets = (
+        _targets_from(data["targets"], path + "targets.") if "targets" in data else ()
+    )
     return RelayConfig(
-        kind=cast(RelayKind, kind), endpoint=endpoint, ping=ping, mention=mention
+        kind=cast(RelayKind, kind),
+        endpoint=endpoint,
+        ping=ping,
+        mention=mention,
+        targets=targets,
     )
 
 
@@ -264,6 +331,10 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
             "endpoint": cfg.relay.endpoint,
             "ping": cfg.relay.ping,
             "mention": cfg.relay.mention,
+            "targets": [
+                {"kind": target.kind, "endpoint": target.endpoint}
+                for target in cfg.relay.targets
+            ],
         },
         "sources": {name: getattr(cfg.sources, name) for name in SOURCE_FIELDS},
     }
@@ -272,6 +343,7 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
 __all__ = [
     "MAX_BALLAST_MB",
     "MAX_PERSIST_HOURS",
+    "MAX_RELAY_TARGETS",
     "RELAY_FIELDS",
     "RELAY_KINDS",
     "RUN_FIELDS",
@@ -280,6 +352,7 @@ __all__ = [
     "ConfigError",
     "RelayConfig",
     "RelayKind",
+    "RelayTarget",
     "RunConfig",
     "SourceConfig",
     "from_dict",

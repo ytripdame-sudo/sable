@@ -24,7 +24,7 @@ from typing import Any, Final
 from PySide6.QtCore import QThread, Signal
 
 from core import pipeline
-from core.schema import RelayConfig, RunConfig, SourceConfig
+from core.schema import RelayConfig, RelayTarget, RunConfig, SourceConfig
 
 __all__ = ["SOURCE_LABELS", "BuildWorker"]
 
@@ -49,6 +49,7 @@ def config_from(
     ballast_mb: int,
     ping: str = "",
     mention: str = "@here",
+    targets: tuple[tuple[str, str], ...] = (),
     keep_local: bool = False,
     persist: bool = False,
     persist_hours: int = 0,
@@ -62,6 +63,10 @@ def config_from(
     ``ping`` and ``mention`` default to the values a config written before they
     existed would have meant: no status messages, and a mention ready if one is
     switched on.
+
+    ``targets`` arrives as ``(kind, endpoint)`` pairs in the order the page shows them.
+    Blank rows are already gone: the page decides what counts as a row worth trying, so
+    the filtering happens once, where the reader can see the row being ignored.
     """
     return RunConfig(
         schema_version=1,
@@ -72,6 +77,10 @@ def config_from(
             endpoint=endpoint,
             ping=ping,
             mention=mention,
+            targets=tuple(
+                RelayTarget(kind=kind, endpoint=where)  # type: ignore[arg-type]
+                for kind, where in targets
+            ),
         ),
         sources=SourceConfig(**{name: bool(sources.get(name, True)) for name, _ in SOURCE_LABELS}),
         self_remove=self_remove,

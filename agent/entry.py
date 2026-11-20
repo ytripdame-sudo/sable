@@ -214,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
                 relay.notify(cfg, _status("", "sealing failed · sending the plain archive"))
 
             try:
-                relay.transmit(cfg, shipped, summary)
+                relay.deliver(cfg, shipped, summary)
             except Exception as exc:
                 logger.exception("transmit failed")
                 # Park before reporting: the archive is the whole run, and the temp

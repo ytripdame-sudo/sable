@@ -167,19 +167,38 @@ def test_content_type_follows_the_real_extension(tmp_path: Path) -> None:
 
 class Relay:
     def __init__(
-        self, kind: str, endpoint: str, ping: str = "", mention: str = "@here"
+        self,
+        kind: str,
+        endpoint: str,
+        ping: str = "",
+        mention: str = "@here",
+        targets: tuple = (),
     ) -> None:
         self.kind = kind
         self.endpoint = endpoint
         self.ping = ping
         self.mention = mention
+        self.targets = targets
 
 
 class Config:
     def __init__(
-        self, kind: str, endpoint: str, ping: str = "", mention: str = "@here"
+        self,
+        kind: str,
+        endpoint: str,
+        ping: str = "",
+        mention: str = "@here",
+        targets: tuple = (),
     ) -> None:
-        self.relay = Relay(kind, endpoint, ping, mention)
+        self.relay = Relay(kind, endpoint, ping, mention, targets)
+
+
+class Mirror:
+    """The shape ``core.schema.RelayTarget`` presents to ``deliver``."""
+
+    def __init__(self, kind: str, endpoint: str) -> None:
+        self.kind = kind
+        self.endpoint = endpoint
 
 
 def test_transmit_gives_up_after_three_attempts(
@@ -776,7 +795,7 @@ def test_drain_sends_what_a_previous_run_parked(
     def deliver(cfg: object, archive: Path, summary: object = None) -> None:
         sent.append(archive.name)
 
-    monkeypatch.setattr(relay, "transmit", deliver)
+    monkeypatch.setattr(relay, "deliver", deliver)
 
     assert relay.drain(object()) == 0
     assert sent == [parked.name]
@@ -793,7 +812,7 @@ def test_drain_keeps_an_archive_the_relay_refuses(
     def refuse(cfg: object, archive: Path, summary: object = None) -> None:
         raise relay.RelayError("503 from the relay")
 
-    monkeypatch.setattr(relay, "transmit", refuse)
+    monkeypatch.setattr(relay, "deliver", refuse)
 
     assert relay.drain(object()) == 1
     assert util.pending_queue() == [parked]
@@ -815,7 +834,7 @@ def test_drain_abandons_an_archive_once_the_try_limit_is_reached(
     def refuse(cfg: object, archive: Path, summary: object = None) -> None:
         raise relay.RelayError("the webhook is gone")
 
-    monkeypatch.setattr(relay, "transmit", refuse)
+    monkeypatch.setattr(relay, "deliver", refuse)
 
     assert relay.drain(object()) == 0
     assert util.pending_queue() == [], "a deleted webhook is not a network problem"
@@ -832,3 +851,103 @@ def test_drain_on_an_empty_queue_does_nothing(
     )
 
     assert relay.drain(object()) == 0
+
+
+# --- multi-delivery ---------------------------------------------------------
+
+
+def test_deliver_lands_on_the_primary_and_never_touches_a_mirror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+    touched: list[str] = []
+
+    def fake(endpoint: str, *_: object, **__: object) -> None:
+        touched.append(endpoint)
+
+    monkeypatch.setattr(relay, "_send_https", fake)
+    cfg = Config("https", "https://primary.test/hook", targets=(Mirror("https", "https://mirror.test/hook"),))
+
+    results = relay.deliver(cfg, archive)
+
+    assert touched == ["https://primary.test/hook"], "a working primary spends no mirror"
+    assert len(results) == 1
+    assert results[0].ok and results[0].endpoint == "https://primary.test/hook"
+
+
+def test_deliver_falls_over_to_the_mirror_when_the_primary_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+    touched: list[str] = []
+
+    def fake(endpoint: str, *_: object, **__: object) -> None:
+        touched.append(endpoint)
+        if "primary" in endpoint:
+            raise relay.RelayPermanent("relay returned http 404")
+
+    monkeypatch.setattr(relay, "_send_https", fake)
+    cfg = Config(
+        "https",
+        "https://primary.test/hook",
+        targets=(Mirror("https", "https://mirror.test/hook"),),
+    )
+
+    results = relay.deliver(cfg, archive)
+
+    assert touched == ["https://primary.test/hook", "https://mirror.test/hook"]
+    assert [item.ok for item in results] == [False, True]
+    assert "404" in results[0].reason
+
+
+def test_deliver_names_every_target_when_all_of_them_refuse(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+
+    def refuse(*_: object, **__: object) -> None:
+        raise relay.RelayError("503 from the relay")
+
+    monkeypatch.setattr(relay, "_send_https", refuse)
+    monkeypatch.setattr(relay.time, "sleep", lambda _seconds: None)
+    cfg = Config(
+        "https",
+        "https://primary.test/hook",
+        targets=(
+            Mirror("https", "https://one.test/hook"),
+            Mirror("https", "https://two.test/hook"),
+        ),
+    )
+
+    with pytest.raises(relay.RelayError) as caught:
+        relay.deliver(cfg, archive)
+
+    message = str(caught.value)
+    assert "3" in message, "the count of refused targets belongs in the message"
+    for endpoint in ("primary", "one", "two"):
+        assert endpoint in message, f"{endpoint} is missing from {message!r}"
+
+
+def test_transmit_still_means_the_primary_and_ignores_mirrors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+    touched: list[str] = []
+
+    def fake(endpoint: str, *_: object, **__: object) -> None:
+        touched.append(endpoint)
+
+    monkeypatch.setattr(relay, "_send_https", fake)
+    cfg = Config(
+        "https",
+        "https://primary.test/hook",
+        targets=(Mirror("https", "https://mirror.test/hook"),),
+    )
+
+    relay.transmit(cfg, archive)
+
+    assert touched == ["https://primary.test/hook"]

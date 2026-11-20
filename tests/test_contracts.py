@@ -47,6 +47,7 @@ from core.schema import (  # noqa: E402
     RELAY_KINDS,
     SOURCE_FIELDS,
     RelayConfig,
+    RelayTarget,
     RunConfig,
     SourceConfig,
     from_dict,
@@ -536,6 +537,51 @@ def test_an_unknown_relay_kind_is_reported_under_the_endpoint_rule() -> None:
     assert len(problems) == 1
     assert problems[0].rule == validate_module.RULE_ENDPOINT
     assert problems[0].path == "relay.kind"
+
+
+def test_a_well_formed_mirror_adds_no_problem() -> None:
+    relay_config = RelayConfig(
+        kind="https",
+        endpoint="https://example.invalid/relay",
+        targets=(RelayTarget(kind="link", endpoint="https://example.invalid/second"),),
+    )
+    assert validate_module.validate(config(relay=relay_config), mode=forge.OUTPUT_PY) == []
+
+
+def test_an_empty_mirror_names_its_index() -> None:
+    relay_config = RelayConfig(
+        kind="https",
+        endpoint="https://example.invalid/relay",
+        targets=(RelayTarget(kind="https", endpoint="   "),),
+    )
+    problems = validate_module.validate(config(relay=relay_config), mode=forge.OUTPUT_PY)
+
+    assert [problem.path for problem in problems] == ["relay.targets.0.endpoint"]
+    assert "empty" in problems[0].message
+
+
+def test_a_mirror_that_repeats_the_primary_is_refused() -> None:
+    relay_config = RelayConfig(
+        kind="https",
+        endpoint="https://example.invalid/relay",
+        targets=(RelayTarget(kind="https", endpoint="https://example.invalid/relay"),),
+    )
+    problems = validate_module.validate(config(relay=relay_config), mode=forge.OUTPUT_PY)
+
+    assert [problem.path for problem in problems] == ["relay.targets.0.endpoint"]
+    assert "already" in problems[0].message
+
+
+def test_a_telegram_mirror_is_checked_by_the_telegram_rule() -> None:
+    relay_config = RelayConfig(
+        kind="https",
+        endpoint="https://example.invalid/relay",
+        targets=(RelayTarget(kind="telegram", endpoint="not-a-token$42"),),
+    )
+    problems = validate_module.validate(config(relay=relay_config), mode=forge.OUTPUT_PY)
+
+    assert [problem.path for problem in problems] == ["relay.targets.0.endpoint"]
+    assert "token" in problems[0].message
     assert validate_module.blocking(problems)
 
 

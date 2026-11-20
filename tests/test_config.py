@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 from core.schema import (  # noqa: E402
     MAX_BALLAST_MB,
     MAX_PERSIST_HOURS,
+    MAX_RELAY_TARGETS,
     SCHEMA_VERSION,
     ConfigError,
     RelayConfig,
@@ -258,3 +259,77 @@ def test_persistence_must_be_a_bool() -> None:
     with pytest.raises(ConfigError) as caught:
         from_dict(document)
     assert caught.value.path == "persist"
+
+
+# --- mirrors ----------------------------------------------------------------
+
+
+def test_no_mirrors_is_one_delivery() -> None:
+    cfg = from_dict(minimal())
+    assert cfg.relay.targets == ()
+    assert cfg.relay.deliveries()[0].endpoint == "https://example.invalid/relay"
+    assert len(cfg.relay.deliveries()) == 1
+
+
+def test_mirrors_keep_their_order_behind_the_primary() -> None:
+    document = minimal()
+    document["relay"]["targets"] = [
+        {"kind": "telegram", "endpoint": "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw$42"},
+        {"kind": "link", "endpoint": "https://example.invalid/second"},
+    ]
+
+    cfg = from_dict(document)
+    kinds = [target.kind for target in cfg.relay.deliveries()]
+
+    assert kinds == ["https", "telegram", "link"]
+    assert cfg.relay.deliveries()[0].endpoint == "https://example.invalid/relay"
+
+
+def test_mirrors_round_trip_through_the_serialized_form() -> None:
+    document = minimal()
+    document["relay"]["targets"] = [{"kind": "link", "endpoint": "https://tiny.invalid/x"}]
+
+    cfg = from_dict(document)
+    again = from_dict(to_dict(cfg))
+
+    assert again.relay.targets == cfg.relay.targets
+
+
+def test_a_broken_mirror_names_its_index_and_key() -> None:
+    document = minimal()
+    document["relay"]["targets"] = [
+        {"kind": "https", "endpoint": "https://fine.invalid"},
+        {"kind": "https", "endpoint": "https://bad.invalid", "retries": 3},
+    ]
+
+    with pytest.raises(ConfigError) as caught:
+        from_dict(document)
+
+    assert caught.value.path == "relay.targets.1.retries", caught.value.path
+
+
+def test_an_unknown_mirror_kind_names_the_kind_path() -> None:
+    document = minimal()
+    document["relay"]["targets"] = [{"kind": "gopher", "endpoint": "gopher://x"}]
+
+    with pytest.raises(ConfigError) as caught:
+        from_dict(document)
+
+    assert caught.value.path == "relay.targets.0.kind", caught.value.path
+
+
+def test_mirrors_must_be_a_list_and_are_capped() -> None:
+    document = minimal()
+    document["relay"]["targets"] = "https://one.invalid"
+    with pytest.raises(ConfigError) as caught:
+        from_dict(document)
+    assert caught.value.path == "relay.targets", caught.value.path
+
+    document = minimal()
+    document["relay"]["targets"] = [
+        {"kind": "https", "endpoint": f"https://{index}.invalid"}
+        for index in range(MAX_RELAY_TARGETS + 1)
+    ]
+    with pytest.raises(ConfigError) as caught:
+        from_dict(document)
+    assert caught.value.path == "relay.targets", caught.value.path

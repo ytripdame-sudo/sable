@@ -190,21 +190,26 @@ def _check_ping(ping: str) -> list[Problem]:
     return _check_https(ping, "relay.ping")
 
 
-def _check_telegram(endpoint: str) -> list[Problem]:
+def _check_telegram(endpoint: str, path: str = "relay.endpoint") -> list[Problem]:
     parts = endpoint.split("$")
     if len(parts) != 2:
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", "must be token$chat, one $")]
+        return [_problem(RULE_ENDPOINT, path, "must be token$chat, one $")]
     token, chat = parts
     if not token:
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", "token half is empty")]
+        return [_problem(RULE_ENDPOINT, path, "token half is empty")]
     if not chat:
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", "chat half is empty")]
+        return [_problem(RULE_ENDPOINT, path, "chat half is empty")]
     if not _TELEGRAM_TOKEN.match(token):
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", "token is not <digits>:<secret>")]
+        return [_problem(RULE_ENDPOINT, path, "token is not <digits>:<secret>")]
     return []
 
 
-def _check_endpoint(kind: str, endpoint: str) -> list[Problem]:
+def _check_endpoint(
+    kind: str,
+    endpoint: str,
+    path: str = "relay.endpoint",
+    kind_path: str = "relay.kind",
+) -> list[Problem]:
     # The rule is keyed on the kind, not on the shape: a single pattern that accepts
     # either is how a bot token reaches the https field and is not noticed until
     # transmit. An unknown kind makes the endpoint unreadable, so it is reported here.
@@ -212,20 +217,49 @@ def _check_endpoint(kind: str, endpoint: str) -> list[Problem]:
         return [
             _problem(
                 RULE_ENDPOINT,
-                "relay.kind",
+                kind_path,
                 f"expected one of {', '.join(RELAY_KINDS)}, got {kind!r}",
             )
         ]
     if not endpoint.strip():
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", "must not be empty")]
+        return [_problem(RULE_ENDPOINT, path, "must not be empty")]
     if endpoint != endpoint.strip():
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", "has leading or trailing whitespace")]
+        return [_problem(RULE_ENDPOINT, path, "has leading or trailing whitespace")]
     if any(character.isspace() for character in endpoint):
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", "contains whitespace")]
+        return [_problem(RULE_ENDPOINT, path, "contains whitespace")]
 
     if kind == "telegram":
-        return _check_telegram(endpoint)
-    return _check_https(endpoint)
+        return _check_telegram(endpoint, path)
+    return _check_https(endpoint, path)
+
+
+def _check_targets(cfg: RunConfig) -> list[Problem]:
+    """The mirrors, each one checked by the same rule as the primary.
+
+    A mirror is a fallback, so a mirror that is itself malformed is worse than none: it
+    costs three attempts and a backoff on a run where the primary has already failed.
+    Reported under the endpoint rule with an indexed path, because the reader needs to
+    know which row to fix.
+    """
+    mirrors = getattr(cfg.relay, "targets", ()) or ()
+    problems: list[Problem] = []
+    seen: set[tuple[str, str]] = {(str(cfg.relay.kind), cfg.relay.endpoint)}
+
+    for index, target in enumerate(mirrors):
+        path = f"relay.targets.{index}.endpoint"
+        problems += _check_endpoint(
+            target.kind,
+            target.endpoint,
+            path,
+            f"relay.targets.{index}.kind",
+        )
+        pair = (str(target.kind), str(target.endpoint))
+        if pair in seen:
+            problems.append(
+                _problem(RULE_ENDPOINT, path, "this target is already in the list")
+            )
+        seen.add(pair)
+    return problems
 
 
 def _check_sources(cfg: RunConfig) -> list[Problem]:
@@ -317,6 +351,7 @@ def validate(
         problems += _check_seal_key(cfg.seal_key)
         problems += _check_endpoint(cfg.relay.kind, cfg.relay.endpoint)
         problems += _check_ping(cfg.relay.ping)
+        problems += _check_targets(cfg)
         problems += _check_sources(cfg)
 
         known_mode = mode in OUTPUT_MODES

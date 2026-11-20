@@ -1168,6 +1168,46 @@ three ways and produced a 316px column in a 1040px stack. The spacers carry zero
 now, so the surplus goes to the only item that asks for it, up to its ceiling, and the
 remainder splits between the spacers.
 
+## V2 — ordered failover, not a broadcast
+
+A relay config can now carry mirrors: `RelayConfig.targets` holds up to four extra
+`(kind, endpoint)` pairs behind the required primary. The field is optional and defaults to
+empty, so no `SCHEMA_VERSION` bump was needed — a `cfg.json` written by a V1 artifact still
+parses, still means one target, and still runs.
+
+The shape is additive rather than a list with the primary inside it. Turning `kind` and
+`endpoint` into `targets[0]` would read more evenly and would have changed the meaning of
+two keys that every existing config and every existing test already uses. The primary stays
+flat, `deliveries()` returns primary-first, and one method states the order so nothing else
+has to know the primary is special.
+
+Delivery is ordered failover, not a broadcast, and that is the whole decision. Sending the
+same archive to four places at once spends four times the uplink and makes "delivered"
+ambiguous; refusing to try a second target after the first refuses makes the feature
+pointless. So `deliver()` walks the list, applies the same three-attempt policy to each
+target, and returns on the first acceptance with the attempts it made. A refusal costs the
+run the time it would have spent failing anyway.
+
+`transmit()` is unchanged and still means the primary. Both entry points share `_send()`, so
+the retry policy and the permanent-refusal rule cannot drift apart between a config with
+mirrors and one without — a drift there stays invisible until the day the primary dies.
+
+Errors name the host, never the endpoint. A telegram endpoint carries a bot token and an
+https endpoint can carry a webhook secret in its path, so `_label()` reduces both to a host
+or `telegram chat <id>` before either reaches a log line or a `RelayError`.
+
+The Relay page grew a Fallbacks card: rows of kind and address, tried in the order shown,
+with a blank row ignored rather than refused. A row is a widget pair rather than two fields
+because two parallel lists cannot say which kind belongs to which address. Rows are built
+and destroyed at runtime, so the page re-emits one `changed` signal for all of them and the
+shell binds that instead of chasing widgets that do not exist yet; removing a row emits it
+too, because the gate has to look again after a deletion even though no text was typed.
+
+The cap is four mirrors, and the button says so by disabling itself rather than adding a
+fifth row that silently does nothing. Four is not a magic number: three attempts per target
+means a run with four dead endpoints already spends nine backoffs before it gives up.
+
+
 
 
 

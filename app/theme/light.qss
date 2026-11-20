@@ -219,6 +219,42 @@ QToolTip {
     font-size: 12px;
 }
 
+/* --- fallbacks --------------------------------------------------------- */
+
+#mirrorRow {
+    background: transparent;
+}
+
+#addRow {
+    background: transparent;
+    border: 1px dashed #c7d0de;
+    color: #667085;
+    padding: 8px 14px;
+}
+
+#addRow:hover {
+    border-color: #2f6fed;
+    color: #101828;
+}
+
+#addRow:disabled {
+    border-color: #e3e7ef;
+    color: #98a2b3;
+}
+
+#removeRow {
+    background: transparent;
+    border: 1px solid #d7dde9;
+    color: #667085;
+    padding: 8px 12px;
+}
+
+#removeRow:hover {
+    background: #c4392f;
+    border-color: #c4392f;
+    color: #ffffff;
+}
+
 /* --- cards ------------------------------------------------------------- */
 
 #card {

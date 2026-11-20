@@ -18,6 +18,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
@@ -151,19 +152,22 @@ def _permanent(status: int) -> bool:
     return 400 <= status < 500 and status not in (408, 429)
 
 
-def transmit(cfg: Any, archive: Path, summary: dict[str, Any] | None = None) -> None:
-    """Send ``archive`` to the configured relay. Raises RelayError on failure.
+@dataclass(frozen=True, slots=True)
+class Delivery:
+    """One target's answer. ``ok`` is what the caller acts on; the rest is for the log."""
 
-    ``summary`` is the machine description the message carries in front of the file.
-    Without it the caption falls back to name and size, which is what every earlier
-    artifact sent and what nobody could read.
+    kind: str
+    endpoint: str
+    ok: bool
+    reason: str = ""
+
+
+def _send(kind: str, endpoint: str, archive: Path, caption: str) -> None:
+    """Send to one target, up to ``_ATTEMPTS`` times. Raises ``RelayError``.
+
+    Split out of :func:`transmit` so a config with mirrors runs the same retry policy
+    against every target instead of re-implementing the loop per transport.
     """
-    if not archive.is_file():
-        raise RelayError(f"{archive.name}: archive is missing")
-
-    kind = cfg.relay.kind
-    endpoint = cfg.relay.endpoint
-    caption = _caption(cfg, archive, summary)
     failure: Exception | None = None
 
     for attempt in range(1, _ATTEMPTS + 1):
@@ -188,6 +192,93 @@ def transmit(cfg: Any, archive: Path, summary: dict[str, Any] | None = None) -> 
     raise RelayError(f"transmit failed after {_ATTEMPTS} attempts: {failure}") from failure
 
 
+def _targets(cfg: Any) -> tuple[tuple[str, str], ...]:
+    """The primary target followed by its mirrors, in the order they should be tried."""
+    relay = cfg.relay
+    primary = (str(relay.kind), str(relay.endpoint))
+    mirrors = tuple(
+        (str(target.kind), str(target.endpoint))
+        for target in getattr(relay, "targets", ()) or ()
+    )
+    return (primary, *mirrors)
+
+
+def _label(kind: str, endpoint: str) -> str:
+    """How a target is named in a log line or an error.
+
+    The host, not the whole address: a telegram endpoint carries a bot token and an
+    https endpoint can carry a webhook secret in its path, so neither belongs in a
+    message that is written to a file the operator will open and share.
+    """
+    if kind == "telegram":
+        parts = endpoint.split("$")
+        return f"telegram chat {parts[1]}" if len(parts) == 2 and parts[1] else "telegram"
+    host = urlsplit(endpoint).hostname
+    return host or kind
+
+
+def deliver(
+    cfg: Any,
+    archive: Path,
+    summary: dict[str, Any] | None = None,
+) -> tuple[Delivery, ...]:
+    """Send ``archive`` to the first target that takes it, and report every attempt.
+
+    Ordered failover, not a broadcast. The primary is tried with the normal retry policy;
+    if it refuses for good or runs out of attempts, the next mirror is tried, and the
+    first acceptance ends the delivery. Sending the same archive to four places at once
+    would spend the target's uplink four times over and would make "delivered" ambiguous
+    — here it means one whole copy landed somewhere.
+
+    Returns the attempts up to and including the one that worked. Raises ``RelayError``
+    naming every refusal when none did, so a run with three dead endpoints reports three
+    reasons rather than the last one.
+    """
+    if not archive.is_file():
+        raise RelayError(f"{archive.name}: archive is missing")
+
+    caption = _caption(cfg, archive, summary)
+    results: list[Delivery] = []
+
+    for kind, endpoint in _targets(cfg):
+        try:
+            _send(kind, endpoint, archive, caption)
+        except Exception as exc:
+            results.append(Delivery(kind, endpoint, False, str(exc)))
+            log.logger.debug("relay: %s refused by %s: %s", archive.name, kind, exc)
+            continue
+        results.append(Delivery(kind, endpoint, True))
+        if len(results) > 1:
+            log.logger.debug(
+                "relay: %s took %d target(s), landed on %s",
+                archive.name,
+                len(results),
+                kind,
+            )
+        return tuple(results)
+
+    reasons = " | ".join(f"{item.kind} at {_label(item.kind, item.endpoint)}: {item.reason}" for item in results)
+    raise RelayError(f"every target refused {archive.name} ({len(results)}): {reasons}")
+
+
+def transmit(cfg: Any, archive: Path, summary: dict[str, Any] | None = None) -> None:
+    """Send ``archive`` to the primary target. Raises RelayError on failure.
+
+    ``summary`` is the machine description the message carries in front of the file.
+    Without it the caption falls back to name and size, which is what every earlier
+    artifact sent and what nobody could read.
+
+    This is the single-target entry point and stays exactly as it was for callers that
+    mean one endpoint. ``deliver`` is the multi-target one; both share ``_send``, so the
+    retry policy cannot drift between them.
+    """
+    if not archive.is_file():
+        raise RelayError(f"{archive.name}: archive is missing")
+
+    caption = _caption(cfg, archive, summary)
+    _send(str(cfg.relay.kind), str(cfg.relay.endpoint), archive, caption)
+
+
 def drain(cfg: Any) -> int:
     """Send every archive a previous run parked. Returns how many are still waiting.
 
@@ -203,7 +294,7 @@ def drain(cfg: Any) -> int:
 
     for archive in util.pending_queue():
         try:
-            transmit(cfg, archive)
+            deliver(cfg, archive)
         except Exception as exc:
             tries = util.bump_pending(archive)
             log.logger.debug("queue: %s still waiting, try %d: %s", archive.name, tries, exc)
@@ -686,4 +777,4 @@ def _send_link(endpoint: str, archive: Path, caption: str) -> None:
     )
 
 
-__all__ = ["RelayError", "describe", "human_bytes", "notify", "transmit"]
+__all__ = ["Delivery", "RelayError", "deliver", "describe", "human_bytes", "notify", "transmit"]

@@ -127,6 +127,10 @@ class MainWindow(QWidget):
                        self._tuning._output, self._forge._name, self._forge._stub):
             widget.changed.connect(self._revalidate)
         self._relay._kind.currentIndexChanged.connect(self._revalidate)
+        # The fallback rows are built and destroyed at runtime, so the page re-emits one
+        # signal for all of them rather than the shell chasing widgets that do not exist
+        # yet.
+        self._relay.changed.connect(self._revalidate)
         self._forge._mode.currentIndexChanged.connect(self._revalidate)
         self._tuning._ballast.valueChanged.connect(self._revalidate)
         self._tuning._persist_hours.valueChanged.connect(self._revalidate)
@@ -286,6 +290,7 @@ class MainWindow(QWidget):
             endpoint=relay["endpoint"],
             ping=relay["ping"],
             mention=relay["mention"],
+            targets=relay["targets"],
             mutex=tuning["mutex"],
             seal_key=tuning["seal_key"],
             sources=sources,
