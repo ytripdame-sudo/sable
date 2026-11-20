@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         # machine rather than a promise that one is coming.
         summary = _summary()
         block = relay.describe(summary)
-        relay.notify(cfg, _status(block, "collecting"))
+        relay.notify(cfg, _status(block, "collecting"), alert=True)
 
         # The gate never stops a run. A virtual host produces a stamped result and
         # everything else proceeds; a silent exit teaches nobody anything.
