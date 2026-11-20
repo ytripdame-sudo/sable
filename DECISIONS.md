@@ -823,6 +823,31 @@ carried `allowed_mentions`.
 The two fields live on the relay page below the endpoint. Mention defaults to `@here`,
 so a build that fills in only the status webhook starts pinging without a second edit.
 
+## A link that exists and cannot be opened
+
+The `link` relay uploaded to catbox, got a URL back, posted it, and the operator could
+not open it. Measured: the catbox upload endpoint answered 200 under every user agent
+tried, while `files.catbox.moe` and `litter.catbox.moe` reset the connection at the TLS
+layer from this machine — and `catbox.moe`, which resolves to the same address, answered
+200. The file was really there; the name it was served under was blocked. A retry could
+not fix that, which is why the link survived three attempts and still looked dead.
+
+The artifact now asks the download host for its root before uploading: one cheap GET,
+5 s ceiling. An HTTP error counts as alive, because the host answered; only a transport
+failure or a server fault counts as dead. A dead host, a refused upload, or a body that
+is not a URL falls back to gofile.io, chose because it answered from the machine that
+could not open catbox. The fallback is two requests — the servers list, then the upload —
+and parses `downloadPage` explicitly rather than trusting a 200.
+
+The alternatives were measured rather than assumed: pixeldrain now returns 401
+`authentication_required`, tmpfiles.org and 0x0.st reset the connection from here, and
+uguu.se refuses `.zip` with 415. Catbox stays first because a working catbox link is
+permanent and gofile expires after inactivity.
+
+Verified live, not mocked: a local artifact with `kind=link` uploaded a 1.5 KB archive,
+posted `https://gofile.io/d/xENhg2CW` to the local relay with the machine block and
+`@here`, and that page fetched 200.
+
 
 
 

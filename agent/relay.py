@@ -54,6 +54,19 @@ _LITTERBOX_TIME: Final[str] = "72h"
 _CATBOX_MAX: Final[int] = 190 * 1024 * 1024
 _LITTERBOX_MAX: Final[int] = 950 * 1024 * 1024
 
+# The upload hosts and the download hosts are different names on the same service, and
+# a network can reach one and not the other. The check before an upload asks the
+# download host, because a file nobody can open is not a delivery.
+_CATBOX_DOWNLOAD: Final[str] = "https://files.catbox.moe/"
+_LITTERBOX_DOWNLOAD: Final[str] = "https://litter.catbox.moe/"
+
+# The fallback. Catbox's download hosts are reset at the TLS layer on some networks
+# while its upload endpoint answers normally, which produces a link that exists and
+# cannot be opened. Gofile answered from the same machine that could not open catbox.
+_GOFILE_SERVERS: Final[str] = "https://api.gofile.io/servers"
+_GOFILE_UPLOAD: Final[str] = "https://{server}.gofile.io/contents/uploadfile"
+_GOFILE_TIMEOUT: Final[float] = 30.0
+
 # A 10 s timeout is right for a message and wrong for 400 MB. The floor is a slow but
 # working uplink; the ceiling keeps a wedged socket from holding the process forever.
 _MIN_THROUGHPUT: Final[int] = 128 * 1024
@@ -406,25 +419,103 @@ def _link_message(caption: str, url: str) -> str:
     return _fit(f"{caption}\n{url}", _MESSAGE_LIMIT)
 
 
+def _download_host(host: str) -> str:
+    return _CATBOX_DOWNLOAD if host == _CATBOX else _LITTERBOX_DOWNLOAD
+
+
+def _reachable(url: str) -> bool:
+    """Whether the download host answers at all from this machine.
+
+    A cheap GET on the root, not on the file: the question is whether the name
+    resolves and completes a TLS handshake, and that answer is the same for every path
+    on it. An HTTP error still proves the host answered; only a transport failure or a
+    server fault means a posted link would be dead for the reader.
+    """
+    request = urllib.request.Request(url, method="GET")
+    request.add_header("User-Agent", _USER_AGENT)
+    try:
+        with urllib.request.urlopen(request, timeout=_PING_TIMEOUT, context=_SSL) as response:
+            response.read(1)
+            return 200 <= int(response.status) < 400
+    except urllib.error.HTTPError as exc:
+        return exc.code < 500
+    except Exception:
+        log.logger.debug("link host %s did not answer", url, exc_info=True)
+        return False
+
+
+def _gofile(archive: Path, payload: bytes) -> str:
+    """Upload to gofile.io and return its download page.
+
+    Two requests: the service hands out the upload host first, and the upload answers
+    with JSON rather than a bare URL. Both checks are explicit because the failure this
+    replaces was a host that answered 200 with something that was not a link.
+    """
+    request = urllib.request.Request(_GOFILE_SERVERS, method="GET")
+    request.add_header("User-Agent", _USER_AGENT)
+    try:
+        with urllib.request.urlopen(
+            request, timeout=_GOFILE_TIMEOUT, context=_SSL
+        ) as response:
+            directory = json.loads(response.read(_MAX_RESPONSE).decode("utf-8", "replace"))
+    except Exception as exc:
+        raise RelayError(f"gofile servers unreachable: {exc}") from exc
+
+    try:
+        server = directory["data"]["servers"][0]["name"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RelayError("gofile returned no upload server") from exc
+
+    body, boundary = _multipart({}, "file", archive.name, payload, _content_type(archive))
+    answer = _post(
+        _GOFILE_UPLOAD.format(server=server),
+        body,
+        boundary,
+        _upload_timeout(len(payload)),
+    )
+
+    try:
+        page = json.loads(answer.decode("utf-8", "replace"))["data"]["downloadPage"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RelayError("gofile returned no download page") from exc
+
+    if not isinstance(page, str) or not page.startswith(("http://", "https://")):
+        raise RelayError(f"gofile returned no url: {page!r}")
+    return page
+
+
 def _send_link(endpoint: str, archive: Path, caption: str) -> None:
     """Upload to an anonymous host, then post the URL to the webhook.
 
-    Two hops, two failure modes, and both have to be checked: the host answers with
-    the URL as plain text, and the webhook answers with a status code. A host that
-    returns an HTML error page with a 200 is the shape this guards against — the body
-    is checked for a scheme, not for "not empty".
+    The host is chosen by size and then checked by reachability, because an upload that
+    works proves nothing about a download that works. When catbox answers the upload
+    but its download name is reset at the TLS layer, the fallback takes the same file
+    and posts a link the reader can actually open.
+
+    Two hops, two failure modes, and both have to be checked: the host answers with the
+    URL as plain text, and the webhook answers with a status code. A host that returns
+    an HTML error page with a 200 is the shape this guards against — the body is checked
+    for a scheme, not for "not empty".
     """
     payload = _read(archive)
     host, fields = _link_host(len(payload))
+    url = ""
 
-    body, boundary = _multipart(
-        fields, "fileToUpload", archive.name, payload, _content_type(archive)
-    )
-    answer = _post(host, body, boundary, _upload_timeout(len(payload)))
+    if _reachable(_download_host(host)):
+        try:
+            body, boundary = _multipart(
+                fields, "fileToUpload", archive.name, payload, _content_type(archive)
+            )
+            answer = _post(host, body, boundary, _upload_timeout(len(payload)))
+            candidate = answer.decode("utf-8", "replace").strip()
+            if candidate.startswith(("https://", "http://")):
+                url = candidate
+        except Exception:
+            log.logger.debug("link host refused the upload; falling back", exc_info=True)
 
-    url = answer.decode("utf-8", "replace").strip()
-    if not url.startswith("https://") and not url.startswith("http://"):
-        raise RelayError(f"link host returned no url: {url[:120]!r}")
+    if not url:
+        log.logger.debug("link host unusable for this network; using the fallback")
+        url = _gofile(archive, payload)
 
     log.logger.debug("relay: hosted %s at %s", archive.name, url)
     _post_json(
