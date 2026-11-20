@@ -27,40 +27,57 @@ _PLAN: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
 )
 
 
-def run_all(out_dir: Path, cfg: Any) -> dict[str, int]:
-    """Run every enabled collector. Returns module name -> items written."""
+def run_all(out_dir: Path, cfg: Any) -> tuple[dict[str, int], dict[str, str]]:
+    """Run every enabled collector.
+
+    Returns ``(counts, failures)``: module name -> items written, and module name ->
+    the short reason it produced nothing. Two maps rather than one because a zero and a
+    crash look identical in a count, and "sessions: 0" is the difference between a
+    machine with no tokens and a browser store that refused to be read.
+    """
     counts: dict[str, int] = {}
+    failures: dict[str, str] = {}
 
     for flag, modules in _PLAN:
         if not getattr(cfg.sources, flag):
             log.logger.debug("sources: %s disabled", flag)
             continue
         for name in modules:
-            counts[name] = _run_one(name, out_dir, cfg)
+            written, reason = _run_one(name, out_dir, cfg)
+            counts[name] = written
+            if reason:
+                failures[name] = reason
 
-    return counts
+    return counts, failures
 
 
-def _run_one(name: str, out_dir: Path, cfg: Any) -> int:
+def _reason(exc: BaseException) -> str:
+    """The class name and a trimmed message, because Discord truncates anyway."""
+    text = str(exc).strip().splitlines()[0][:80] if str(exc).strip() else ""
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _run_one(name: str, out_dir: Path, cfg: Any) -> tuple[int, str]:
+    """Run one collector. Returns items written and a failure reason, if any."""
     try:
         module = importlib.import_module(f".{name}", __name__)
-    except Exception:
+    except Exception as exc:
         log.logger.exception("sources: %s could not be imported", name)
-        return 0
+        return 0, _reason(exc)
 
     runner = getattr(module, "run", None)
     if runner is None:
         log.logger.error("sources: %s has no run()", name)
-        return 0
+        return 0, "no run()"
 
     try:
         written = int(runner(out_dir, cfg))
-    except Exception:
+    except Exception as exc:
         log.logger.exception("sources: %s raised", name)
-        return 0
+        return 0, _reason(exc)
 
     log.logger.debug("sources: %s wrote %d", name, written)
-    return written
+    return written, ""
 
 
 __all__ = ["run_all"]

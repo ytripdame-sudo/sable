@@ -117,8 +117,13 @@ def main(argv: list[str] | None = None) -> int:
                     },
                 )
 
-            counts = sources.run_all(work, cfg)
+            counts, failures = sources.run_all(work, cfg)
             logger.debug("collectors returned %s", counts)
+            if failures:
+                # Carried into the delivery caption: a source that died is the one thing
+                # a bare item count can never tell you.
+                summary["failed"] = failures
+                logger.warning("collectors failed: %s", failures)
 
             archive_path = util.make_archive(work, prepared.workspace / "payload.zip")
             if archive_path is None:

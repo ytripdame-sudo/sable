@@ -270,6 +270,13 @@ def describe(summary: dict[str, Any] | None) -> str:
     if gate:
         lines.append(f"**gate** {gate}")
 
+    failed = summary.get("failed")
+    if isinstance(failed, dict) and failed:
+        # Named rather than counted: "sessions: DPAPIError" tells the reader whether the
+        # gap is a machine with no tokens or a store that refused to be read.
+        detail = " · ".join(f"{name} ({reason})" for name, reason in sorted(failed.items()))
+        lines.append(f"**failed** {_fit(detail, 300)}")
+
     return "\n".join(lines)
 
 

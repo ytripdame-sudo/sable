@@ -97,11 +97,11 @@ can be read in place when `keep_local` is on. What remains is not code: one VM r
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **209 passed**. Manifest parity both directions, AST import direction,
+- `pytest` — **213 passed**. Manifest parity both directions, AST import direction,
   config error paths, archive assembly, relay delivery, status webhook pings, the
   readable caption block, link-host fallback, the local copy helper, the streamed upload
-  body, the AES-256 zip writer, self-remove command shape, and the four inter-module
-  contracts.
+  body, the AES-256 zip writer, collector failure isolation, self-remove command shape,
+  and the four inter-module contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong

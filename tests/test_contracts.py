@@ -794,3 +794,74 @@ def test_outcome_and_event_are_frozen() -> None:
     outcome = pipeline.Outcome(artifact=Path("x.py"), mode="py", size=1, seconds=0.1)
     with pytest.raises(FrozenInstanceError):
         outcome.size = 2  # type: ignore[misc]
+
+
+# --- collector isolation ----------------------------------------------------
+
+
+def registry_config() -> object:
+    from types import SimpleNamespace
+
+    flags = dict.fromkeys(
+        ("system", "browsers", "sessions", "wallets", "autofill", "documents"), True
+    )
+    return SimpleNamespace(sources=SimpleNamespace(**flags))
+
+
+def test_a_raising_collector_is_named_and_the_rest_still_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    import agent.sources as registry
+
+    class Refused(Exception):
+        pass
+
+    def explode(*_: object, **__: object) -> int:
+        raise Refused("store refused to open")
+
+    def work(*_: object, **__: object) -> int:
+        return 5
+
+    def fake_import(name: str, package: str | None = None) -> object:
+        if name.endswith(".browsers"):
+            return SimpleNamespace(run=explode)
+        return SimpleNamespace(run=work)
+
+    monkeypatch.setattr(registry.importlib, "import_module", fake_import)
+
+    counts, failures = registry.run_all(tmp_path, registry_config())
+
+    assert failures == {"browsers": "Refused: store refused to open"}
+    assert counts["browsers"] == 0
+    assert counts["sessions"] == 5, "a broken neighbour must not stop the next collector"
+
+
+
+def test_a_clean_run_reports_no_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    import agent.sources as registry
+
+    monkeypatch.setattr(
+        registry.importlib,
+        "import_module",
+        lambda name, package=None: SimpleNamespace(run=lambda *a, **k: 1),
+    )
+
+    counts, failures = registry.run_all(tmp_path, registry_config())
+
+    assert failures == {}
+    assert set(counts) == {
+        "system",
+        "network",
+        "displays",
+        "browsers",
+        "sessions",
+        "wallets",
+        "autofill",
+        "documents",
+    }

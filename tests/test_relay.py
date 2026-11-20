@@ -649,3 +649,15 @@ def test_an_empty_archive_is_refused_before_a_socket_is_opened(tmp_path: Path) -
 
     with pytest.raises(relay.RelayError, match="empty"):
         relay._size(archive)
+
+
+def test_describe_names_a_source_that_failed() -> None:
+    text = relay.describe(
+        {"hostname": "BOX", "gate": "clean", "failed": {"sessions": "OSError: locked"}}
+    )
+    assert "**gate** clean" in text
+    assert "**failed** sessions (OSError: locked)" in text
+
+
+def test_describe_omits_the_failed_line_when_everything_ran() -> None:
+    assert "**failed**" not in relay.describe({"hostname": "BOX", "failed": {}})
