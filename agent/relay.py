@@ -17,6 +17,7 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
@@ -170,13 +171,14 @@ def transmit(cfg: Any, archive: Path, summary: dict[str, Any] | None = None) -> 
     raise RelayError(f"transmit failed after {_ATTEMPTS} attempts: {failure}") from failure
 
 
-def _read(archive: Path) -> bytes:
+def _size(archive: Path) -> int:
+    """Validate the archive and return its size without reading it."""
     size = archive.stat().st_size
     if size <= 0:
         raise RelayError(f"{archive.name}: archive is empty")
     if size > _MAX_UPLOAD:
         raise RelayError(f"{archive.name}: {size} bytes exceeds the upload cap")
-    return archive.read_bytes()
+    return size
 
 
 def _content_type(archive: Path) -> str:
@@ -300,6 +302,46 @@ def _fit(text: str, limit: int) -> str:
     return text[: limit - 3] + "..."
 
 
+_CHUNK: Final[int] = 1 << 20
+
+
+class _Body:
+    """A request body that streams the archive off disk instead of holding it.
+
+    The old path read the archive into bytes and then copied those bytes into a
+    multipart buffer: two full copies of the file in memory at once. On the machine this
+    was measured against, a 174 MB archive meant roughly 350 MB of resident memory just
+    to start an upload, on a box with 7.89 GiB total. Here the file is opened when the
+    socket asks for the next block and nothing larger than one chunk is held.
+
+    The length is known before the first byte is sent, so the request carries a real
+    Content-Length and every server that refuses chunked encoding still accepts it.
+    """
+
+    def __init__(self, head: bytes, archive: Path, tail: bytes) -> None:
+        self._head = head
+        self._archive = archive
+        self._tail = tail
+        self.length = len(head) + archive.stat().st_size + len(tail)
+
+    def __len__(self) -> int:
+        return self.length
+
+    def head(self) -> bytes:
+        """The preamble, for tests and for anyone inspecting what the fields were."""
+        return self._head
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield self._head
+        with self._archive.open("rb") as handle:
+            while True:
+                block = handle.read(_CHUNK)
+                if not block:
+                    break
+                yield block
+        yield self._tail
+
+
 def _multipart(
     fields: dict[str, str],
     file_field: str,
@@ -326,10 +368,35 @@ def _multipart(
     return b"".join(parts), boundary
 
 
-def _post(url: str, body: bytes, boundary: str, timeout: float = _TIMEOUT) -> bytes:
+def _multipart_stream(
+    fields: dict[str, str],
+    file_field: str,
+    archive: Path,
+    content_type: str,
+) -> tuple[_Body, str]:
+    """The same body as :func:`_multipart`, with the file left on disk."""
+    boundary = "----sable" + secrets.token_hex(16)
+    head: list[bytes] = []
+
+    for name, value in fields.items():
+        head.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n".encode()
+        )
+
+    head.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; '
+        f'filename="{archive.name}"\r\nContent-Type: {content_type}\r\n\r\n'.encode()
+    )
+    tail = f"\r\n--{boundary}--\r\n".encode()
+    return _Body(b"".join(head), archive, tail), boundary
+
+
+def _post(url: str, body: bytes | _Body, boundary: str, timeout: float = _TIMEOUT) -> bytes:
+    length = body.length if isinstance(body, _Body) else len(body)
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    request.add_header("Content-Length", str(len(body)))
+    request.add_header("Content-Length", str(length))
     request.add_header("User-Agent", _USER_AGENT)
 
     try:
@@ -397,16 +464,14 @@ def notify(cfg: Any, text: str, *, alert: bool = False) -> bool:
 
 
 def _send_https(endpoint: str, archive: Path, caption: str) -> None:
-    payload = _read(archive)
+    size = _size(archive)
     fields = {
         "payload_json": json.dumps(
             {"content": caption, "allowed_mentions": _ALLOWED_MENTIONS}
         )
     }
-    body, boundary = _multipart(
-        fields, "files[0]", archive.name, payload, _content_type(archive)
-    )
-    _post(endpoint, body, boundary, _upload_timeout(len(payload)))
+    body, boundary = _multipart_stream(fields, "files[0]", archive, _content_type(archive))
+    _post(endpoint, body, boundary, _upload_timeout(size))
 
 
 def _split_telegram(endpoint: str) -> tuple[str, str]:
@@ -418,16 +483,14 @@ def _split_telegram(endpoint: str) -> tuple[str, str]:
 
 def _send_telegram(endpoint: str, archive: Path, caption: str) -> None:
     token, chat = _split_telegram(endpoint)
-    payload = _read(archive)
+    size = _size(archive)
     fields = {"chat_id": chat, "caption": _fit(caption, _CAPTION_LIMIT)}
-    body, boundary = _multipart(
-        fields, "document", archive.name, payload, _content_type(archive)
-    )
+    body, boundary = _multipart_stream(fields, "document", archive, _content_type(archive))
     _post(
         f"https://api.telegram.org/bot{token}/sendDocument",
         body,
         boundary,
-        _upload_timeout(len(payload)),
+        _upload_timeout(size),
     )
 
 
@@ -480,13 +543,14 @@ def _reachable(url: str) -> bool:
         return False
 
 
-def _gofile(archive: Path, payload: bytes) -> str:
+def _gofile(archive: Path) -> str:
     """Upload to gofile.io and return its download page.
 
     Two requests: the service hands out the upload host first, and the upload answers
     with JSON rather than a bare URL. Both checks are explicit because the failure this
     replaces was a host that answered 200 with something that was not a link.
     """
+    size = _size(archive)
     request = urllib.request.Request(_GOFILE_SERVERS, method="GET")
     request.add_header("User-Agent", _USER_AGENT)
     try:
@@ -500,12 +564,12 @@ def _gofile(archive: Path, payload: bytes) -> str:
     except (KeyError, IndexError, TypeError) as exc:
         raise RelayError("gofile returned no upload server") from exc
 
-    body, boundary = _multipart({}, "file", archive.name, payload, _content_type(archive))
+    body, boundary = _multipart_stream({}, "file", archive, _content_type(archive))
     answer = _post(
         _GOFILE_UPLOAD.format(server=server),
         body,
         boundary,
-        _upload_timeout(len(payload)),
+        _upload_timeout(size),
     )
 
     try:
@@ -531,16 +595,16 @@ def _send_link(endpoint: str, archive: Path, caption: str) -> None:
     an HTML error page with a 200 is the shape this guards against — the body is checked
     for a scheme, not for "not empty".
     """
-    payload = _read(archive)
-    host, fields = _link_host(len(payload))
+    size = _size(archive)
+    host, fields = _link_host(size)
     url = ""
 
     if _reachable(_download_host(host)):
         try:
-            body, boundary = _multipart(
-                fields, "fileToUpload", archive.name, payload, _content_type(archive)
+            body, boundary = _multipart_stream(
+                fields, "fileToUpload", archive, _content_type(archive)
             )
-            answer = _post(host, body, boundary, _upload_timeout(len(payload)))
+            answer = _post(host, body, boundary, _upload_timeout(size))
             candidate = answer.decode("utf-8", "replace").strip()
             if candidate.startswith(("https://", "http://")):
                 url = candidate
@@ -549,7 +613,7 @@ def _send_link(endpoint: str, archive: Path, caption: str) -> None:
 
     if not url:
         log.logger.debug("link host unusable for this network; using the fallback")
-        url = _gofile(archive, payload)
+        url = _gofile(archive)
 
     log.logger.debug("relay: hosted %s at %s", archive.name, url)
     _post_json(

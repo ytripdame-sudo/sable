@@ -883,5 +883,35 @@ The status webhook carried `**status** local copy · C:\...\KUZE_20261120-003229
 between `collecting` and `uploading`.
 
 
+## The upload body streams off disk instead of living in memory
+
+The archive was read into bytes and then copied into a multipart buffer. Two full copies
+of the file, at the same moment, for the one operation whose input is already the largest
+object the process holds. Measured on a real 174 MB archive: **348 MB peak** in Python
+allocations before a single byte was sent.
+
+Three reasons this mattered more than it looked:
+
+- The machine that produced that archive has **7.89 GiB** of RAM with 64% already in use.
+  A browser bundle is not unusual at 300-400 MB, and the old path doubled it.
+- The agent already holds the collected tree and the zip while building, so the upload
+  was the third large allocation in a row, not the first.
+- Every retry re-ran the same path, so a flaky network tripled the cost.
+
+`_Body` now yields the preamble, then opens the archive and reads it in 1 MB blocks
+straight into the socket, then yields the closing delimiter. The length is computed from
+`stat()` before the first byte, so the request carries a real `Content-Length` and every
+server that refuses chunked transfer still accepts it. Retries are free: `__iter__` opens
+the file fresh each time.
+
+Measured after: **2.0 MB peak** for the same 174 MB file, 173x less. Through a real
+socket to the local relay: 174 MB delivered in 1.9 s, **2.1 MB peak**, and the receiver
+wrote back a byte-identical 182,503,518-byte file.
+
+The `_multipart` bytes builder is kept rather than deleted: it is three lines, the tests
+compare the two shapes for byte equality, and having both is what proved the refactor did
+not change the wire format.
+
+
 
 

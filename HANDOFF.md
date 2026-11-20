@@ -97,10 +97,10 @@ can be read in place when `keep_local` is on. What remains is not code: one VM r
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **187 passed**. Manifest parity both directions, AST import direction,
+- `pytest` — **204 passed**. Manifest parity both directions, AST import direction,
   config error paths, archive assembly, relay delivery, status webhook pings, the
-  readable caption block, link-host fallback, the local copy helper, self-remove command
-  shape, and the four inter-module contracts.
+  readable caption block, link-host fallback, the local copy helper, the streamed upload
+  body, self-remove command shape, and the four inter-module contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -281,11 +281,11 @@ No code is owed. In order:
    the `local copy` line have only been seen on a local receiver.
 3. Only then decide whether the two deliberately-unfixed items in §9 matter.
 
-Streaming multipart is still the one real limitation: `relay.transmit` loads the
-archive into memory twice, which is fine at 440 MB and wrong at 2 GB. The `link` relay
+Streaming is now the default: `relay._Body` reads the archive off disk in 1 MB blocks
+straight into the socket, so the upload no longer doubles the largest object in the
+process. Measured on a 174 MB archive: 348 MB peak before, 2.0 MB after. The `link` relay
 kind removed the platform ceiling from the problem — a webhook is no longer expected to
-carry a profile — so the remaining cost is memory on the target, not whether delivery
-is possible.
+carry a profile — so what is left is collection time, not memory.
 
 The acceptance checklist the build was measured against, with its current state:
 

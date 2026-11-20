@@ -217,9 +217,13 @@ def test_send_link_uploads_first_and_posts_the_url(
 
     calls: list[tuple[str, object]] = []
 
-    def fake_post(url: str, body: bytes, boundary: str, timeout: float = 0.0) -> bytes:
+    def fake_post(
+        url: str, body: relay._Body, boundary: str, timeout: float = 0.0
+    ) -> bytes:
         calls.append(("upload", url))
-        assert b"fileToUpload" in body
+        assert b"fileToUpload" in body.head()
+        # The file is left on disk and streamed; the body knows its own total length.
+        assert body.length > archive.stat().st_size
         return b"https://files.example/abc.zip"
 
     def fake_json(url: str, document: dict[str, str], timeout: float = 0.0) -> bytes:
@@ -351,13 +355,15 @@ def test_gofile_reads_the_two_step_answer(
     )
     urls: list[str] = []
 
-    def fake_post(url: str, body: bytes, boundary: str, timeout: float = 0.0) -> bytes:
+    def fake_post(
+        url: str, body: relay._Body, boundary: str, timeout: float = 0.0
+    ) -> bytes:
         urls.append(url)
-        assert b"filename=\"sable.zip\"" in body
+        assert b"filename=\"sable.zip\"" in body.head()
         return b'{"data": {"downloadPage": "https://gofile.io/d/abc"}}'
 
     monkeypatch.setattr(relay, "_post", fake_post)
-    assert relay._gofile(archive, payload) == "https://gofile.io/d/abc"
+    assert relay._gofile(archive) == "https://gofile.io/d/abc"
     assert urls == ["https://store1.gofile.io/contents/uploadfile"]
     assert seen[0].full_url == relay._GOFILE_SERVERS
 
@@ -592,3 +598,54 @@ def test_a_public_request_still_uses_the_default_opener(
         assert response.status == 204
 
     assert opened == ["proxied"]
+
+
+# --- streaming body ---------------------------------------------------------
+
+
+def test_the_streamed_body_is_the_same_bytes_as_the_buffered_one(tmp_path: Path) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04" + bytes(range(256)) * 40)
+
+    buffered, boundary = relay._multipart(
+        {"field": "value"}, "file", "sable.zip", archive.read_bytes(), "application/zip"
+    )
+    streamed, streamed_boundary = relay._multipart_stream(
+        {"field": "value"}, "file", archive, "application/zip"
+    )
+
+    # Same field order, same file part, same closing delimiter: only the boundary
+    # token differs, and it is random per call.
+    assert buffered.replace(boundary.encode(), b"BOUNDARY") == b"".join(
+        streamed
+    ).replace(streamed_boundary.encode(), b"BOUNDARY")
+
+
+def test_the_streamed_body_reports_its_total_length(tmp_path: Path) -> None:
+    archive = tmp_path / "sable.zip"
+    payload = b"PK\x03\x04" + b"z" * 5000
+    archive.write_bytes(payload)
+
+    body, _ = relay._multipart_stream({}, "file", archive, "application/zip")
+
+    assert len(body) == body.length
+    assert body.length == len(b"".join(body))
+    assert body.length > len(payload), "headers and closing delimiter are counted"
+
+
+def test_the_file_is_read_in_blocks_not_loaded_whole(tmp_path: Path) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"q" * (3 * relay._CHUNK + 17))
+    body, _ = relay._multipart_stream({}, "file", archive, "application/zip")
+
+    blocks = [block for block in body if len(block) == relay._CHUNK]
+
+    assert len(blocks) == 3, f"expected three full chunks, got {len(blocks)}"
+
+
+def test_an_empty_archive_is_refused_before_a_socket_is_opened(tmp_path: Path) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"")
+
+    with pytest.raises(relay.RelayError, match="empty"):
+        relay._size(archive)
