@@ -26,6 +26,7 @@ Sequence, and the reason for each step:
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
 import shutil
 import subprocess
@@ -57,6 +58,10 @@ _POLL_INTERVAL: Final[float] = 0.2
 _SCHTASKS_TIMEOUT: Final[float] = 30.0
 _CREATE_NO_WINDOW: Final[int] = 0x08000000
 _MAX_HELPER_BLOB: Final[int] = 1024 * 1024
+
+# Absolute, for the same reason ``util._schtasks`` is: a bare name is resolved off PATH,
+# and a task registered from a hijacked PATH entry runs somebody else's binary.
+_SYSTEM32: Final[Path] = Path(os.environ.get("SYSTEMROOT") or r"C:\Windows") / "System32"
 
 # schtasks refuses a /tr value longer than this. Measured on metal: a dev-mode
 # command line of 300 characters fails with "Value for '/tr' option cannot be more
@@ -195,9 +200,10 @@ def _command_line(workspace: Path) -> str:
 
 
 def _schtasks(arguments: list[str]) -> bool:
+    tool = _SYSTEM32 / "schtasks.exe"
     try:
         completed = subprocess.run(
-            ["schtasks", *arguments],
+            [str(tool), *arguments],
             capture_output=True,
             timeout=_SCHTASKS_TIMEOUT,
             creationflags=_CREATE_NO_WINDOW,

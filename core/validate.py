@@ -241,7 +241,7 @@ def _check_targets(cfg: RunConfig) -> list[Problem]:
     Reported under the endpoint rule with an indexed path, because the reader needs to
     know which row to fix.
     """
-    mirrors = getattr(cfg.relay, "targets", ()) or ()
+    mirrors = cfg.relay.targets
     problems: list[Problem] = []
     seen: set[tuple[str, str]] = {(str(cfg.relay.kind), cfg.relay.endpoint)}
 

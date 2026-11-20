@@ -171,8 +171,9 @@ class LabelledEdit(QWidget):
         start = self._edit.text().strip() or str(Path.home())
         chosen = QFileDialog.getExistingDirectory(self, self._label.text(), start)
         if chosen:
+            # set_text emits ``changed`` itself; a second emit here meant every picked
+            # folder re-validated the whole form twice.
             self.set_text(chosen)
-            self.changed.emit(chosen)
 
     def _repolish(self) -> None:
         # A dynamic property only changes appearance after a style re-polish; without

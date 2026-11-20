@@ -308,6 +308,18 @@ class MainWindow(QWidget):
             cfg, mode=mode, name=self._forge.name(), stub=self._forge.stub()
         )
 
+        # ``core.validate`` describes a config, and a config has no output folder. The
+        # build cannot run without one, so the gate says so here rather than letting the
+        # button light up and then fail on click.
+        if not str(self._tuning.values()["out_dir"]).strip():
+            problems.append(
+                validate_module.Problem(
+                    rule=validate_module.RULE_OUTPUT,
+                    path="output.dir",
+                    message="choose an output directory",
+                )
+            )
+
         for page in (self._relay, self._tuning, self._forge):
             page.show_problems(problems)
 
@@ -323,7 +335,9 @@ class MainWindow(QWidget):
     # --- run -----------------------------------------------------------------
 
     def _start(self) -> None:
-        if self._run.is_running():
+        # The worker reference is the authority, not the pill: a stop request flips the
+        # pill to "stopped" while the thread is still finishing a stage.
+        if self._worker is not None or self._run.is_running():
             return
 
         cfg = self._collect()
@@ -384,7 +398,13 @@ class MainWindow(QWidget):
     def closeEvent(self, event) -> None:
         if self._worker is not None:
             self._worker.cancel()
-            self._worker.wait(10_000)
+            if not self._worker.wait(10_000):
+                # A seal or a forge of a large artifact cannot be interrupted, and a
+                # QThread destroyed while it is still running takes the process down.
+                # Leaving the window open is the lesser defect.
+                self._run.set_stopped("finishing the current stage before closing")
+                event.ignore()
+                return
             self._worker = None
         super().closeEvent(event)
 

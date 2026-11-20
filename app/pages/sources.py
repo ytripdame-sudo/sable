@@ -34,7 +34,7 @@ _HINTS: Final[dict[str, str]] = {
     "sessions": "Discord tokens from the browser store and the desktop client, checked against the API.",
     "wallets": "Wallet directories, names and sizes. No key material is read.",
     "autofill": "Address and card rows from the Chromium autofill tables.",
-    "documents": "Recent-document lists from the user registry hives.",
+    "documents": "Names, sizes and dates from the usual user folders, plus the shell's recent-items list.",
 }
 
 _COLUMNS: Final[int] = 2

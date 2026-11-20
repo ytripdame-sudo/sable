@@ -227,6 +227,10 @@ def _write_exe(
         # shipping name.
         os.replace(staging, destination)
     except OSError as exc:
+        # A failed write leaves a full-size ``.part`` in the output folder. Nothing
+        # will ever look at it again, and at 4 GB of ballast it is the largest file
+        # the folder will hold.
+        _discard(staging)
         raise ForgeError(f"{destination}: cannot write ({exc.strerror})") from exc
 
     return destination
@@ -242,9 +246,18 @@ def _write_script(destination: Path, sealed: bytes, cfg: RunConfig) -> Path:
             handle.write(text)
         os.replace(staging, destination)
     except OSError as exc:
+        _discard(staging)
         raise ForgeError(f"{destination}: cannot write ({exc.strerror})") from exc
 
     return destination
+
+
+def _discard(path: Path) -> None:
+    """Remove a staging file. Cleanup that fails is not worth a second exception."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return
 
 
 _SCRIPT_TEMPLATE: Final[str] = '''#!/usr/bin/env python3

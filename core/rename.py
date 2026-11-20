@@ -128,6 +128,11 @@ def rename(path: Path, name: str | None = None, directory: Path | None = None) -
     ``name`` is sanitised; when it is None a name is generated from the file's own
     suffix. An existing destination is never overwritten — the move lands on the
     first free ``_2``, ``_3`` variant instead.
+
+    The move is ``os.rename`` and not ``os.replace``: on Windows the first refuses an
+    occupied name and the second silently discards the file that was there. Checking
+    ``exists()`` first and then replacing is a race with anything else writing to the
+    folder, and the loser is somebody's file.
     """
     if not path.is_file():
         raise RenameError(f"{path}: not a file")
@@ -138,16 +143,19 @@ def rename(path: Path, name: str | None = None, directory: Path | None = None) -
 
     if destination == path:
         return path
-    if destination.exists():
-        destination = _unique(destination)
 
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(path, destination)
-    except OSError as exc:
-        raise RenameError(f"{path} -> {destination}: {exc.strerror}") from exc
+    for _ in range(MAX_SUFFIX_ATTEMPTS + 1):
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(path, destination)
+        except FileExistsError:
+            destination = _unique(destination)
+            continue
+        except OSError as exc:
+            raise RenameError(f"{path} -> {destination}: {exc.strerror}") from exc
+        return destination
 
-    return destination
+    raise RenameError(f"{destination.name}: no free name after {MAX_SUFFIX_ATTEMPTS} tries")
 
 
 __all__ = [

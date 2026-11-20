@@ -99,14 +99,14 @@ on a timer. What remains is not code: one run on a host that has never seen the 
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **242 passed**. Manifest parity both directions, AST import direction,
-  config error paths, archive assembly, relay delivery, status webhook pings, the
-  readable caption block, link-host fallback, the local copy helper, the streamed upload
-  body, the AES-256 zip writer, collector failure isolation, the delivery queue (parking,
-  journalling, the cap, drain, abandon), persistence (staging, the Run key, hourly versus
-  daily timers, stale-timer removal, self-copy refusal, quote refusal), self-remove
-  command shape, permanent-versus-transient relay refusals, and the four inter-module
-  contracts.
+- `pytest` — **262 passed**. Manifest parity both directions, AST import direction,
+  config error paths, archive assembly, the streamed archive writer, relay delivery, status
+  webhook pings, the readable caption block, link-host fallback, the local copy helper, the
+  streamed upload body, the AES-256 zip writer, collector failure isolation, the delivery
+  queue (parking, journalling, the cap, drain, abandon, a hostile journal), persistence
+  (staging, the Run key, hourly versus daily timers, stale-timer removal, self-copy refusal,
+  quote refusal, the unregistered copy removed), self-remove command shape,
+  permanent-versus-transient relay refusals, and the four inter-module contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -126,10 +126,21 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
 - **Widgets and worker, 35 checks.** Including a real build through `QThread`: ten
   progress events, one artifact on disk, a rejected config carrying `relay.endpoint`,
   a pre-cancelled worker stopping at validate.
-- **Whole window, 29 checks.** Frameless shell, five pages, one click producing a
-  compiling artifact, the gate opening and closing on five conditions, theme switch
-  re-applying 6794 bytes of QSS and surviving a restart, every `#selector` present in
-  the live tree, both themes defining identical object sets.
+- **Whole window, 44 checks.** Frameless shell, five pages, one click producing a
+  compiling artifact, the gate opening and closing on eight conditions (including an
+  empty output folder and every source off), a stop request that keeps the run counted as
+  running, theme switch re-applying the stylesheet and surviving a restart, every
+  `#selector` present in the live tree, both themes defining identical object sets.
+- **V1 audit pass.** Fourteen defects fixed across `agent/`, `core/` and `app/`, each
+  with a test or a harness check where one can exist: the archive writer no longer holds
+  two copies of a gigabyte member in memory, a cancel after forge no longer leaves a
+  full-size working file, a failed forge or seal no longer leaves a `.part`, the rename
+  refuses an occupied name with `os.rename` instead of clobbering it with `os.replace`,
+  both `schtasks` call sites use the absolute system binary, a persistence stage that
+  cannot register its Run value is removed again, the queue tolerates a journal a hostile
+  file can write, the Stop button exists (it raised `AttributeError`), closing the window
+  mid-build no longer destroys a running `QThread`, and an empty output folder closes the
+  gate instead of failing on click.
 - **Chromium end to end** against a real `CryptProtectData` DPAPI blob: v10 AES-GCM,
   cookie prefix strip, bookmarks, history, downloads.
 - **Profile bundle, 21 checks.** Cache directories dropped, lean files kept, bulk
@@ -199,7 +210,7 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   straight into the stack, so a 660px-tall window squeezed a 40px edit into 18px and the
   validation message landed on top of the field below it. Rendered at 1280x820 and at
   1000x660 in both themes: no clipping, no overlap, the scrollbar appears instead.
-  `sable_window.py` still passes **38/38** and `sable_ui.py` **35/35** against the new
+  `sable_window.py` still passes **44/44** and `sable_ui.py` **35/35** against the new
   widget tree, including the rule that every `#selector` in `dark.qss` exists on screen
   and that `light.qss` defines the same set.
 - **Fallbacks, ordered.** A relay config now carries up to four mirrors behind the primary,
@@ -252,7 +263,7 @@ registry.
 | `sable_bundle.py` | Profile folder bundle, skip and bulk tiers | 21/21 |
 | `sable_sessions.py` | Browser and Discord desktop token stores | 14/14 |
 | `sable_ui.py` | Widgets, rail, worker thread, real build | 35/35 |
-| `sable_window.py` | Whole window, gate, theme switch | 29/29 |
+| `sable_window.py` | Whole window, gate, theme switch | 44/44 |
 | `shots.py` | One PNG per page per theme, plus the 1000x660 case and an error state | — |
 | `rust_interop.py` | Rust crate against Python, both formats, 7-Zip, a forged artifact | 21/21 |
 | `sable_fixture.py` | Chromium fixtures with real DPAPI | — |
@@ -393,7 +404,7 @@ each source returns int, 0 when its artifact source absent   proven in the sourc
 missing mutex raises ConfigError; unknown key raises it      proven by tests/test_config.py
 no wmic / tasklist / getmac / reg / pywin32 anywhere         proven by grep, zero hits
 import-direction test passes                                 proven by AST in tests/test_imports.py
-UI builds; empty endpoint blocks Run; theme switch re-applies proven by the window harness, 38 checks
+UI builds; empty endpoint blocks Run; theme switch re-applies proven by the window harness, 44 checks
 no bare excepts                                              proven by ruff E722, zero hits
 ```
 

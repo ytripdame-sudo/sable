@@ -801,6 +801,29 @@ def test_cancellation_stops_between_stages(tmp_path: Path) -> None:
 
 
 @needs_crypto
+def test_a_cancelled_build_does_not_leave_a_working_file(tmp_path: Path) -> None:
+    """A build stopped after forging is removed, not left under a random name.
+
+    The working name is random, so nothing ever revisits it: a cancel that leaks one
+    leaves a full-size artifact in the output folder that the next run cannot see.
+    """
+    calls = {"n": 0}
+
+    def cancel() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 4
+
+    out = tmp_path / "out"
+    with pytest.raises(pipeline.PipelineCancelled) as caught:
+        pipeline.run(
+            config(), root=ROOT, out_dir=out, mode=forge.OUTPUT_PY, cancel=cancel
+        )
+
+    assert caught.value.stage == pipeline.STAGE_RENAME
+    assert list(out.glob("sable-build-*")) == [], "the working artifact was left behind"
+
+
+@needs_crypto
 def test_a_failed_rename_keeps_the_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

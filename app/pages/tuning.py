@@ -63,7 +63,12 @@ class TuningPage(QWidget):
         super().__init__(parent)
 
         # --- identity --------------------------------------------------------
-        self._mutex = LabelledEdit("Mutex name", text=_DEFAULT_MUTEX)
+        # The mutex is a preference and is restored; the seal key is not, because a key
+        # remembered between launches is a key on disk nobody asked to keep.
+        remembered_mutex = str(QSettings().value(_MUTEX_KEY, "") or "").strip()
+        self._mutex = LabelledEdit(
+            "Mutex name", text=remembered_mutex or _DEFAULT_MUTEX
+        )
         self._seal_key = LabelledEdit(
             "Seal key", placeholder=f"at least {_MIN_KEY_LENGTH} characters"
         )
@@ -247,6 +252,8 @@ class TuningPage(QWidget):
                 self._seal_key.set_problem(problem.message)
             elif problem.path == "ballast_mb":
                 self._ballast.setToolTip(problem.message)
+            elif problem.path == "output.dir":
+                self._output.set_problem(problem.message)
 
     # --- internals -----------------------------------------------------------
 

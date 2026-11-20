@@ -73,6 +73,9 @@ class RunPage(QWidget):
 
         self._panel = ProgressPanel()
         self._artifact: Path | None = None
+        # A stop is requested from the GUI thread but takes effect at the next stage
+        # boundary, so the run is still live for a while after the pill says stopped.
+        self._stopping = False
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -110,11 +113,19 @@ class RunPage(QWidget):
         self._repaint(self._gate)
 
     def is_running(self) -> bool:
-        return self._panel.is_busy()
+        return self._stopping or self._panel.is_busy()
+
+    def set_stopped(self, message: str = "stopped") -> None:
+        """Show a requested stop. The worker is still finishing its current stage."""
+        self._stopping = True
+        self._stop.setEnabled(False)
+        self._run.setEnabled(False)
+        self._panel.set_stopped(message)
 
     # --- state ---------------------------------------------------------------
 
     def begin(self) -> None:
+        self._stopping = False
         self._artifact = None
         self._open.setEnabled(False)
         self._run.setEnabled(False)
@@ -127,6 +138,7 @@ class RunPage(QWidget):
         self._panel.set_running(f"{stage}: {message}")
 
     def on_built(self, outcome) -> None:
+        self._stopping = False
         self._artifact = Path(outcome.artifact)
         self._stop.setEnabled(False)
         self._open.setEnabled(True)
@@ -134,6 +146,7 @@ class RunPage(QWidget):
         self._panel.set_done(f"{self._artifact.name}   {size:,} bytes   {outcome.seconds:.2f} s")
 
     def on_failed(self, stage: str, message: str, artifact: object) -> None:
+        self._stopping = False
         self._stop.setEnabled(False)
         if isinstance(artifact, Path):
             # The build succeeded and only the name failed. Say so, and offer the file.
@@ -146,6 +159,7 @@ class RunPage(QWidget):
         self._panel.set_failed(f"{stage}: {message}")
 
     def on_rejected(self, problems) -> None:
+        self._stopping = False
         self._stop.setEnabled(False)
         if problems:
             self._panel.set_failed("; ".join(str(problem) for problem in problems[:4]))
@@ -153,6 +167,7 @@ class RunPage(QWidget):
             self._panel.set_failed("the form was rejected")
 
     def reset(self) -> None:
+        self._stopping = False
         self._artifact = None
         self._open.setEnabled(False)
         self._stop.setEnabled(False)

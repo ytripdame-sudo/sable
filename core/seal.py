@@ -22,6 +22,7 @@ would invert the dependency the project spends a test enforcing.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
 from pathlib import Path
@@ -89,15 +90,19 @@ def seal_file(source: Path, destination: Path, key_text: str) -> Path:
         raise SealError(f"{source}: cannot read ({exc.strerror})") from exc
 
     blob = seal(plaintext, key_text)
+    staging = destination.with_name(destination.name + ".part")
 
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        staging = destination.with_name(destination.name + ".part")
         staging.write_bytes(blob)
         # Same directory, so the replace is atomic: a half-written seal is never
         # visible under the final name.
         os.replace(staging, destination)
     except OSError as exc:
+        # A failed write leaves the staging file behind, and at payload sizes that is
+        # tens of megabytes nothing will ever look at again.
+        with contextlib.suppress(OSError):
+            staging.unlink(missing_ok=True)
         raise SealError(f"{destination}: cannot write ({exc.strerror})") from exc
 
     return destination

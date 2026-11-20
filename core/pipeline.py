@@ -113,6 +113,14 @@ def _check_cancel(cancel: Cancel | None, stage: str) -> None:
         raise PipelineCancelled(stage, "cancelled")
 
 
+def _discard(path: Path) -> None:
+    """Remove a working file. A failed cleanup is not worth a second exception."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
 def _target_name(name: str, mode: str) -> str:
     """Sanitise a caller-supplied name and give it the mode's extension."""
     expected = _EXTENSIONS[mode]
@@ -192,10 +200,19 @@ def run(
     try:
         size = built.stat().st_size
     except OSError as exc:
+        _discard(built)
         raise PipelineError(STAGE_FORGE, f"{built}: cannot stat ({exc.strerror})") from exc
     emit(STAGE_FORGE, f"container {size} bytes", 0.85)
 
-    _check_cancel(cancel, STAGE_RENAME)
+    try:
+        _check_cancel(cancel, STAGE_RENAME)
+    except PipelineCancelled:
+        # A cancelled build must not leave a finished artifact under a working name:
+        # the next run would never touch it, and the folder would slowly fill with
+        # random 20 MB files nobody asked for.
+        _discard(built)
+        raise
+
     emit(STAGE_RENAME, "naming the artifact", 0.9)
     try:
         artifact = rename.rename(
