@@ -70,6 +70,9 @@ _MAX_ADAPTERS: Final[int] = 64
 _MAX_PROCESSES: Final[int] = 4096
 _MAX_SMBIOS_STRUCTURES: Final[int] = 4096
 _MAX_ACPI_TABLE_BYTES: Final[int] = 4096
+_ACPI_HEADER_BYTES: Final[int] = 0x24
+_ACPI_OEMID: Final[int] = 0x0A
+_ACPI_OEM_TABLE_ID: Final[int] = 0x10
 
 _INVALID_HANDLE: Final[int | None] = ctypes.c_void_p(-1).value
 
@@ -508,6 +511,25 @@ def smbios_type1() -> dict[str, str] | None:
     return None
 
 
+def _acpi_header_strings(raw: bytes) -> list[str]:
+    """OEMID and OEM Table ID out of one ACPI header.
+
+    The header is 36 bytes: signature, length, revision, checksum, then OEMID at
+    0x0A (6 bytes) and the OEM table id at 0x10 (8). Firmware puts its own name in
+    those two fields, and it is the first place a hypervisor shows up — reading them
+    at the wrong offset finds the revision integer instead, which is why the layout
+    lives here as constants rather than as literals at the call site.
+    """
+    if len(raw) < _ACPI_HEADER_BYTES:
+        return []
+    found: list[str] = []
+    for start, length in ((_ACPI_OEMID, 6), (_ACPI_OEM_TABLE_ID, 8)):
+        text = raw[start:start + length].decode("ascii", "replace").strip("\x00 ")
+        if text:
+            found.append(text)
+    return found
+
+
 def _printable_runs(raw: bytes, minimum: int = 4, limit: int = 256) -> list[str]:
     runs: list[str] = []
     current: list[int] = []
@@ -537,12 +559,9 @@ def acpi_vendor_strings() -> tuple[str, ...]:
     found: list[str] = []
     for signature in enum_firmware_tables(b"ACPI"):
         raw = firmware_table(b"ACPI", int.from_bytes(signature, "little"))
-        if raw is None or len(raw) < 0x24:
+        if raw is None:
             continue
-        for start, length in ((0x10, 6), (0x18, 8)):
-            text = raw[start:start + length].decode("ascii", "replace").strip("\x00 ")
-            if text:
-                found.append(text)
+        found.extend(_acpi_header_strings(raw))
         found.extend(_printable_runs(raw[:_MAX_ACPI_TABLE_BYTES]))
     # Deduplicate while keeping the order stable so logs read the same twice.
     seen: set[str] = set()

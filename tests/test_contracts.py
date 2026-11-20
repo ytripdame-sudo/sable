@@ -29,6 +29,7 @@ import importlib.util
 import io
 import json
 import os
+import sqlite3
 import sys
 import zipfile
 from dataclasses import FrozenInstanceError
@@ -934,3 +935,73 @@ def test_a_clean_run_reports_no_failures(
         "autofill",
         "documents",
     }
+
+
+# --- gecko without a key4.db --------------------------------------------------
+
+
+def firefox_profile(profile: Path) -> None:
+    """A profile with a cookie jar and a places database, and no login store."""
+    profile.mkdir(parents=True)
+
+    cookies = sqlite3.connect(str(profile / "cookies.sqlite"))
+    cookies.execute(
+        "CREATE TABLE moz_cookies (name TEXT, value TEXT, host TEXT, path TEXT, "
+        "expiry INTEGER, lastAccessed INTEGER, isSecure INTEGER, isHttpOnly INTEGER, "
+        "sameSite INTEGER)"
+    )
+    cookies.execute(
+        "INSERT INTO moz_cookies VALUES (?,?,?,?,?,?,?,?,?)",
+        ("sid", "abc123", ".example.com", "/", 1900000000, 1700000000000000, 1, 1, 0),
+    )
+    cookies.commit()
+    cookies.close()
+
+    places = sqlite3.connect(str(profile / "places.sqlite"))
+    places.execute(
+        "CREATE TABLE moz_places (url TEXT, title TEXT, visit_count INTEGER, "
+        "typed INTEGER, last_visit_date INTEGER)"
+    )
+    places.execute(
+        "INSERT INTO moz_places VALUES (?,?,?,?,?)",
+        ("https://example.com/login", "Example", 12, 3, 1700000000000000),
+    )
+    places.commit()
+    places.close()
+
+
+def test_firefox_collects_cookies_and_history_without_a_key(tmp_path: Path) -> None:
+    # A profile with a master password has no readable logins and a perfectly readable
+    # cookie jar. Returning early on the failed unwrap threw both databases away, which
+    # made a Firefox-only machine look empty.
+    from agent.sources.browsers import gecko
+
+    profile = tmp_path / "Profiles" / "abc.default"
+    firefox_profile(profile)
+    target = tmp_path / "out"
+
+    assert gecko.run_profile(profile, target) == 2
+
+    cookies = json.loads((target / "cookies.json").read_text(encoding="utf-8"))
+    assert cookies[0]["host"] == ".example.com"
+    assert cookies[0]["value"] == "abc123"
+    assert cookies[0]["secure"] is True
+    assert cookies[0]["expires"].startswith("2030-")
+
+    history = json.loads((target / "history.json").read_text(encoding="utf-8"))
+    assert history[0]["url"] == "https://example.com/login"
+    assert history[0]["visits"] == 12
+    assert history[0]["last_visit"].startswith("2023-")
+
+    assert not (target / "passwords.json").exists()
+
+
+def test_firefox_with_nothing_to_read_writes_nothing(tmp_path: Path) -> None:
+    from agent.sources.browsers import gecko
+
+    profile = tmp_path / "empty"
+    profile.mkdir()
+    target = tmp_path / "out"
+
+    assert gecko.run_profile(profile, target) == 0
+    assert not target.exists() or not any(target.iterdir())

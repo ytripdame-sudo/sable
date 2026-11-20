@@ -155,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
 
             counts, failures = sources.run_all(work, cfg)
             logger.debug("collectors returned %s", counts)
+            # Carried into the delivery caption: the count per source is what tells the
+            # reader which collector produced nothing, and a bare total cannot.
+            summary["counts"] = dict(counts)
             if failures:
                 # Carried into the delivery caption: a source that died is the one thing
                 # a bare item count can never tell you.

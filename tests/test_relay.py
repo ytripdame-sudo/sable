@@ -8,6 +8,7 @@ repository that logged success on a 401 because it never read the status code.
 from __future__ import annotations
 
 import json
+import ssl
 import sys
 import urllib.error
 from pathlib import Path
@@ -951,3 +952,67 @@ def test_transmit_still_means_the_primary_and_ignores_mirrors(
     relay.transmit(cfg, archive)
 
     assert touched == ["https://primary.test/hook"]
+
+
+# --- certificates and what a run actually collected --------------------------
+
+
+def test_a_certificate_failure_is_retried_without_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contexts: list[object] = []
+
+    def fake_urlopen(
+        request: object, timeout: float | None = None, context: object = None
+    ) -> Response:
+        contexts.append(context)
+        if len(contexts) == 1:
+            raise urllib.error.URLError(ssl.SSLCertVerificationError("verify failed"))
+        return Response(204)
+
+    monkeypatch.setattr(relay.urllib.request, "urlopen", fake_urlopen)
+    request = relay.urllib.request.Request("https://discord.com/api/webhooks/x")
+
+    with relay._open(request, 5.0) as response:
+        assert response.status == 204
+
+    assert contexts == [relay._SSL, relay._SSL_RELAXED]
+
+
+def test_a_dead_network_is_not_downgraded_to_an_unverified_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Only a chain problem earns the second attempt. A refused connection retried
+    # without verification would spend an extra timeout and log a downgrade that
+    # never happened.
+    attempts: list[int] = []
+
+    def fake_urlopen(*_: object, **__: object) -> Response:
+        attempts.append(1)
+        raise urllib.error.URLError(OSError("connection refused"))
+
+    monkeypatch.setattr(relay.urllib.request, "urlopen", fake_urlopen)
+    request = relay.urllib.request.Request("https://discord.com/api/webhooks/x")
+
+    with pytest.raises(urllib.error.URLError):
+        relay._open(request, 5.0)
+
+    assert len(attempts) == 1
+
+
+def test_describe_names_what_each_source_produced() -> None:
+    text = relay.describe(
+        {"hostname": "BOX", "counts": {"browsers": 41, "wallets": 3, "sessions": 0}}
+    )
+    assert "**items** 44 · browsers 41 · wallets 3" in text
+    assert "sessions" not in text
+
+
+def test_describe_without_counts_prints_no_items_line() -> None:
+    assert "**items**" not in relay.describe({"hostname": "BOX"})
+    assert "**items**" not in relay.describe({"hostname": "BOX", "counts": {}})
+
+
+def test_items_are_ordered_by_what_produced_most() -> None:
+    text = relay.describe({"counts": {"documents": 2, "browsers": 900, "system": 30}})
+    assert text.index("browsers") < text.index("system") < text.index("documents")

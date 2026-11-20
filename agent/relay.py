@@ -96,8 +96,15 @@ _USER_AGENT: Final[str] = (
 )
 
 _SSL: Final[ssl.SSLContext] = ssl.create_default_context()
-_SSL.check_hostname = False
-_SSL.verify_mode = ssl.CERT_NONE
+
+# Verification is the default and this is the fallback. A network that terminates TLS
+# with its own root — a filtering proxy, a captive portal, some endpoint scanners —
+# fails verification on every host, and an artifact that refuses to deliver because a
+# middlebox rewrote the chain is an artifact that collected for nothing. The strict
+# context is tried first; only a certificate failure reaches the second attempt.
+_SSL_RELAXED: Final[ssl.SSLContext] = ssl.create_default_context()
+_SSL_RELAXED.check_hostname = False
+_SSL_RELAXED.verify_mode = ssl.CERT_NONE
 
 # Same TLS settings, no proxy. A proxy is right for the public internet and always
 # wrong for a LAN address: the destination is one hop away, and a proxy that cannot
@@ -105,6 +112,10 @@ _SSL.verify_mode = ssl.CERT_NONE
 _LOCAL_OPENER: Final[urllib.request.OpenerDirector] = urllib.request.build_opener(
     urllib.request.ProxyHandler({}),
     urllib.request.HTTPSHandler(context=_SSL),
+)
+_LOCAL_OPENER_RELAXED: Final[urllib.request.OpenerDirector] = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    urllib.request.HTTPSHandler(context=_SSL_RELAXED),
 )
 
 
@@ -120,17 +131,47 @@ def _is_local(host: str) -> bool:
         return False
 
 
+def _certificate_failure(exc: BaseException) -> bool:
+    """Whether an open failed because the chain, not the network, was the problem.
+
+    ``urlopen`` wraps an ``ssl`` error in ``URLError`` for https, so the reason has to
+    be unwrapped before the type means anything.
+    """
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    reason = getattr(exc, "reason", None)
+    return isinstance(reason, ssl.SSLCertVerificationError)
+
+
+def _attempt(request: urllib.request.Request, timeout: float, *, relaxed: bool) -> Any:
+    if _is_local(urlsplit(request.full_url).hostname or ""):
+        opener = _LOCAL_OPENER_RELAXED if relaxed else _LOCAL_OPENER
+        return opener.open(request, timeout=timeout)
+    context = _SSL_RELAXED if relaxed else _SSL
+    return urllib.request.urlopen(request, timeout=timeout, context=context)
+
+
 def _open(request: urllib.request.Request, timeout: float) -> Any:
-    """Open ``request``, bypassing the proxy when the destination is on this network.
+    """Open ``request``, verifying the certificate and bypassing a LAN proxy.
 
     Observed live: a VPN client exported ``http_proxy`` pointing at its own loopback
     port, ``no_proxy`` covered ``localhost`` and ``127.0.0.1``, and a POST to
     ``192.168.1.151`` went through the proxy and came back 502. Loopback was already
     exempt by the environment; the LAN address was not.
+
+    A certificate that does not verify is retried once without verification, and the
+    downgrade is logged. Verification is never the thing that costs the delivery, and
+    it is never silently abandoned either: an operator reading the log can see which
+    hosts answered unverified.
     """
-    if _is_local(urlsplit(request.full_url).hostname or ""):
-        return _LOCAL_OPENER.open(request, timeout=timeout)
-    return urllib.request.urlopen(request, timeout=timeout, context=_SSL)
+    try:
+        return _attempt(request, timeout, relaxed=False)
+    except (urllib.error.URLError, ssl.SSLError) as exc:
+        if not _certificate_failure(exc):
+            raise
+        host = urlsplit(request.full_url).hostname or request.full_url
+        log.logger.warning("relay: %s did not verify; sending without verification", host)
+        return _attempt(request, timeout, relaxed=True)
 
 
 
@@ -336,6 +377,32 @@ def human_bytes(size: int) -> str:
     return f"{size} bytes"
 
 
+def _items_line(summary: dict[str, Any]) -> str:
+    """One line naming what each source produced, largest first.
+
+    A run that collected 8,700 items is not a result anybody can act on. The point of
+    this line is the gap: "sessions 0" next to "browsers 41" says where to look, and a
+    source that is missing from the list is a source that did not run. Zero sources are
+    omitted, because a line of zeroes is noise, but the total is carried when anything
+    at all came back.
+    """
+    counts = summary.get("counts")
+    if not isinstance(counts, dict) or not counts:
+        return ""
+
+    pairs: list[tuple[str, int]] = []
+    for name, value in counts.items():
+        if isinstance(value, int) and value > 0:
+            pairs.append((str(name), value))
+    if not pairs:
+        return ""
+
+    pairs.sort(key=lambda pair: (-pair[1], pair[0]))
+    total = sum(value for _, value in pairs)
+    detail = " · ".join(f"{name} {value:,}" for name, value in pairs)
+    return _fit(f"**items** {total:,} · {detail}", 300)
+
+
 def describe(summary: dict[str, Any] | None) -> str:
     """The machine block that goes out with the archive.
 
@@ -402,6 +469,10 @@ def describe(summary: dict[str, Any] | None) -> str:
         hardware.append(f"up {uptime}")
     if hardware:
         lines.append("**box** " + " · ".join(hardware))
+
+    items = _items_line(summary)
+    if items:
+        lines.append(items)
 
     gate = summary.get("gate")
     if gate:

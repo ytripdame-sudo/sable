@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent import util  # noqa: E402
+from agent import util, winapi  # noqa: E402
 
 
 class Spawned:
@@ -555,3 +555,30 @@ def test_persistence_refuses_a_path_with_a_quote_in_it(
     record_run_key(monkeypatch)
     record_tasks(monkeypatch)
     assert util.install_persistence(Path('C:\\odd"name.exe'), 0) is None
+
+
+# --- firmware headers -------------------------------------------------------
+
+
+def acpi_header(oem_id: bytes, oem_table: bytes) -> bytes:
+    """A 36-byte ACPI header with the two OEM fields filled and nothing else real."""
+    header = bytearray(b"SSDT" + bytes(32))
+    header[0x0A:0x10] = oem_id.ljust(6, b"\x00")
+    header[0x10:0x18] = oem_table.ljust(8, b"\x00")
+    return bytes(header)
+
+
+def test_acpi_reads_the_oem_fields_at_their_real_offsets() -> None:
+    # OEMID is at 0x0A and the table id at 0x10. Reading at 0x10 and 0x18 finds the
+    # table id and then the revision integer, so a VMware guest reports neither
+    # "VMWARE" nor its own table name and the gate loses a check it already paid for.
+    found = winapi._acpi_header_strings(acpi_header(b"VMWARE", b"VMWTTBL1"))
+    assert found == ["VMWARE", "VMWTTBL1"]
+
+
+def test_acpi_ignores_a_table_shorter_than_its_header() -> None:
+    assert winapi._acpi_header_strings(b"SSDT" + bytes(8)) == []
+
+
+def test_acpi_drops_fields_that_are_only_padding() -> None:
+    assert winapi._acpi_header_strings(acpi_header(b"\x00" * 6, b"   \x00\x00\x00")) == []

@@ -42,12 +42,35 @@ from pathlib import Path
 from typing import Any, Final, NamedTuple
 
 from ... import log, util
+from . import chromium
 
 _PASSWORD_CHECK: Final[bytes] = b"password-check"
 
 _MAX_LOGINS: Final[int] = 1000
+_MAX_COOKIES: Final[int] = 3000
+_MAX_HISTORY: Final[int] = 2000
 _MAX_NSS_ROWS: Final[int] = 32
 _MAX_DER_DEPTH: Final[int] = 8
+
+_WANTED_COOKIES: Final[tuple[str, ...]] = (
+    "host",
+    "name",
+    "value",
+    "path",
+    "expiry",
+    "isSecure",
+    "isHttpOnly",
+    "sameSite",
+    "lastAccessed",
+)
+
+_WANTED_HISTORY: Final[tuple[str, ...]] = (
+    "url",
+    "title",
+    "visit_count",
+    "typed",
+    "last_visit_date",
+)
 # NSS ships 10000 rounds, but the cap is what a hostile or future file is allowed
 # to cost us, not a claim about the current default. 200k is roughly 100 ms of
 # PBKDF2-SHA256 per candidate, which keeps a corrupt key4.db from becoming a stall.
@@ -662,22 +685,118 @@ def _logins(profile: Path, target: Path, key: bytes, scheme_name: str) -> int:
     return len(entries)
 
 
+# --- cookies and history ------------------------------------------------------
+
+
+def _copy_database(profile: Path, scratch: Path, name: str) -> Path | None:
+    source = profile / name
+    if not source.is_file():
+        return None
+    copy = scratch / name
+    if not util.copy_with_sidecars(source, copy):
+        return None
+    return copy
+
+
+def _cookies(profile: Path, scratch: Path, target: Path) -> int:
+    """``moz_cookies`` as JSON.
+
+    Firefox does not encrypt the value column: the cookie jar is protected by the
+    profile directory being inside the user's own APPDATA, nothing more. That is why
+    this needs no key4 material and is still worth collecting — a session cookie from
+    the live profile is the same thing a browser extension would hand over.
+    """
+    copy = _copy_database(profile, scratch, "cookies.sqlite")
+    if copy is None:
+        return 0
+
+    rows = chromium.read_table(
+        copy, "moz_cookies", _WANTED_COOKIES, _MAX_COOKIES, "lastAccessed DESC"
+    )
+    entries: list[dict[str, Any]] = []
+
+    for row in rows:
+        host = chromium.text_value(row["host"])
+        if not host:
+            continue
+        expiry = chromium.int_value(row["expiry"])
+        entries.append(
+            {
+                "host": host,
+                "name": chromium.text_value(row["name"]),
+                "value": chromium.text_value(row["value"]),
+                "path": chromium.text_value(row["path"]),
+                "expires": util.unix_time(expiry) if expiry else None,
+                "secure": bool(chromium.int_value(row["isSecure"])),
+                "http_only": bool(chromium.int_value(row["isHttpOnly"])),
+                "samesite": chromium.int_value(row["sameSite"]),
+            }
+        )
+
+    if not entries:
+        return 0
+    if not util.write_json(target / "cookies.json", entries):
+        return 0
+    return len(entries)
+
+
+def _history(profile: Path, scratch: Path, target: Path) -> int:
+    """``moz_places`` as JSON. ``last_visit_date`` is microseconds since the epoch."""
+    copy = _copy_database(profile, scratch, "places.sqlite")
+    if copy is None:
+        return 0
+
+    rows = chromium.read_table(
+        copy, "moz_places", _WANTED_HISTORY, _MAX_HISTORY, "last_visit_date DESC"
+    )
+    entries: list[dict[str, Any]] = []
+
+    for row in rows:
+        url = chromium.text_value(row["url"])
+        if not url:
+            continue
+        visited = chromium.int_value(row["last_visit_date"])
+        entries.append(
+            {
+                "url": url,
+                "title": chromium.text_value(row["title"]),
+                "visits": chromium.int_value(row["visit_count"]),
+                "typed": chromium.int_value(row["typed"]),
+                "last_visit": util.unix_time(visited // 1_000_000) if visited else None,
+            }
+        )
+
+    if not entries:
+        return 0
+    if not util.write_json(target / "history.json", entries):
+        return 0
+    return len(entries)
+
+
 def run_profile(profile: Path, target: Path) -> int:
-    """Collect one Firefox profile's logins. Returns the number written."""
+    """Collect one Firefox profile's logins, cookies and history.
+
+    Logins are one artifact among three, not the whole collector: a profile with a
+    master password set still has a readable cookie jar and a readable places
+    database, and returning early on the failed unwrap threw both away.
+    """
     if not profile.is_dir():
         return 0
-    if not (profile / "logins.json").is_file():
-        return 0
+
+    written = 0
 
     with util.temp_workspace("sable-gecko-") as scratch:
-        unlocked = _profile_key(profile, scratch)
-        if unlocked is None:
-            log.logger.debug("gecko: %s has no usable key4.db", profile.name)
-            return 0
-        key, scheme_name = unlocked
-        written = _logins(profile, target, key, scheme_name)
+        written += _cookies(profile, scratch, target)
+        written += _history(profile, scratch, target)
+        if (profile / "logins.json").is_file():
+            unlocked = _profile_key(profile, scratch)
+            if unlocked is None:
+                log.logger.debug("gecko: %s has no usable key4.db", profile.name)
+            else:
+                key, scheme_name = unlocked
+                written += _logins(profile, target, key, scheme_name)
 
-    log.logger.debug("gecko: %s wrote %d (%s)", profile.name, written, scheme_name)
+    log.logger.debug("gecko: %s wrote %d", profile.name, written)
     return written
 
 

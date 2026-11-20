@@ -1256,6 +1256,59 @@ Two smaller truths were fixed in passing: the mutex preference is restored on la
 written on every keystroke and never read), and the Documents source hint no longer claims
 to read registry hives it does not touch.
 
+## The second pass - what the first one walked past
+
+Same bar as the audit: a defect is something demonstrable, and a change that is only a
+preference does not get made to a tagged tree.
+
+The ACPI header was read at the wrong offsets. An ACPI table begins with a 36-byte header:
+signature, length, revision, checksum, OEMID at 0x0A (six bytes), OEM table id at 0x10
+(eight), then the revision integer at 0x18. The parser read six bytes at 0x10 and eight at
+0x18, so it collected the table id as if it were the vendor and the OEM revision plus the
+creator id as if it were the table name. VMware and QEMU put their names in 0x0A, which is
+why the printable-run sweep over the first four kilobytes was the only reason the check
+ever fired. The offsets are named constants now, in one helper, with a test that builds a
+header and reads the two fields back.
+
+TLS was off and is now a fallback. `verify_mode = CERT_NONE` with `check_hostname = False`
+was set on the single context every request used, so an archive full of session tokens
+crossed the network with nothing checking who was on the other end. The reason it was set
+that way is real - a filtering proxy or a captive portal that re-signs everything fails
+verification on every host, and an artifact that cannot deliver because of a middlebox has
+collected for nothing - so the shape is now: verify, and if and only if the failure is a
+certificate failure, retry once without verification and log the host and the downgrade.
+A refused connection is not a certificate failure and is not retried twice. `HTTPError` is a
+`URLError` subclass, so the handler checks the reason before deciding which one it has.
+
+Firefox collects cookies and history. `run_profile` returned zero when `logins.json` was
+absent or `key4.db` would not unlock. That case is not rare: it is exactly what a profile
+with a master password looks like, and it is what a profile with no saved passwords looks
+like. Both databases beside it - `cookies.sqlite`, whose value column Firefox does not
+encrypt, and `places.sqlite` - are readable without any key material, and a Firefox-only
+machine was producing nothing from either. Logins are now one artifact among three, and the
+key is only derived when there is a login store to open.
+
+Chromium's `History` was copied twice. History and downloads read the same SQLite file and
+each stage copied it into its own scratch name first, so the largest read in the collector
+was paid for twice to reach a second table that shares every page with the first. One copy,
+two reads. `Local State` is charged against the bundle budget, which it was not: it was
+copied outside the accounting and could push a bundle past its ceiling by its own size.
+
+The delivery caption now names what each source produced, largest first, zeros omitted. The
+old line was a total, and a total cannot tell you that browsers produced forty-one items and
+sessions produced none - which is the one fact that decides whether a result is worth
+opening. The line is bounded, and a missing source is simply absent from it.
+
+`_harness/sable_launcher.py` generates its import block by parsing `agent/` for every
+top-level import instead of typing eight of them. The old list was a second, hand-maintained
+copy of the payload's dependency set, and it had already fallen behind: `ipaddress`, which
+`relay.py` imports at module scope, was not on it. The frozen bundle happened to carry it
+anyway through `urllib`, which is luck and not a guarantee. All 31 external modules now
+resolve inside the frozen interpreter before the harness declares the launcher usable, and
+a new import in `agent/` is covered the next time it runs without anybody remembering to
+say so.
+
+
 
 
 

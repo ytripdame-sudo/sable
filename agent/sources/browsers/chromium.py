@@ -481,10 +481,11 @@ def bundle_profile(profile: Path, target: Path) -> int:
     # ``Local State`` lives beside the profile, not inside it, and it is the file the
     # whole key chain starts at: without it the copied databases are ciphertext.
     state = profile.parent / "Local State"
-    if state.is_file():
+    if state.is_file() and budget > 0:
         count, size = _bundle_one(state, target / "Local State", budget)
         copied += count
         written += size
+        budget -= size
 
     log.logger.debug(
         "chromium: %s bundled %d files, %d bytes", profile.name, copied, written
@@ -576,15 +577,7 @@ def _cookies(profile: Path, scratch: Path, target: Path, keys: Keys) -> int:
     return len(entries)
 
 
-def _history(profile: Path, scratch: Path, target: Path) -> int:
-    source = profile / "History"
-    if not source.is_file():
-        return 0
-    copy = copy_database(source, scratch)
-    if copy is None:
-        return 0
-
-    rows = read_table(copy, "urls", _WANTED_HISTORY, _MAX_HISTORY, "last_visit_time DESC")
+def _write_history(rows: list[dict[str, Any]], target: Path) -> int:
     entries: list[dict[str, Any]] = []
 
     for row in rows:
@@ -608,15 +601,7 @@ def _history(profile: Path, scratch: Path, target: Path) -> int:
     return len(entries)
 
 
-def _downloads(profile: Path, scratch: Path, target: Path) -> int:
-    source = profile / "History"
-    if not source.is_file():
-        return 0
-    copy = copy_database(source, scratch)
-    if copy is None:
-        return 0
-
-    rows = read_table(copy, "downloads", _WANTED_DOWNLOADS, _MAX_DOWNLOADS, "start_time DESC")
+def _write_downloads(rows: list[dict[str, Any]], target: Path) -> int:
     entries: list[dict[str, Any]] = []
 
     for row in rows:
@@ -638,6 +623,31 @@ def _downloads(profile: Path, scratch: Path, target: Path) -> int:
     if not util.write_json(target / "downloads.json", entries):
         return 0
     return len(entries)
+
+
+def _history(profile: Path, scratch: Path, target: Path) -> int:
+    """History and downloads from one copy of ``History``.
+
+    Both tables live in the same SQLite file. Copying it twice doubled the largest
+    read in the whole collector — a long-lived profile's History is hundreds of
+    megabytes — for a second table that shares every one of those pages.
+    """
+    source = profile / "History"
+    if not source.is_file():
+        return 0
+    copy = copy_database(source, scratch)
+    if copy is None:
+        return 0
+
+    written = _write_history(
+        read_table(copy, "urls", _WANTED_HISTORY, _MAX_HISTORY, "last_visit_time DESC"),
+        target,
+    )
+    written += _write_downloads(
+        read_table(copy, "downloads", _WANTED_DOWNLOADS, _MAX_DOWNLOADS, "start_time DESC"),
+        target,
+    )
+    return written
 
 
 def _walk_bookmarks(
@@ -714,7 +724,6 @@ def run_profile(profile: Path, target: Path) -> int:
         written += _passwords(profile, scratch, target, keys)
         written += _cookies(profile, scratch, target, keys)
         written += _history(profile, scratch, target)
-        written += _downloads(profile, scratch, target)
         written += _bookmarks(profile, target)
 
     # One item, however many files it carries: the count is what the collector

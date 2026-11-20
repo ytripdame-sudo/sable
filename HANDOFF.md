@@ -99,14 +99,16 @@ on a timer. What remains is not code: one run on a host that has never seen the 
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **262 passed**. Manifest parity both directions, AST import direction,
+- `pytest` - **272 passed**. Manifest parity both directions, AST import direction,
   config error paths, archive assembly, the streamed archive writer, relay delivery, status
-  webhook pings, the readable caption block, link-host fallback, the local copy helper, the
-  streamed upload body, the AES-256 zip writer, collector failure isolation, the delivery
+  webhook pings, the readable caption block and its per-source item line, link-host
+  fallback, the local copy helper, the streamed upload body, the AES-256 zip writer,
+  certificate-first TLS with a logged downgrade, collector failure isolation, the delivery
   queue (parking, journalling, the cap, drain, abandon, a hostile journal), persistence
   (staging, the Run key, hourly versus daily timers, stale-timer removal, self-copy refusal,
   quote refusal, the unregistered copy removed), self-remove command shape,
-  permanent-versus-transient relay refusals, and the four inter-module contracts.
+  permanent-versus-transient relay refusals, the ACPI header offsets, Firefox cookies and
+  history without a key, and the four inter-module contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -117,9 +119,12 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   footer magic and offset, the loader's own trailer and footer parsers reading back
   what the forge wrote, two artifacts sharing one launcher and not each other's keys,
   ballast offset and size, script output parsing and its mutex guard, eight refusals.
-- **Launcher, 37 checks.** `tools/dist/sable-launcher.exe` opens two artifacts sealed
+- **Launcher, 40 checks.** `tools/dist/sable-launcher.exe` opens two artifacts sealed
   with different keys, boots each, and imports the payload out of the decrypted
-  archive. A bare launcher with no trailer exits 1 instead of hanging.
+  archive. A bare launcher with no trailer exits 1 instead of hanging. The import block
+  is generated from `agent/`'s own import statements, so all 31 external modules the
+  payload needs are proven present in the frozen bundle rather than a hand-typed list
+  of eight.
 - **Validate and pipeline, 58 checks.** Six rules, never raises, blocking subset,
   progress monotonic across six stages, cancellation between stages, a failed rename
   that keeps the artifact.
@@ -141,6 +146,15 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   file can write, the Stop button exists (it raised `AttributeError`), closing the window
   mid-build no longer destroys a running `QThread`, and an empty output folder closes the
   gate instead of failing on click.
+- **Second pass, seven more.** Each has a test: the ACPI header fields are read at
+  0x0A and 0x10 rather than 0x10 and 0x18, where the second read landed on the revision
+  integer; TLS is verified first and downgraded only on a certificate failure, with the
+  downgrade logged; Firefox collects cookies and history even when the login store will
+  not unlock, which is the normal case with a master password; the two Chromium tables
+  in `History` share one copy of the file instead of two; the caption carries a
+  per-source item line so a collector that produced nothing is visible; `Local State`
+  is charged against the bundle budget; and `vboxservice` without its extension, which
+  could never match a lowercased image name, is gone from the gate's process list.
 - **Chromium end to end** against a real `CryptProtectData` DPAPI blob: v10 AES-GCM,
   cookie prefix strip, bookmarks, history, downloads.
 - **Profile bundle, 21 checks.** Cache directories dropped, lean files kept, bulk
@@ -177,7 +191,7 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
 - **Arguments reach the agent.** `loader.boot()` used to call `module.main([])`, so every
   re-exec started a normal collection. After the one-line fix, `--abe-unwrap` pointed at a
   folder with no source blob returns 3 instead of harvesting, and the retry task's flag
-  arrives. The frozen stub was rebuilt and re-passed **37/37** launcher checks.
+  arrives. The frozen stub was rebuilt and re-passed **40/40** launcher checks.
 - **Persistence, live, on a normal account.** A build with `persist=True, persist_hours=1`
   copied itself to `%LOCALAPPDATA%\Programs\WinSvcHost\winsvchost.exe`, wrote the
   `HKCU\...\Run` value `WinSvcHost`, registered `WinSvcHostTimer` hourly, and delivered.
@@ -258,7 +272,7 @@ registry.
 |---|---|---|
 | `sable_validate.py` | Six rules plus pipeline stages | 58/58 |
 | `sable_forge.py` | Forge payload, trailer, container, seal, refusals | 45/45 |
-| `sable_launcher.py` | Frozen launcher booting two artifacts | 37/37 |
+| `sable_launcher.py` | Frozen launcher booting two artifacts | 40/40 |
 | `sable_gecko.py` | Both gecko layouts | 22/22 |
 | `sable_bundle.py` | Profile folder bundle, skip and bulk tiers | 21/21 |
 | `sable_sessions.py` | Browser and Discord desktop token stores | 14/14 |

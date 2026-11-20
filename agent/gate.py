@@ -38,7 +38,6 @@ _HYPERVISOR_OUIS: Final[frozenset[str]] = frozenset(
 _HYPERVISOR_PROCESSES: Final[tuple[str, ...]] = (
     "vmtoolsd.exe",
     "vboxservice.exe",
-    "vboxservice",
     "qemu-ga.exe",
     "xenservice.exe",
 )
