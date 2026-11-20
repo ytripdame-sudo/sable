@@ -660,5 +660,43 @@ that way, and the recognition rule in this module is the files a directory conta
 not its name. Excluding it would mean adding a name rule that contradicts the one
 stated at the top of the file, to save a few megabytes.
 
+## The Discord token has two homes and only one was being walked
+
+`sessions` read `Local Storage/leveldb` out of browser profiles and stopped there. That
+covers Discord used on the web. It does not cover the Discord desktop client, which is
+Electron and keeps the identical layout in its own application data directory — a
+machine where Discord has only ever been installed and never opened in a browser had
+no token found at all, which is the common case.
+
+The fix is a second list of stores, `_DESKTOP`, and one generator, `_targets`, that
+yields browser profiles and desktop clients as the same shape: a label, a profile
+name, a directory to read keys from, and a LevelDB directory to scan.
+`chromium.profile_keys` already checks `profile / "Local State"` before
+`profile.parent / "Local State"`, so handing it an Electron app directory works with no
+change to the key code: the app directory *is* the profile, and `Local State` sits
+beside `Local Storage` inside it.
+
+`discord`, `discordcanary`, `discordptb`, `discorddevelopment`, `Lightcord`, and both
+the roaming and the local install location are listed, each in the two spellings the
+installers use. Windows resolves `APPDATA\discord` and `APPDATA\Discord` to one folder,
+so `_targets` claims each resolved path once and the second sighting is dropped rather
+than scanned twice for the same tokens.
+
+Verified against the real machine: eight browser stores and one desktop store, where
+the previous version saw eight and skipped the desktop one.
+
+## Instagram, Snapchat and Roblox are cookies, not tokens
+
+These have no session store of their own on Windows:
+
+- **Roblox** is `.ROBLOSECURITY`, an HTTP-only cookie in the browser's cookie database.
+- **Instagram** and **Snapchat** are the same: cookies, on the web, which is the only
+  desktop form either has. There is no Windows app whose storage could be walked.
+
+So they are already covered by `_cookies`, which reads every row rather than a filtered
+list and keeps `http_only` as a field. No separate collector is owed, and writing one
+that guessed at an app-specific path would be inventing a location that does not exist
+on the target.
+
 
 

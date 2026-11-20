@@ -127,6 +127,9 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
 - **Profile bundle, 21 checks.** Cache directories dropped, lean files kept, bulk
   copied only inside the budget, `Local State` lifted beside the profile, an oversized
   file refused, an empty profile not raising.
+- **Session tokens, 14 checks.** A browser store and a desktop client store, each with
+  its own DPAPI-wrapped key and its own AES-GCM row, plus an unsealed token and a
+  directory spelled two ways resolving to one store.
 - **autofill / sessions / wallets / documents** 25/25 on synthetic fixtures.
 - **Gecko, both generations.** Legacy PBKDF2-SHA1 → 3DES and Firefox 144
   PBES2 → PBKDF2-SHA256 → AES-256-CBC, 22/22 on hand-built `key4.db` fixtures.
@@ -175,6 +178,7 @@ registry.
 | `sable_launcher.py` | Frozen launcher booting two artifacts | 37/37 |
 | `sable_gecko.py` | Both gecko layouts | 22/22 |
 | `sable_bundle.py` | Profile folder bundle, skip and bulk tiers | 21/21 |
+| `sable_sessions.py` | Browser and Discord desktop token stores | 14/14 |
 | `sable_ui.py` | Widgets, rail, worker thread, real build | 35/35 |
 | `sable_window.py` | Whole window, gate, theme switch | 29/29 |
 | `sable_fixture.py` | Chromium fixtures with real DPAPI | — |
