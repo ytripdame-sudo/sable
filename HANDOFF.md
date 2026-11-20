@@ -98,12 +98,13 @@ on a timer. What remains is not code: one run on a host that has never seen the 
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **225 passed**. Manifest parity both directions, AST import direction,
+- `pytest` — **236 passed**. Manifest parity both directions, AST import direction,
   config error paths, archive assembly, relay delivery, status webhook pings, the
   readable caption block, link-host fallback, the local copy helper, the streamed upload
   body, the AES-256 zip writer, collector failure isolation, the delivery queue (parking,
-  journalling, the cap, drain, abandon), self-remove command shape, and the four
-  inter-module contracts.
+  journalling, the cap, drain, abandon), persistence (staging, the Run key, hourly versus
+  daily timers, stale-timer removal, self-copy refusal, quote refusal), self-remove
+  command shape, and the four inter-module contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -164,6 +165,15 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   re-exec started a normal collection. After the one-line fix, `--abe-unwrap` pointed at a
   folder with no source blob returns 3 instead of harvesting, and the retry task's flag
   arrives. The frozen stub was rebuilt and re-passed **37/37** launcher checks.
+- **Persistence, live, on a normal account.** A build with `persist=True, persist_hours=1`
+  copied itself to `%LOCALAPPDATA%\Programs\WinSvcHost\winsvchost.exe`, wrote the
+  `HKCU\...\Run` value `WinSvcHost`, registered `WinSvcHostTimer` hourly, and delivered.
+  Running the staged copy delivered a second archive and did not copy itself onto itself.
+  `schtasks /run /tn WinSvcHostTimer` — the action Windows takes on the timer — delivered
+  a third, with the receiver's timestamp moving and the task reporting `Last Result: 0`.
+  The first attempt used `schtasks /sc onlogon` and returned **Access is denied**, which is
+  why the Run key is the logon mechanism; that failure is recorded in `DECISIONS.md`.
+  Task, Run value and folder were all removed afterwards.
 
 ---
 
@@ -303,7 +313,8 @@ members through a `link` relay; the archive was pulled back from the host and op
 ## 10. Next
 
 The delivery path is closed: queue, retry, encryption, streaming, Discord, local copy.
-What is left, in order:
+The lifecycle is closed too: one run, self-remove, or stay and come back on logon or a
+timer. What is left, in order:
 
 1. A host that has never seen the artifact. The operator's own Defender run passed, but his
    machine had history; a throwaway VM is the only way to see a cloud with no memory of the

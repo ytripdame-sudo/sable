@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from core.schema import (  # noqa: E402
     MAX_BALLAST_MB,
+    MAX_PERSIST_HOURS,
     SCHEMA_VERSION,
     ConfigError,
     RelayConfig,
@@ -221,3 +222,39 @@ def test_error_mentions_both_parts() -> None:
         from_dict(document)
     message = str(caught.value)
     assert "mutex" in message
+
+
+# --- persistence ------------------------------------------------------------
+
+
+def test_persistence_is_off_unless_asked_for() -> None:
+    cfg = from_dict(minimal())
+    assert cfg.persist is False
+    assert cfg.persist_hours == 0, "a config written before this field meant a single run"
+
+
+def test_persistence_survives_a_round_trip() -> None:
+    document = minimal()
+    document["persist"] = True
+    document["persist_hours"] = 6
+
+    cfg = from_dict(document)
+    assert cfg.persist is True and cfg.persist_hours == 6
+    assert to_dict(cfg)["persist"] is True
+    assert to_dict(cfg)["persist_hours"] == 6
+
+
+def test_persistence_hours_are_bounded_and_name_the_field() -> None:
+    document = minimal()
+    document["persist_hours"] = MAX_PERSIST_HOURS + 1
+    with pytest.raises(ConfigError) as caught:
+        from_dict(document)
+    assert caught.value.path == "persist_hours"
+
+
+def test_persistence_must_be_a_bool() -> None:
+    document = minimal()
+    document["persist"] = "yes"
+    with pytest.raises(ConfigError) as caught:
+        from_dict(document)
+    assert caught.value.path == "persist"

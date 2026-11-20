@@ -1001,5 +1001,38 @@ timer — delivered it, cleared the queue, deleted its own task and exited 0, wi
 collection and one file on the receiving end, not two.
 
 
+## Staying on the machine is a setting, not a default
+
+A run is one run. Reboot and the machine is clean again, because the artifact removed
+itself and nothing was left behind. That is the right default — a tool that quietly stays
+is a different product — so persistence is opt-in, off unless the build asks for it.
+
+Two mechanisms, because the obvious one does not work without rights nobody has:
+
+- **Logon** is a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, written
+  with `RegSetValueExW` through the existing `advapi32` handle. `schtasks /sc onlogon` was
+  tried first and answered **Access is denied** on an ordinary account; the Run key is
+  user-writable, needs no elevation, and is the mechanism the setting was always going to
+  end up using.
+- **A timer** is a scheduled task, `WinSvcHostTimer`, hourly for 1–23 hours and daily for
+  24. Tasks at this level need no elevation — the delivery queue's 15-minute task already
+  proved that.
+
+The image is copied to `%LOCALAPPDATA%\Programs\WinSvcHost\winsvchost.exe` and
+length-checked before anything is registered, so a half-written copy is never the thing a
+Run key points at. Launching from that path again is detected and the copy skipped, which
+is what makes logon loops safe: the installed copy does not fight itself for its own file.
+
+`persist` and `self_remove` compose instead of conflicting. The original can still delete
+itself at the end of the run, because the staged copy is the one that survives — stage,
+run, remove is the intended order, and no special case is needed to get it.
+
+Proven end to end on a normal account: first run staged the image, wrote the Run value and
+registered the timer; the staged copy ran again and delivered a second archive;
+`schtasks /run` on the timer delivered a third and the receiving folder's timestamp moved.
+All three cleaned up afterwards — task, Run value and folder — and the machine is back to
+what it was.
+
+
 
 

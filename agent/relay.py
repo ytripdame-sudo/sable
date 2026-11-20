@@ -299,6 +299,9 @@ def describe(summary: dict[str, Any] | None) -> str:
     if gate:
         lines.append(f"**gate** {gate}")
 
+    if summary.get("persist"):
+        lines.append("**persist** installed")
+
     failed = summary.get("failed")
     if isinstance(failed, dict) and failed:
         # Named rather than counted: "sessions: DPAPIError" tells the reader whether the

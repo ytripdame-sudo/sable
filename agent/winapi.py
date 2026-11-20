@@ -43,6 +43,7 @@ ERROR_NO_DATA: Final[int] = 232
 ERROR_MORE_DATA: Final[int] = 234
 
 KEY_READ: Final[int] = 0x20019
+KEY_SET_VALUE: Final[int] = 0x0002
 HKEY_LOCAL_MACHINE: Final[int] = 0x80000002
 HKEY_CURRENT_USER: Final[int] = 0x80000001
 
@@ -253,6 +254,19 @@ def _declare() -> None:
 
     _advapi32.RegCloseKey.argtypes = [wintypes.HKEY]
     _advapi32.RegCloseKey.restype = wintypes.LONG
+
+    _advapi32.RegSetValueExW.argtypes = [
+        wintypes.HKEY,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+    ]
+    _advapi32.RegSetValueExW.restype = wintypes.LONG
+
+    _advapi32.RegDeleteValueW.argtypes = [wintypes.HKEY, wintypes.LPCWSTR]
+    _advapi32.RegDeleteValueW.restype = wintypes.LONG
 
     _iphlpapi.GetAdaptersAddresses.argtypes = [
         wintypes.ULONG,
@@ -599,6 +613,65 @@ def registry_value(root: int, subkey: str, name: str) -> str | int | bytes | Non
     return raw
 
 
+def registry_set_string(root: int, subkey: str, name: str, data: str) -> bool:
+    """Write one REG_SZ value. Creates nothing: the key must already exist.
+
+    The key this is used for — the user's own Run key — always does. Creating it instead
+    would mean hardening a path that never runs, and a failed open is a clean False.
+    """
+    if not _WINDOWS:
+        return False
+
+    handle = wintypes.HKEY()
+    status = int(
+        _advapi32.RegOpenKeyExW(
+            wintypes.HKEY(root), subkey, 0, KEY_SET_VALUE, ctypes.byref(handle)
+        )
+    )
+    if status != ERROR_SUCCESS:
+        log.logger.debug("RegOpenKeyExW(set) %s -> %d", subkey, status)
+        return False
+
+    try:
+        # The terminating NUL is part of the byte count, which is why it is added rather
+        # than assumed: a value written one byte short reads back truncated.
+        size = (len(data) + 1) * ctypes.sizeof(ctypes.c_wchar)
+        status = int(
+            _advapi32.RegSetValueExW(handle, name, 0, REG_SZ, data, size)
+        )
+        if status != ERROR_SUCCESS:
+            log.logger.debug("RegSetValueExW %s\\%s -> %d", subkey, name, status)
+            return False
+    finally:
+        _advapi32.RegCloseKey(handle)
+
+    return True
+
+
+def registry_delete_value(root: int, subkey: str, name: str) -> bool:
+    """Remove one value. A value that was never there is a False, not an error."""
+    if not _WINDOWS:
+        return False
+
+    handle = wintypes.HKEY()
+    status = int(
+        _advapi32.RegOpenKeyExW(
+            wintypes.HKEY(root), subkey, 0, KEY_SET_VALUE, ctypes.byref(handle)
+        )
+    )
+    if status != ERROR_SUCCESS:
+        return False
+
+    try:
+        status = int(_advapi32.RegDeleteValueW(handle, name))
+    finally:
+        _advapi32.RegCloseKey(handle)
+
+    if status != ERROR_SUCCESS:
+        log.logger.debug("RegDeleteValueW %s\\%s -> %d", subkey, name, status)
+    return status == ERROR_SUCCESS
+
+
 # --- adapters -----------------------------------------------------------------
 
 
@@ -884,6 +957,7 @@ def crypt_unprotect(blob: bytes) -> bytes | None:
 __all__ = [
     "HKEY_CURRENT_USER",
     "HKEY_LOCAL_MACHINE",
+    "KEY_SET_VALUE",
     "PAGE_EXECUTE_READWRITE",
     "PAGE_READWRITE",
     "AdapterInfo",
@@ -905,7 +979,9 @@ __all__ = [
     "native_system_info",
     "proc_address",
     "process_names",
+    "registry_delete_value",
     "registry_key_exists",
+    "registry_set_string",
     "registry_value",
     "smbios_type1",
     "uptime_ms",

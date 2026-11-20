@@ -50,6 +50,8 @@ def config_from(
     ping: str = "",
     mention: str = "@here",
     keep_local: bool = False,
+    persist: bool = False,
+    persist_hours: int = 0,
 ) -> RunConfig:
     """Assemble a ``RunConfig`` from raw form values.
 
@@ -75,6 +77,8 @@ def config_from(
         self_remove=self_remove,
         ballast_mb=ballast_mb,
         keep_local=keep_local,
+        persist=persist,
+        persist_hours=persist_hours,
     )
 
 

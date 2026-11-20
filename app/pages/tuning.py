@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.schema import MAX_BALLAST_MB
+from core.schema import MAX_BALLAST_MB, MAX_PERSIST_HOURS
 
 from ..widgets.field import LabelledEdit
 
@@ -97,6 +97,26 @@ class TuningPage(QWidget):
         self._keep_local_note.setObjectName("hint")
         self._keep_local_note.setWordWrap(True)
 
+        self._persist = QCheckBox("Stay on the machine and run again")
+        self._persist.setObjectName("persist")
+        self._persist_note = QLabel(
+            "Copies the artifact into LocalAppData and registers a logon task, so the "
+            "machine produces another result after a reboot instead of exactly one. "
+            "The copy is a file that stays put; leave this off for a clean run."
+        )
+        self._persist_note.setObjectName("hint")
+        self._persist_note.setWordWrap(True)
+
+        self._persist_hours = QSpinBox()
+        self._persist_hours.setObjectName("persistHours")
+        self._persist_hours.setRange(0, MAX_PERSIST_HOURS)
+        self._persist_hours.setSingleStep(1)
+        self._persist_hours.setSuffix(" h")
+        self._persist_hours.setSpecialValueText("on logon only")
+        self._persist_hours.setValue(0)
+        self._persist_hours.setEnabled(False)
+        self._persist.toggled.connect(self._persist_hours.setEnabled)
+
         self._ballast = QSpinBox()
         self._ballast.setObjectName("ballast")
         self._ballast.setRange(0, MAX_BALLAST_MB)
@@ -130,6 +150,9 @@ class TuningPage(QWidget):
         column.addWidget(self._self_remove_note)
         column.addWidget(self._keep_local)
         column.addWidget(self._keep_local_note)
+        column.addWidget(self._persist)
+        column.addWidget(self._persist_note)
+        column.addWidget(self._persist_hours)
         column.addWidget(self._output)
         column.addStretch(1)
 
@@ -144,6 +167,8 @@ class TuningPage(QWidget):
             "seal_key": self._seal_key.text(),
             "self_remove": self._self_remove.isChecked(),
             "keep_local": self._keep_local.isChecked(),
+            "persist": self._persist.isChecked(),
+            "persist_hours": int(self._persist_hours.value()),
             "ballast_mb": int(self._ballast.value()),
             "out_dir": self._output.text().strip(),
         }
@@ -153,6 +178,8 @@ class TuningPage(QWidget):
         self._seal_key.set_text("")
         self._self_remove.setChecked(False)
         self._keep_local.setChecked(False)
+        self._persist.setChecked(False)
+        self._persist_hours.setValue(0)
         self._ballast.setValue(0)
         self._mutex.clear_problem()
         self._seal_key.clear_problem()

