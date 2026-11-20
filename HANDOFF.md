@@ -97,9 +97,9 @@ code: one VM run.
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **162 passed**. Manifest parity both directions, AST import direction,
-  config error paths, archive assembly, relay delivery, and the four inter-module
-  contracts.
+- `pytest` — **167 passed**. Manifest parity both directions, AST import direction,
+  config error paths, archive assembly, relay delivery, self-remove command shape, and
+  the four inter-module contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -252,15 +252,16 @@ three phases did — is gone, and the payload now ships `agent/` byte for byte.
 3DES-CBC has no MAC so a corrupt gecko row decrypts to garbage rather than being
 skipped.
 
-**Live runs performed, VM run not.** Three artifacts were built, sealed, and executed
-on a real machine and delivered to a real webhook. That found three faults no fixture
-could reach — the schema registration order, the pre-1980 zip timestamp, and the
-missing User-Agent — all fixed, all with a regression test. What a throwaway VM still
-adds is a host that has never seen the artifact: Defender's verdict, behaviour on a
-non-development profile, and `self_remove`.
+**Live runs performed, VM run not.** Six artifacts were built, sealed, and executed on a
+real machine and delivered to a real webhook. That found five faults no fixture could
+reach — the schema registration order, the pre-1980 zip timestamp, the missing
+User-Agent, and two in self-remove — all fixed, all with a regression test. What a
+throwaway VM still adds is a host that has never seen the artifact: Defender's verdict,
+behaviour on a non-development profile, and a non-admin token.
 
 **Measured, not estimated.** A full run on the development machine: 8,740 items,
-**440 MB** archive, 138 s wall clock. A 300 MB upload to the expiring host: 134 s.
+**440 MB** archive, 138 s wall clock. A 300 MB upload to the expiring host: 134 s. A
+sealed artifact removes itself and leaves nothing behind: verified.
 
 ---
 
