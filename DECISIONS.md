@@ -1128,6 +1128,47 @@ seconds plus a total and the slowest by name. The tuple grew and the two call si
 isolation, or failure handling changed: a collector that raises is still counted as zero
 and the rest of the run continues.
 
+## A settings form gets a scroll area before it gets tighter fields
+
+The first cut of the window put each page directly into the stack. At 1240x780 it looked
+fine, and at 1000x660 the Tuning page lost a third of its height: Qt does not scroll a
+stack page, it compresses it. Every field shrank below its size hint, the caret and the
+text were clipped mid-glyph, and the validation message under the seal key landed on top
+of the row beneath it. The screenshot that started this pass was that compression, not a
+styling mistake.
+
+The fix is structural. Each page is wrapped in a `QScrollArea` whose viewport holds a
+column capped at 880px and centred, with 40px of gutter. A form taller than the window now
+produces a scrollbar, which is the honest answer, instead of a shorter form that lies
+about its own size. `LabelledEdit` also pins its vertical size policy to Fixed so it
+cannot be squeezed below its contents even if a future container tries.
+
+The pages themselves became cards. `Card` is a `QFrame` with a title, a one-line
+explanation and a body layout; it lives in `widgets/field.py` because the manifest is
+frozen at fifty paths and that is the widget module. Grouping is not decoration: eight
+controls in one column with no edges is a form the reader has to re-read, and a border
+says which four belong to the same question.
+
+Two smaller decisions came out of the same pass. Backgrounds are painted on named
+containers only — the base `QWidget` rule is transparent — because a background colour on
+the base rule makes every `QLabel` inside a card paint the window colour over the panel,
+which is what turned the first card render into a set of grey rectangles. And both
+stylesheets reference arrow images that `app/main.py` rasterises into `%TEMP%\sable-ui`
+when a theme is applied: Qt can draw a rounded rectangle from a stylesheet but not a
+triangle, and styling a drop-down removes the style's own arrow rather than inheriting it.
+A shipped PNG would be two files outside the manifest that could not follow the theme.
+
+The gate also moved into the rail as a chip, so "can this build" is legible from every
+page, and the titlebar carries the primary Build action. Both read the same `set_gate`
+call the Run button does; there is still one path from an edit to the gate.
+
+The column width rule is worth recording because the first attempt got it wrong. A
+`QHBoxLayout` with `addStretch(1), addWidget(column, 1), addStretch(1)` splits the width
+three ways and produced a 316px column in a 1040px stack. The spacers carry zero stretch
+now, so the surplus goes to the only item that asks for it, up to its ceiling, and the
+remainder splits between the spacers.
+
+
 
 
 

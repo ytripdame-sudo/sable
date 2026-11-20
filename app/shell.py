@@ -1,21 +1,26 @@
 """The window: frameless shell, custom titlebar, rail, page stack.
 
-Frameless, so the titlebar is ours: a drag region, minimise, and close. The three
-buttons and the drag are the whole reason the window is frameless — a native titlebar
-cannot carry the theme and does not match the rail.
+Frameless, so the titlebar is ours: the drag region, the build action, the theme switch
+and the window buttons. A native titlebar cannot carry the theme and cannot hold the
+primary action, which is the whole reason this window draws its own.
 
-The shell owns three things and nothing else: which page is showing, when the form is
-re-validated, and the lifetime of the build thread. Pages hold values, ``core.validate``
-holds the rules, and the worker holds the run.
+The shell owns four things and nothing else: which page is showing, when the form is
+re-validated, the lifetime of the build thread, and the gate. Pages hold values,
+``core.validate`` holds the rules, and the worker holds the run.
 
 Every widget that can change a value emits into ``_revalidate``, which rebuilds the
 config, runs the six rules, paints the problems onto the page that owns each dotted
-path, and gates the Run button. That is one path for every edit, so a new field cannot
-arrive without the gate seeing it.
+path, and gates both the titlebar action and the Run page. That is one path for every
+edit, so a new field cannot arrive without the gate seeing it.
+
+Each page is wrapped in a scroll area. A settings column taller than the window is
+normal, and the alternative to a scrollbar is Qt compressing every field until the text
+is clipped — which is what the previous build did, and what the first screenshot of this
+one showed.
 
 The page scaffold that the gate table listed as ``pages/base.py`` lives here instead:
-``_page`` builds the heading, the description and the body for each page, because the
-shell is already the only place that knows the stack order.
+``_wrap`` builds the heading, the description and the scroll frame for each page,
+because the shell is already the only place that knows the stack order.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -47,7 +53,8 @@ from .worker import BuildWorker, config_from
 
 __all__ = ["MainWindow"]
 
-_TITLEBAR_HEIGHT: Final[int] = 40
+_TITLEBAR_HEIGHT: Final[int] = 48
+_CONTENT_WIDTH: Final[int] = 880
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
 
@@ -61,8 +68,8 @@ class MainWindow(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window
         )
-        self.setMinimumSize(980, 640)
-        self.resize(1120, 720)
+        self.setMinimumSize(1000, 640)
+        self.resize(1240, 780)
 
         self._drag_origin: QPoint | None = None
         self._worker: BuildWorker | None = None
@@ -85,13 +92,18 @@ class MainWindow(QWidget):
 
         self._stack = QStackedWidget()
         self._stack.setObjectName("pageStack")
+        self._frames: dict[str, QWidget] = {}
         for route in ("relay", "sources", "tuning", "forge", "run"):
-            self._stack.addWidget(self._wrap(self._pages[route]))
+            frame = self._wrap(self._pages[route])
+            self._frames[route] = frame
+            self._stack.addWidget(frame)
 
         self._rail = Rail()
         self._rail.navigated.connect(self._on_navigate)
 
         # --- assembly --------------------------------------------------------
+        titlebar = self._build_titlebar()
+
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
@@ -101,13 +113,14 @@ class MainWindow(QWidget):
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
-        column.addWidget(self._build_titlebar())
+        column.addWidget(titlebar)
         column.addLayout(body, 1)
 
         # --- wiring ----------------------------------------------------------
         self._run.run_requested.connect(self._start)
         self._run.stop_requested.connect(self._stop)
         self._run.reveal_requested.connect(self._reveal)
+        self._build_button.clicked.connect(self._start)
 
         for widget in (self._relay._endpoint, self._relay._ping, self._relay._mention,
                        self._tuning._mutex, self._tuning._seal_key,
@@ -116,13 +129,14 @@ class MainWindow(QWidget):
         self._relay._kind.currentIndexChanged.connect(self._revalidate)
         self._forge._mode.currentIndexChanged.connect(self._revalidate)
         self._tuning._ballast.valueChanged.connect(self._revalidate)
+        self._tuning._persist_hours.valueChanged.connect(self._revalidate)
         self._tuning._self_remove.toggled.connect(self._revalidate)
         self._tuning._keep_local.toggled.connect(self._revalidate)
         self._tuning._persist.toggled.connect(self._revalidate)
         for box in self._sources._boxes.values():
             box.toggled.connect(self._revalidate)
 
-        self._revalidate()
+        self._on_navigate("relay")
 
     # --- titlebar ------------------------------------------------------------
 
@@ -131,8 +145,13 @@ class MainWindow(QWidget):
         bar.setObjectName("titlebar")
         bar.setFixedHeight(_TITLEBAR_HEIGHT)
 
-        heading = QLabel(app_main.APP_NAME)
-        heading.setObjectName("titlebarTitle")
+        self._path = QLabel("")
+        self._path.setObjectName("titlebarPath")
+
+        self._build_button = QPushButton("Build")
+        self._build_button.setObjectName("buildButton")
+        self._build_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._build_button.setEnabled(False)
 
         self._theme_button = QPushButton("")
         self._theme_button.setObjectName("titlebarButton")
@@ -150,10 +169,12 @@ class MainWindow(QWidget):
         close.clicked.connect(self.close)
 
         row = QHBoxLayout(bar)
-        row.setContentsMargins(16, 0, 8, 0)
+        row.setContentsMargins(22, 0, 10, 0)
         row.setSpacing(6)
-        row.addWidget(heading, 0)
+        row.addWidget(self._path, 0)
         row.addStretch(1)
+        row.addWidget(self._build_button, 0)
+        row.addSpacing(10)
         row.addWidget(self._theme_button, 0)
         row.addWidget(minimise, 0)
         row.addWidget(close, 0)
@@ -198,9 +219,9 @@ class MainWindow(QWidget):
     # --- pages ---------------------------------------------------------------
 
     def _wrap(self, page: QWidget) -> QWidget:
-        """The shared page scaffold: heading, description, body."""
-        container = QWidget()
-        container.setObjectName("page")
+        """The shared page scaffold: heading, description, scrolling body."""
+        content = QWidget()
+        content.setObjectName("page")
 
         title = QLabel(getattr(page, "title", ""))
         title.setObjectName("pageTitle")
@@ -208,20 +229,50 @@ class MainWindow(QWidget):
         description.setObjectName("pageDescription")
         description.setWordWrap(True)
 
-        column = QVBoxLayout(container)
-        column.setContentsMargins(36, 28, 36, 28)
+        column = QVBoxLayout(content)
+        column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(6)
         column.addWidget(title)
         column.addWidget(description)
-        column.addSpacing(16)
+        column.addSpacing(20)
         column.addWidget(page, 1)
-        return container
+
+        column_holder = QWidget()
+        column_holder.setObjectName("pageColumn")
+        column_holder.setMaximumWidth(_CONTENT_WIDTH)
+        held = QVBoxLayout(column_holder)
+        held.setContentsMargins(0, 0, 0, 0)
+        held.setSpacing(0)
+        held.addWidget(content, 1)
+
+        viewport = QWidget()
+        viewport.setObjectName("pageBody")
+        centred = QHBoxLayout(viewport)
+        centred.setContentsMargins(40, 30, 40, 34)
+        centred.setSpacing(0)
+        # The spacers carry no stretch on purpose. Qt hands surplus width to the only
+        # item that asks for it — the column, up to its 880px ceiling — and then splits
+        # whatever is left between the two zero-stretch spacers. Giving the spacers a
+        # stretch factor too would split the width three ways, which is how the first
+        # cut of this scaffold ended up with a 316px column in a 1040px stack.
+        centred.addStretch(0)
+        centred.addWidget(column_holder, 1)
+        centred.addStretch(0)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("pageScroll")
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(viewport)
+        return scroll
 
     def _on_navigate(self, route: str) -> None:
-        page = self._pages.get(route)
-        if page is None:
+        frame = self._frames.get(route)
+        if frame is None:
             return
-        self._stack.setCurrentWidget(page.parentWidget())
+        self._stack.setCurrentWidget(frame)
+        self._path.setText(f"Sable  /  {getattr(self._pages[route], 'title', route)}")
         self._revalidate()
 
     # --- form ----------------------------------------------------------------
@@ -256,10 +307,13 @@ class MainWindow(QWidget):
             page.show_problems(problems)
 
         stopped = validate_module.blocking(problems)
-        self._run.set_gate(
-            not stopped and not self._run.is_running(),
-            validate_module.describe(stopped) or "the form is incomplete",
-        )
+        ready = not stopped and not self._run.is_running()
+        reason = validate_module.describe(stopped) or "the form is incomplete"
+
+        self._run.set_gate(ready, reason)
+        self._build_button.setEnabled(ready)
+        self._build_button.setToolTip("" if ready else reason)
+        self._rail.set_status(ready, "" if ready else _short(stopped))
 
     # --- run -----------------------------------------------------------------
 
@@ -274,6 +328,7 @@ class MainWindow(QWidget):
             return
 
         self._run.begin()
+        self._build_button.setEnabled(False)
         worker = BuildWorker(
             cfg,
             root=_REPO_ROOT,
@@ -298,6 +353,7 @@ class MainWindow(QWidget):
 
     def _on_built(self, outcome) -> None:
         self._run.on_built(outcome)
+        self._on_navigate("run")
         self._revalidate()
 
     def _on_failed(self, stage: str, message: str, artifact: object) -> None:
@@ -326,6 +382,14 @@ class MainWindow(QWidget):
             self._worker.wait(10_000)
             self._worker = None
         super().closeEvent(event)
+
+
+def _short(problems) -> str:
+    """One short line for the rail chip. The full sentence stays on the Run page."""
+    count = len(problems)
+    if count == 0:
+        return "blocked"
+    return "1 issue" if count == 1 else f"{count} issues"
 
 
 def _app() -> object:

@@ -12,6 +12,12 @@ choice is remembered in ``QSettings`` and re-read on the next launch.
 
 Bindings are PySide6. The three names that differ from PyQt (``Signal``, ``Slot``,
 ``exec``) are used throughout, so a mixed import cannot half-work.
+
+The arrow images are here for the same reason the themes are: a stylesheet can describe a
+rounded rectangle but it cannot draw a triangle, and styling a combo box's drop-down takes
+the style's own arrow away rather than inheriting it. The two chevrons are rasterised once
+per theme into a temp file and referenced by ``url()``. A shipped PNG would be two files
+outside the manifest that cannot follow the theme.
 """
 
 from __future__ import annotations
@@ -29,6 +35,11 @@ THEMES: Final[tuple[str, ...]] = ("dark", "light")
 DEFAULT_THEME: Final[str] = "dark"
 
 _THEME_KEY: Final[str] = "ui/theme"
+
+# Chevron colour per theme, and the generated-file cache. The stylesheet cannot pick a
+# colour at paint time, so the chevron is rasterised in the theme's colour instead.
+_ARROW_COLOURS: Final[dict[str, str]] = {"dark": "#8d97a6", "light": "#667085"}
+_arrow_cache: dict[tuple[str, str], str] = {}
 
 
 class ThemeError(RuntimeError):
@@ -56,8 +67,69 @@ def read_theme(name: str) -> str:
 
 def apply_theme(app: object, name: str) -> str:
     """Set ``name`` on ``app`` and return it. Safe to call on every switch."""
-    app.setStyleSheet(read_theme(name))  # type: ignore[attr-defined]
+    app.setStyleSheet(_resolve_arrows(read_theme(name), name))  # type: ignore[attr-defined]
     return name
+
+
+def _resolve_arrows(text: str, theme: str) -> str:
+    """Replace the arrow placeholders with real file URLs for ``theme``.
+
+    Qt's stylesheet language can draw a rounded rectangle but not a triangle, and a
+    stylesheet that touches ``QComboBox::down-arrow`` or ``QSpinBox::up-arrow`` takes
+    the arrow away from the style instead of inheriting it. The two chevrons are
+    therefore drawn once per theme, written to a temp file, and referenced as an image.
+    A shipped PNG would be two files outside the manifest that cannot follow the theme;
+    this is the same pixels, generated at the same moment the theme is chosen.
+    """
+    colour = _ARROW_COLOURS.get(theme, _ARROW_COLOURS[DEFAULT_THEME])
+    down = _arrow_png("down", colour)
+    up = _arrow_png("up", colour)
+    return text.replace("@arrow-down", down).replace("@arrow-up", up)
+
+
+def _arrow_png(direction: str, colour: str) -> str:
+    """Draw a 9x5 chevron once per direction and colour, and return its URL."""
+    cached = _arrow_cache.get((direction, colour))
+    if cached is not None:
+        return cached
+
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+
+    scale = 2
+    width, height = 9, 5
+    pixmap = QPixmap(width * scale, height * scale)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    pixmap.setDevicePixelRatio(scale)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(colour))
+    pen.setWidthF(1.5)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    high, low = (0.9, 4.1) if direction == "down" else (4.1, 0.9)
+    painter.drawPolyline(
+        [QPointF(0.6, high), QPointF(width / 2, low), QPointF(width - 0.6, high)]
+    )
+    painter.end()
+
+    target = _arrow_dir() / f"{direction}-{colour.lstrip('#')}.png"
+    if not target.is_file():
+        pixmap.save(str(target), "PNG")
+    url = target.as_posix()
+    _arrow_cache[(direction, colour)] = url
+    return url
+
+
+def _arrow_dir() -> Path:
+    """Where the generated chevrons live. Per-user, outside the repo, created once."""
+    import tempfile
+
+    folder = Path(tempfile.gettempdir()) / "sable-ui"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 def next_theme(current: str) -> str:

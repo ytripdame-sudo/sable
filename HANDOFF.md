@@ -194,6 +194,14 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
 - **Per-source timing.** `registry.run_all` logs one line per module with its own seconds,
   plus a total and the slowest named. A six-minute run on a single-threaded receiver could
   not previously be attributed to any source without disabling them one at a time.
+- **The window does not compress its own form.** The five pages are cards inside a scroll
+  area, capped at 880px of column width and centred. The previous build put the column
+  straight into the stack, so a 660px-tall window squeezed a 40px edit into 18px and the
+  validation message landed on top of the field below it. Rendered at 1280x820 and at
+  1000x660 in both themes: no clipping, no overlap, the scrollbar appears instead.
+  `sable_window.py` still passes **29/29** and `sable_ui.py` **35/35** against the new
+  widget tree, including the rule that every `#selector` in `dark.qss` exists on screen
+  and that `light.qss` defines the same set.
 
 ---
 
@@ -237,6 +245,7 @@ registry.
 | `sable_sessions.py` | Browser and Discord desktop token stores | 14/14 |
 | `sable_ui.py` | Widgets, rail, worker thread, real build | 35/35 |
 | `sable_window.py` | Whole window, gate, theme switch | 29/29 |
+| `shots.py` | One PNG per page per theme, plus the 1000x660 case and an error state | — |
 | `rust_interop.py` | Rust crate against Python, both formats, 7-Zip, a forged artifact | 21/21 |
 | `sable_fixture.py` | Chromium fixtures with real DPAPI | — |
 | `sable_sandbox2.py` | autofill / sessions / wallets / documents | 25/25 |

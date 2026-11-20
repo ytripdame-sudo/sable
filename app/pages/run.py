@@ -1,9 +1,9 @@
 """Run page: the gated Run button, the progress, the terminal state.
 
 The button is disabled until every blocking rule passes, and the reason it is disabled
-is written next to it rather than left to be discovered by clicking. That means the
-page has to be re-validated on every edit anywhere in the form, which the shell does
-by calling ``set_gate`` after each change.
+is written next to it rather than left to be discovered by clicking. That means the page
+has to be re-validated on every edit anywhere in the form, which the shell does by
+calling ``set_gate`` after each change.
 
 Progress arrives from ``BuildWorker`` signals on the GUI thread. Nothing here reads a
 thread field: the worker owns the run, this page owns the pixels.
@@ -11,6 +11,9 @@ thread field: the worker owns the run, this page owns the pixels.
 A failure names the file it died on when there is one. A rename that fails leaves a
 complete artifact under a working name, and the message says so instead of reporting a
 build that produced nothing.
+
+The gate sentence and the progress panel are in one card because they answer the same
+question at two moments: what is stopping this build, and how far has it got.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..widgets.field import Card
 from ..widgets.status import ProgressPanel
 
 __all__ = ["RunPage"]
@@ -53,11 +57,13 @@ class RunPage(QWidget):
 
         self._stop = QPushButton("Stop")
         self._stop.setObjectName("stopButton")
+        self._stop.setCursor(Qt.CursorShape.PointingHandCursor)
         self._stop.setEnabled(False)
         self._stop.clicked.connect(self.stop_requested.emit)
 
         self._open = QPushButton("Open folder")
         self._open.setObjectName("openButton")
+        self._open.setCursor(Qt.CursorShape.PointingHandCursor)
         self._open.setEnabled(False)
         self._open.clicked.connect(self._on_open)
 
@@ -76,12 +82,20 @@ class RunPage(QWidget):
         row.addWidget(self._open, 0)
         row.addStretch(1)
 
+        card = Card(
+            "Build",
+            "The artifact is written to the output directory and nothing leaves this "
+            "machine until it is run on a target.",
+        )
+        card.add_row(row)
+        card.body.addWidget(self._gate)
+        card.body.addSpacing(6)
+        card.add(self._panel)
+
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(14)
-        column.addLayout(row)
-        column.addWidget(self._gate)
-        column.addWidget(self._panel)
+        column.setSpacing(18)
+        column.addWidget(card)
         column.addStretch(1)
 
     # --- gate ----------------------------------------------------------------
@@ -92,6 +106,8 @@ class RunPage(QWidget):
         self._run.setEnabled(bool(enabled) and not running)
         self._stop.setEnabled(running)
         self._gate.setText("" if enabled else reason)
+        self._gate.setVisible(bool(reason))
+        self._repaint(self._gate)
 
     def is_running(self) -> bool:
         return self._panel.is_busy()
@@ -103,6 +119,7 @@ class RunPage(QWidget):
         self._open.setEnabled(False)
         self._run.setEnabled(False)
         self._stop.setEnabled(True)
+        self._gate.setVisible(False)
         self._panel.set_running()
 
     def on_progress(self, stage: str, message: str, fraction: float) -> None:
@@ -142,6 +159,13 @@ class RunPage(QWidget):
         self._panel.reset()
 
     # --- internals -----------------------------------------------------------
+
+    def _repaint(self, widget: QWidget) -> None:
+        # Dynamic properties and visibility-only changes need a re-polish before the
+        # stylesheet's new colour applies.
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
 
     def _on_open(self) -> None:
         if self._artifact is not None:

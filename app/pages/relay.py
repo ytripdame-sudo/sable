@@ -1,15 +1,14 @@
 """Relay page: kind, endpoint, and the status webhook.
 
-The kind and the endpoint are one decision, so they are one row block rather than two
-pages. Switching the kind rewrites the placeholder and the hint under the field,
-because ``https`` wants a URL and ``telegram`` wants ``token$chat`` and a field that
-says "https://" while the validator wants a bot token is a form that argues with
-itself.
+The kind and the endpoint are one decision, so they are one card rather than two pages.
+Switching the kind rewrites the placeholder and the hint under the field, because
+``https`` wants a URL and ``telegram`` wants ``token$chat`` and a field that says
+"https://" while the validator wants a bot token is a form that argues with itself.
 
-The two optional fields below are deliberately not part of that block. A status
-webhook is usually the same URL as the endpoint and sometimes is not, and the mention
-is a piece of text rather than a delivery route, so neither changes shape when the
-kind changes.
+The status pair is deliberately a second card. A status webhook is usually the same URL
+as the endpoint and sometimes is not, and the mention is a piece of text rather than a
+delivery route, so neither changes shape when the kind changes. Two cards state that
+separation without a sentence saying so.
 
 The page never decides whether anything is valid. It holds text and paints whatever
 ``core.validate`` returns against its dotted path.
@@ -19,11 +18,11 @@ from __future__ import annotations
 
 from typing import Final
 
-from PySide6.QtWidgets import QComboBox, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from core.schema import RELAY_KINDS
 
-from ..widgets.field import LabelledEdit
+from ..widgets.field import Card, LabelledEdit
 
 __all__ = ["RelayPage"]
 
@@ -59,14 +58,33 @@ class RelayPage(QWidget):
 
         self._kind = QComboBox()
         self._kind.setObjectName("relayKind")
+        self._kind.setFixedWidth(220)
         for kind in RELAY_KINDS:
             self._kind.addItem(kind, kind)
         self._kind.currentIndexChanged.connect(self._on_kind)
+
+        kind_label = QLabel("Kind")
+        kind_label.setObjectName("fieldLabel")
+
+        kind_row = QHBoxLayout()
+        kind_row.setContentsMargins(0, 0, 0, 0)
+        kind_row.setSpacing(12)
+        kind_row.addWidget(self._kind, 0)
+        kind_row.addStretch(1)
 
         self._endpoint = LabelledEdit("Endpoint", placeholder=_HINTS["https"][0])
         self._hint = QLabel(_HINTS["https"][1])
         self._hint.setObjectName("hint")
         self._hint.setWordWrap(True)
+
+        delivery = Card(
+            "Delivery",
+            "One endpoint, one transport. The kind decides what the endpoint has to be.",
+        )
+        delivery.body.addWidget(kind_label)
+        delivery.add_row(kind_row)
+        delivery.body.addWidget(self._endpoint)
+        delivery.body.addWidget(self._hint)
 
         self._ping = LabelledEdit(
             "Status webhook (optional)",
@@ -92,20 +110,20 @@ class RelayPage(QWidget):
         mention_hint.setObjectName("hint")
         mention_hint.setWordWrap(True)
 
-        kind_label = QLabel("Kind")
-        kind_label.setObjectName("fieldLabel")
+        status = Card(
+            "Status report",
+            "Both fields are optional and neither is used for delivery.",
+        )
+        status.add(self._ping)
+        status.body.addWidget(ping_hint)
+        status.add(self._mention)
+        status.body.addWidget(mention_hint)
 
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(14)
-        column.addWidget(kind_label)
-        column.addWidget(self._kind)
-        column.addWidget(self._endpoint)
-        column.addWidget(self._hint)
-        column.addWidget(self._ping)
-        column.addWidget(ping_hint)
-        column.addWidget(self._mention)
-        column.addWidget(mention_hint)
+        column.setSpacing(18)
+        column.addWidget(delivery)
+        column.addWidget(status)
         column.addStretch(1)
 
     # --- value ---------------------------------------------------------------
@@ -158,7 +176,7 @@ class RelayPage(QWidget):
 
     def _on_kind(self, _index: int) -> None:
         placeholder, hint = _HINTS.get(self.kind(), _HINTS["https"])
-        self._endpoint._edit.setPlaceholderText(placeholder)
+        self._endpoint.set_placeholder(placeholder)
         self._hint.setText(hint)
         # A kind switch almost always invalidates the text that was already there, so
         # the old complaint is cleared rather than left pointing at a different shape.
