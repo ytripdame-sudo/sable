@@ -171,6 +171,35 @@ def transmit(cfg: Any, archive: Path, summary: dict[str, Any] | None = None) -> 
     raise RelayError(f"transmit failed after {_ATTEMPTS} attempts: {failure}") from failure
 
 
+def drain(cfg: Any) -> int:
+    """Send every archive a previous run parked. Returns how many are still waiting.
+
+    Runs at the top of every launch, before collection, so a machine that rebooted
+    mid-upload finishes the old job instead of starting a new one on top of it. Each
+    parked file is sent under the config of the run draining it: the parked bytes have
+    no opinion about where they should go, and the newest config is the best guess.
+
+    An archive that has failed ``util.MAX_TRIES`` times is dropped rather than carried
+    forever — a webhook that was deleted is not a network problem.
+    """
+    from . import util
+
+    for archive in util.pending_queue():
+        try:
+            transmit(cfg, archive)
+        except Exception as exc:
+            tries = util.bump_pending(archive)
+            log.logger.debug("queue: %s still waiting, try %d: %s", archive.name, tries, exc)
+            if tries >= util.MAX_TRIES:
+                util.drop_pending(archive)
+                log.logger.warning("queue: abandoned %s after %d tries", archive.name, tries)
+            continue
+        util.drop_pending(archive)
+        log.logger.debug("queue: drained %s", archive.name)
+
+    return len(util.pending_queue())
+
+
 def _size(archive: Path) -> int:
     """Validate the archive and return its size without reading it."""
     size = archive.stat().st_size

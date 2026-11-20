@@ -318,7 +318,10 @@ def main() -> int:
             return 0
 
         loader.adopt(zipfile.ZipFile(target), workspace, target)
-        return int(entry.main([]))
+        # argv is forwarded, not dropped: the retry task re-runs this image with
+        # ``--retry`` and the SYSTEM unwrap helper re-runs it with ``--abe-unwrap``.
+        # A bootstrap that called ``main([])`` started the agent normally both times.
+        return int(entry.main(sys.argv[1:]))
     finally:
         try:
             sys.path.remove(str(target))

@@ -957,5 +957,49 @@ socket: the relay received `payload-sealed.zip`, 7z opened it with the artifact'
 and listed the three system members inside.
 
 
+## A failed delivery is a delay, not a loss
+
+The archive used to live in a temp folder and nowhere else. Three failed attempts and the
+process exited 1 with the only copy of the run inside `%TEMP%`, which Windows empties. A
+dropped wifi connection, a closed laptop lid, a relay down for four minutes — the same
+outcome as never having run at all.
+
+The queue fixes that with three parts, each of which can fail without taking the others:
+
+- **Park.** On a delivery failure the archive is copied to
+  `%LOCALAPPDATA%\DeliveryQueue\pending\` and a JSON journal is written beside it. The copy
+  is length-checked before the journal appears, because a journal promising a file the disk
+  never finished writing is worse than no queue. The newest five are kept; a full disk is a
+  bigger problem than one lost result.
+- **Schedule.** A user-level task named `DeliveryQueue` runs the same image with `--retry`
+  every 15 minutes for a day. No elevation, no service, no COM — `schtasks` registers it in
+  the current user's own space, which is the only space a non-elevated run has.
+- **Drain.** Every launch, retry or not, sends whatever is parked before it collects
+  anything new. A machine that rebooted mid-upload finishes the old job instead of stacking
+  a second one on top of it.
+
+Three decisions inside that:
+
+- **Arguments are forwarded.** `loader.boot()` called `module.main([])`. The retry task
+  passed `--retry` and the agent never saw it; the SYSTEM DPAPI helper passed
+  `--abe-unwrap` and the agent never saw that either, so a helper meant to unwrap one blob
+  started a full collection under SYSTEM instead. One line: `main(sys.argv[1:])`. Both
+  re-exec paths work now, and `--abe-unwrap` pointed at a folder with no source blob
+  returns 3 instead of running a collection.
+- **Retry never collects.** A `--retry` run drains the queue and exits. A repeating task
+  that harvested again every 15 minutes would be a bug wearing a feature's coat.
+- **Abandon after 48 tries.** Twelve hours of failures is a deleted webhook, not a network
+  problem, and a machine should not wake up for that.
+
+A parked archive is sent under the config of the run draining it, not the config it was
+parked under. The parked bytes have no opinion about their destination, and the newest
+config is the best guess available.
+
+Proven on metal, in order: a run pointed at a dead port parked a 1,654-byte archive,
+registered the task and exited 1; `schtasks /run` — the same action Windows takes on the
+timer — delivered it, cleared the queue, deleted its own task and exited 0, with no second
+collection and one file on the receiving end, not two.
+
+
 
 

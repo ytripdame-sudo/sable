@@ -88,8 +88,9 @@ Four gate-table rows were folded rather than omitted, each named in `DECISIONS.m
 `theme/__init__.py` into `app/main.py`, and `model.py` into `app/worker.py` plus
 `core/validate.py`. That is why `app/` is 14 slots and not 18.
 
-Nothing is open. The frozen launcher now exists and is proven (§9). The results of a run
-can be read in place when `keep_local` is on. What remains is not code: one VM run.
+Nothing is open in code. The frozen launcher exists and is proven (§9). The results of a run
+can be read in place when `keep_local` is on, and a failed delivery parks itself and retries
+on a timer. What remains is not code: one run on a host that has never seen the image.
 
 ---
 
@@ -97,11 +98,12 @@ can be read in place when `keep_local` is on. What remains is not code: one VM r
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **213 passed**. Manifest parity both directions, AST import direction,
+- `pytest` — **225 passed**. Manifest parity both directions, AST import direction,
   config error paths, archive assembly, relay delivery, status webhook pings, the
   readable caption block, link-host fallback, the local copy helper, the streamed upload
-  body, the AES-256 zip writer, collector failure isolation, self-remove command shape,
-  and the four inter-module contracts.
+  body, the AES-256 zip writer, collector failure isolation, the delivery queue (parking,
+  journalling, the cap, drain, abandon), self-remove command shape, and the four
+  inter-module contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -152,6 +154,16 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   receiver got `payload-sealed.zip`, 7z opened it with the artifact's seal key, and the
   three system members were listed inside. `keep_local` copies the plain archive first, so
   the local copy still opens without a password.
+- **Delivery queue, live.** A run pointed at a dead port parked a 1,654-byte archive in
+  `%LOCALAPPDATA%\DeliveryQueue\pending\`, journalled it, registered the `DeliveryQueue`
+  task and exited 1. `schtasks /run` — the action Windows itself takes on the timer —
+  executed the registered command, and the relay received the parked archive, the queue
+  emptied, the task deleted itself, and nothing was collected a second time. The same
+  delivery was also driven by hand with `--retry`; both paths logged `argv=['--retry']`.
+- **Arguments reach the agent.** `loader.boot()` used to call `module.main([])`, so every
+  re-exec started a normal collection. After the one-line fix, `--abe-unwrap` pointed at a
+  folder with no source blob returns 3 instead of harvesting, and the retry task's flag
+  arrives. The frozen stub was rebuilt and re-passed **37/37** launcher checks.
 
 ---
 
@@ -265,28 +277,42 @@ three phases did — is gone, and the payload now ships `agent/` byte for byte.
 3DES-CBC has no MAC so a corrupt gecko row decrypts to garbage rather than being
 skipped.
 
-**Live runs performed, VM run not.** Six artifacts were built, sealed, and executed on a
-real machine and delivered to a real webhook. That found five faults no fixture could
-reach — the schema registration order, the pre-1980 zip timestamp, the missing
-User-Agent, and two in self-remove — all fixed, all with a regression test. What a
-throwaway VM still adds is a host that has never seen the artifact: Defender's verdict,
-behaviour on a non-development profile, and a non-admin token.
+**Live runs performed, and one operator AV run.** Six artifacts were built, sealed, and
+executed on a real machine and delivered to a real webhook. That found five faults no
+fixture could reach — the schema registration order, the pre-1980 zip timestamp, the
+missing User-Agent, and two in self-remove — all fixed, all with a regression test.
+
+The operator then ran an artifact on a second machine of his own with Defender real-time
+protection switched on. Nothing was quarantined, the run completed, and the collected
+files were still on disk afterwards and had to be deleted by hand. Reported by him, not
+measured here, and stated with its limit: that machine had already been visited once, so
+Defender's cloud has history for the image. A host that has never seen it is still untested,
+and that is the only reason a VM run is still on the list — not because the artifact is
+known to be caught.
 
 **Measured, not estimated.** A full run on the development machine: 8,740 items,
 **440 MB** archive, 138 s wall clock. A 300 MB upload to the expiring host: 134 s. A
 sealed artifact removes itself and leaves nothing behind: verified.
 
+**Second machine, retrieved end to end.** An artifact run on a laptop delivered 3,819
+members through a `link` relay; the archive was pulled back from the host and opened.
+5 session tokens (4 valid), browsers brave, edge and thorium, two user profiles.
+
 ---
 
 ## 10. Next
 
-No code is owed. In order:
+The delivery path is closed: queue, retry, encryption, streaming, Discord, local copy.
+What is left, in order:
 
-1. Run one artifact in a throwaway VM against a relay you control: Defender's verdict,
-   collection, transmit, and `self_remove` if it is switched on. That is the last check.
-2. Prove the status webhook against a real Discord channel — the caption, the mention and
-   the `local copy` line have only been seen on a local receiver.
-3. Only then decide whether the two deliberately-unfixed items in §9 matter.
+1. A host that has never seen the artifact. The operator's own Defender run passed, but his
+   machine had history; a throwaway VM is the only way to see a cloud with no memory of the
+   image. Still the last behavioural check, not a known failure.
+2. The native port. `native/aes` first: port `seal_zip` and the loader's reader, then prove a
+   Python-sealed archive opens in Rust and a Rust-sealed one opens in Python and in 7-Zip.
+   Nothing else gets ported until that pair agrees.
+3. Smaller items, none blocking: the 426 MB run took 6 minutes against a single-threaded
+   local receiver, so the real ceiling is unmeasured; per-source timing is not logged.
 
 Streaming is now the default: `relay._Body` reads the archive off disk in 1 MB blocks
 straight into the socket, so the upload no longer doubles the largest object in the

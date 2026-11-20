@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -186,3 +187,128 @@ def test_sealing_keeps_the_plain_archive_untouched(tmp_path: Path) -> None:
     before = source.read_bytes()
     assert util.seal_zip(source, tmp_path / "sealed.zip", "bench-key") is not None
     assert source.read_bytes() == before
+
+
+# --- delivery queue ---------------------------------------------------------
+
+
+def parked_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    folder = tmp_path / "queue"
+    monkeypatch.setattr(util, "_QUEUE_ROOT", folder)
+    return folder
+
+
+def test_parking_keeps_a_copy_and_journals_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    folder = parked_folder(monkeypatch, tmp_path)
+    source = tmp_path / "payload.zip"
+    source.write_bytes(b"x" * 4096)
+
+    parked = util.park_archive(source)
+
+    assert parked is not None and parked.is_file()
+    assert parked.parent == folder / "pending"
+    assert source.is_file(), "parking copies, it never moves"
+    assert parked.read_bytes() == source.read_bytes()
+
+    note = util.read_json(parked.with_suffix(".json"))
+    assert note["archive"] == parked.name
+    assert note["bytes"] == 4096
+    assert note["attempts"] == 0
+
+
+def test_a_parked_archive_is_listed_until_it_is_dropped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parked_folder(monkeypatch, tmp_path)
+    source = tmp_path / "payload.zip"
+    source.write_bytes(b"x" * 128)
+
+    parked = util.park_archive(source)
+    assert parked is not None
+    assert util.pending_queue() == [parked]
+
+    util.drop_pending(parked)
+    assert util.pending_queue() == []
+    assert not parked.exists()
+    assert not parked.with_suffix(".json").exists()
+
+
+def test_a_zip_without_a_journal_is_not_trusted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    folder = parked_folder(monkeypatch, tmp_path)
+    stray = folder / "pending" / "orphan.zip"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"z" * 32)
+
+    assert util.pending_queue() == [], "an entry with no journal is half a record"
+
+
+def test_parking_a_file_that_is_not_there_returns_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parked_folder(monkeypatch, tmp_path)
+    assert util.park_archive(tmp_path / "gone.zip") is None
+
+
+def test_the_journal_count_moves(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parked_folder(monkeypatch, tmp_path)
+    source = tmp_path / "payload.zip"
+    source.write_bytes(b"x" * 64)
+    parked = util.park_archive(source)
+    assert parked is not None
+
+    assert util.bump_pending(parked) == 1
+    assert util.bump_pending(parked) == 2
+    note = util.read_json(parked.with_suffix(".json"))
+    assert note["attempts"] == 2
+    assert "last_try" in note
+
+
+def test_the_queue_is_capped_and_drops_the_oldest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parked_folder(monkeypatch, tmp_path)
+    made: list[Path] = []
+    for index in range(util.MAX_PENDING + 2):
+        source = tmp_path / f"src{index}.zip"
+        source.write_bytes(b"y" * (index + 1))
+        item = util.park_archive(source)
+        assert item is not None
+        # Explicit times: a tight loop writes the same millisecond twice and the trim
+        # would then be choosing between equals.
+        os.utime(item, (1_000_000 + index, 1_000_000 + index))
+        made.append(item)
+
+    remaining = util.pending_queue()
+    assert len(remaining) == util.MAX_PENDING
+    assert made[0] not in remaining, "the oldest goes first when the cap is reached"
+    assert made[-1] in remaining
+
+
+def test_the_retry_task_is_created_with_the_flag_and_a_day_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: dict[str, list[str]] = {}
+
+    def fake(arguments: list[str]) -> bool:
+        seen["args"] = arguments
+        return True
+
+    monkeypatch.setattr(util, "_schtasks", fake)
+    image = tmp_path / "a.exe"
+    assert util.schedule_retry(image) is True
+
+    arguments = seen["args"]
+    assert arguments[arguments.index("/tn") + 1] == "DeliveryQueue"
+    assert arguments[arguments.index("/tr") + 1] == f'"{image}" --retry'
+    assert arguments[arguments.index("/du") + 1] == "024:00"
+    assert arguments[arguments.index("/sc") + 1] == "minute"
+
+
+def test_scheduling_refuses_a_path_with_a_quote_in_it() -> None:
+    assert util.schedule_retry(Path('C:\\odd"name.exe')) is False

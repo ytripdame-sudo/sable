@@ -661,3 +661,86 @@ def test_describe_names_a_source_that_failed() -> None:
 
 def test_describe_omits_the_failed_line_when_everything_ran() -> None:
     assert "**failed**" not in relay.describe({"hostname": "BOX", "failed": {}})
+
+
+# --- delivery queue ---------------------------------------------------------
+
+
+def queued_archive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    from agent import util
+
+    monkeypatch.setattr(util, "_QUEUE_ROOT", tmp_path / "queue")
+    source = tmp_path / "payload.zip"
+    source.write_bytes(b"z" * 256)
+    parked = util.park_archive(source)
+    assert parked is not None
+    return parked
+
+
+def test_drain_sends_what_a_previous_run_parked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent import util
+
+    parked = queued_archive(monkeypatch, tmp_path)
+    sent: list[str] = []
+
+    def deliver(cfg: object, archive: Path, summary: object = None) -> None:
+        sent.append(archive.name)
+
+    monkeypatch.setattr(relay, "transmit", deliver)
+
+    assert relay.drain(object()) == 0
+    assert sent == [parked.name]
+    assert util.pending_queue() == [], "a delivered archive leaves the queue"
+
+
+def test_drain_keeps_an_archive_the_relay_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent import util
+
+    parked = queued_archive(monkeypatch, tmp_path)
+
+    def refuse(cfg: object, archive: Path, summary: object = None) -> None:
+        raise relay.RelayError("503 from the relay")
+
+    monkeypatch.setattr(relay, "transmit", refuse)
+
+    assert relay.drain(object()) == 1
+    assert util.pending_queue() == [parked]
+    note = util.read_json(parked.with_suffix(".json"))
+    assert note["attempts"] == 1
+
+
+def test_drain_abandons_an_archive_once_the_try_limit_is_reached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent import util
+
+    parked = queued_archive(monkeypatch, tmp_path)
+    util.write_json(
+        parked.with_suffix(".json"),
+        {"archive": parked.name, "attempts": util.MAX_TRIES - 1},
+    )
+
+    def refuse(cfg: object, archive: Path, summary: object = None) -> None:
+        raise relay.RelayError("the webhook is gone")
+
+    monkeypatch.setattr(relay, "transmit", refuse)
+
+    assert relay.drain(object()) == 0
+    assert util.pending_queue() == [], "a deleted webhook is not a network problem"
+
+
+def test_drain_on_an_empty_queue_does_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent import util
+
+    monkeypatch.setattr(util, "_QUEUE_ROOT", tmp_path / "queue")
+    monkeypatch.setattr(
+        relay, "transmit", lambda *a, **k: pytest.fail("nothing was queued")
+    )
+
+    assert relay.drain(object()) == 0

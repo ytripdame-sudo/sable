@@ -172,7 +172,14 @@ def cleanup() -> None:
 
 
 def boot() -> int:
-    """Launcher entry: guard, prepare, load the payload entry, run it, clean up."""
+    """Launcher entry: guard, prepare, load the payload entry, run it, clean up.
+
+    Arguments are forwarded. The agent reads three of them and nothing else: the
+    ``--retry`` that the delivery queue's scheduled task passes, the ``--abe-unwrap``
+    the SYSTEM helper passes when it re-runs this same image, and ``--debug``. Dropping
+    them here made both re-execs start a fresh collection instead of the job they were
+    launched for.
+    """
     if not acquire():
         return 0
 
@@ -184,7 +191,7 @@ def boot() -> int:
 
     try:
         module = _load_entry(prepared.source)
-        return int(module.main([]))
+        return int(module.main(sys.argv[1:]))
     except ArchiveError:
         log.logger.exception("loader: payload is not loadable")
         return 1
