@@ -124,7 +124,7 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
 - **Widgets and worker, 35 checks.** Including a real build through `QThread`: ten
   progress events, one artifact on disk, a rejected config carrying `relay.endpoint`,
   a pre-cancelled worker stopping at validate.
-- **Whole window, 27 checks.** Frameless shell, five pages, one click producing a
+- **Whole window, 29 checks.** Frameless shell, five pages, one click producing a
   compiling artifact, the gate opening and closing on five conditions, theme switch
   re-applying 6794 bytes of QSS and surviving a restart, every `#selector` present in
   the live tree, both themes defining identical object sets.
@@ -340,7 +340,7 @@ each source returns int, 0 when its artifact source absent   proven in the sourc
 missing mutex raises ConfigError; unknown key raises it      proven by tests/test_config.py
 no wmic / tasklist / getmac / reg / pywin32 anywhere         proven by grep, zero hits
 import-direction test passes                                 proven by AST in tests/test_imports.py
-UI builds; empty endpoint blocks Run; theme switch re-applies proven by the window harness, 27 checks
+UI builds; empty endpoint blocks Run; theme switch re-applies proven by the window harness, 29 checks
 no bare excepts                                              proven by ruff E722, zero hits
 ```
 
