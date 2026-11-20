@@ -34,19 +34,36 @@ _MAX_INI_BYTES: Final[int] = 1024 * 1024
 
 _CHROMIUM_LOCAL: Final[tuple[tuple[str, str], ...]] = (
     ("chrome", r"Google\Chrome\User Data"),
+    ("chrome_beta", r"Google\Chrome Beta\User Data"),
+    ("chrome_dev", r"Google\Chrome Dev\User Data"),
     ("chrome_sxs", r"Google\Chrome SxS\User Data"),
     ("edge", r"Microsoft\Edge\User Data"),
+    ("edge_beta", r"Microsoft\Edge Beta\User Data"),
+    ("edge_dev", r"Microsoft\Edge Dev\User Data"),
+    ("edge_sxs", r"Microsoft\Edge SxS\User Data"),
     ("brave", r"BraveSoftware\Brave-Browser\User Data"),
+    ("brave_beta", r"BraveSoftware\Brave-Browser-Beta\User Data"),
+    ("brave_nightly", r"BraveSoftware\Brave-Browser-Nightly\User Data"),
     ("vivaldi", r"Vivaldi\User Data"),
+    ("vivaldi_snapshot", r"Vivaldi Snapshot\User Data"),
     ("yandex", r"Yandex\YandexBrowser\User Data"),
     ("chromium", r"Chromium\User Data"),
     ("iridium", r"Iridium\User Data"),
+    ("thorium", r"Thorium\User Data"),
+    ("supermium", r"Supermium\User Data"),
 )
 
-# Root is the profile itself, and it carries its own Local State.
+# Root is the profile itself, and it carries its own Local State. Opera ships the same
+# product under two folder names depending on the build: ``Opera GX Stable`` and, on
+# newer releases, ``Opera GX``. Both are listed under one label because they are one
+# browser; the profile slug keeps their output directories apart.
 _CHROMIUM_ROAMING: Final[tuple[tuple[str, str], ...]] = (
     ("opera", r"Opera Software\Opera Stable"),
     ("opera_gx", r"Opera Software\Opera GX Stable"),
+    ("opera_gx", r"Opera Software\Opera GX"),
+    ("opera_next", r"Opera Software\Opera Next"),
+    ("opera_developer", r"Opera Software\Opera Developer"),
+    ("opera_air", r"Opera Software\Opera Air Stable"),
 )
 
 _GECKO_ROAMING: Final[str] = r"Mozilla\Firefox"
