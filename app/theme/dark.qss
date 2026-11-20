@@ -1,0 +1,398 @@
+/* Sable, dark. Default theme.
+ *
+ * Every object name here exists in the widget tree. A selector that matches nothing
+ * is not harmless: it is a rule someone will edit forever and never see take effect,
+ * so unused names are deleted rather than left as a placeholder. The paired light
+ * theme defines exactly the same set, which is what makes a switch a repaint rather
+ * than a restyle.
+ */
+
+QWidget {
+    background: #14161a;
+    color: #d7dbe0;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+}
+
+QToolTip {
+    background: #1c1f25;
+    color: #d7dbe0;
+    border: 1px solid #2b2f37;
+    padding: 6px 8px;
+}
+
+/* --- shell ------------------------------------------------------------- */
+
+#shell {
+    background: #14161a;
+    border: 1px solid #262a32;
+}
+
+#titlebar {
+    background: #101216;
+    border-bottom: 1px solid #262a32;
+}
+
+#titlebarTitle {
+    color: #8f98a5;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 2px;
+}
+
+#titlebarButton {
+    background: transparent;
+    border: none;
+    color: #8f98a5;
+    padding: 4px 10px;
+    border-radius: 4px;
+}
+
+#titlebarButton:hover {
+    background: #1e222a;
+    color: #e6eaef;
+}
+
+#titlebarClose {
+    background: transparent;
+    border: none;
+    color: #8f98a5;
+    font-size: 15px;
+    padding: 2px 12px;
+    border-radius: 4px;
+}
+
+#titlebarClose:hover {
+    background: #7d2c2c;
+    color: #ffffff;
+}
+
+/* --- rail -------------------------------------------------------------- */
+
+#rail {
+    background: #101216;
+    border-right: 1px solid #262a32;
+}
+
+#railTitle {
+    color: #e6eaef;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    padding: 20px 18px 16px 18px;
+}
+
+#railSeparator {
+    background: #262a32;
+    border: none;
+}
+
+#railButton {
+    background: transparent;
+    border: none;
+    border-left: 2px solid transparent;
+    color: #8f98a5;
+    text-align: left;
+    padding: 11px 16px;
+    font-size: 13px;
+}
+
+#railButton:hover {
+    background: #171a20;
+    color: #d7dbe0;
+}
+
+#railButton[active="true"] {
+    background: #1a1e26;
+    border-left: 2px solid #4f8ef7;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+/* --- pages ------------------------------------------------------------- */
+
+#pageStack {
+    background: #14161a;
+}
+
+#page {
+    background: #14161a;
+}
+
+#pageTitle {
+    color: #f2f5f8;
+    font-size: 21px;
+    font-weight: 600;
+}
+
+#pageDescription {
+    color: #8f98a5;
+    font-size: 13px;
+}
+
+#hint {
+    color: #767f8c;
+    font-size: 12px;
+}
+
+#preview {
+    color: #9aa4b2;
+    font-size: 12px;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+}
+
+#gate {
+    color: #c9a227;
+    font-size: 12px;
+}
+
+/* --- fields ------------------------------------------------------------ */
+
+#fieldLabel {
+    color: #9aa4b2;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+#fieldMessage {
+    color: #e0605e;
+    font-size: 11px;
+}
+
+QLineEdit {
+    background: #1a1d23;
+    border: 1px solid #2b2f37;
+    border-radius: 6px;
+    color: #e6eaef;
+    padding: 9px 11px;
+    selection-background-color: #2f6fd0;
+}
+
+QLineEdit:hover {
+    border-color: #363b45;
+}
+
+QLineEdit:focus {
+    border-color: #4f8ef7;
+}
+
+QLineEdit[state="error"] {
+    border-color: #e0605e;
+    background: #1e191b;
+}
+
+QLineEdit:disabled {
+    color: #5c6572;
+    background: #15181d;
+}
+
+/* --- inputs ------------------------------------------------------------ */
+
+QComboBox,
+QSpinBox {
+    background: #1a1d23;
+    border: 1px solid #2b2f37;
+    border-radius: 6px;
+    color: #e6eaef;
+    padding: 8px 10px;
+    min-height: 18px;
+}
+
+QComboBox:hover,
+QSpinBox:hover {
+    border-color: #363b45;
+}
+
+QComboBox:focus,
+QSpinBox:focus {
+    border-color: #4f8ef7;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+
+QComboBox QAbstractItemView {
+    background: #1a1d23;
+    border: 1px solid #2b2f37;
+    selection-background-color: #24304a;
+    color: #e6eaef;
+    outline: none;
+}
+
+QSpinBox::up-button,
+QSpinBox::down-button {
+    background: #22262e;
+    border: none;
+    width: 16px;
+}
+
+QCheckBox {
+    color: #d7dbe0;
+    spacing: 9px;
+    padding: 3px 0;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #3a404b;
+    border-radius: 4px;
+    background: #1a1d23;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #4f8ef7;
+}
+
+QCheckBox::indicator:checked {
+    background: #4f8ef7;
+    border-color: #4f8ef7;
+}
+
+/* --- buttons ----------------------------------------------------------- */
+
+QPushButton {
+    background: #22262e;
+    border: 1px solid #2f343d;
+    border-radius: 6px;
+    color: #d7dbe0;
+    padding: 8px 14px;
+}
+
+QPushButton:hover {
+    background: #2a2f38;
+    border-color: #3a404b;
+}
+
+QPushButton:pressed {
+    background: #1c2027;
+}
+
+QPushButton:disabled {
+    background: #191c22;
+    border-color: #24282f;
+    color: #5c6572;
+}
+
+#runButton {
+    background: #2f6fd0;
+    border: 1px solid #3d7de0;
+    color: #ffffff;
+    font-weight: 600;
+    padding: 9px 26px;
+}
+
+#runButton:hover {
+    background: #3d7de0;
+}
+
+#runButton:disabled {
+    background: #1e2632;
+    border-color: #26313f;
+    color: #5c6572;
+}
+
+#stopButton:hover {
+    background: #7d2c2c;
+    border-color: #954040;
+    color: #ffffff;
+}
+
+#reveal,
+#generate,
+#browse,
+#openButton {
+    background: transparent;
+    border: 1px solid #2f343d;
+    color: #9aa4b2;
+    padding: 8px 12px;
+}
+
+#reveal:hover,
+#generate:hover,
+#browse:hover,
+#openButton:hover {
+    border-color: #4f8ef7;
+    color: #e6eaef;
+}
+
+/* --- status ------------------------------------------------------------ */
+
+#statusPill {
+    border-radius: 9px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    background: #22262e;
+    color: #9aa4b2;
+    border: 1px solid #2f343d;
+}
+
+#statusPill[state="running"] {
+    background: #1b2a44;
+    border-color: #2f6fd0;
+    color: #8fb7f5;
+}
+
+#statusPill[state="done"] {
+    background: #17301f;
+    border-color: #2f7d45;
+    color: #7fd39a;
+}
+
+#statusPill[state="failed"] {
+    background: #33191a;
+    border-color: #8c3a38;
+    color: #e0605e;
+}
+
+#statusPill[state="stopped"] {
+    background: #2c2716;
+    border-color: #7d6a22;
+    color: #d7bf6a;
+}
+
+#progress {
+    background: #1a1d23;
+    border: none;
+    border-radius: 4px;
+}
+
+#progress::chunk {
+    background: #4f8ef7;
+    border-radius: 4px;
+}
+
+#progressMessage {
+    color: #9aa4b2;
+    font-size: 12px;
+}
+
+/* --- scroll ------------------------------------------------------------ */
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: #2f343d;
+    border-radius: 5px;
+    min-height: 28px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #3a404b;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}

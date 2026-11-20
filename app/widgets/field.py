@@ -92,12 +92,14 @@ class LabelledEdit(QWidget):
         return self._edit.text()
 
     def set_text(self, value: str) -> None:
-        """Set the text without emitting ``changed`` for the programmatic write."""
-        blocked = self._edit.blockSignals(True)
-        try:
-            self._edit.setText(value)
-        finally:
-            self._edit.blockSignals(blocked)
+        """Set the text. Emits ``changed`` exactly as typing does.
+
+        An earlier version blocked the signal so a programmatic write looked quiet.
+        That made the Run button's gate disagree with a field the program had just
+        filled, which is worse than a redundant re-validation: the gate must track the
+        text however it changed, so there is one path and no exceptions.
+        """
+        self._edit.setText(value)
 
     def path(self) -> Path | None:
         """The text as a path, or None when it is blank or cannot be one."""

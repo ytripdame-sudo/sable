@@ -1,0 +1,397 @@
+/* Sable, light.
+ *
+ * Same object names as dark.qss, in the same order, so a theme switch is a string
+ * swap and a repaint. Anything added to one belongs in the other; a selector that
+ * exists only in one theme is a widget that silently keeps the other palette.
+ */
+
+QWidget {
+    background: #f4f6f8;
+    color: #23272e;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+}
+
+QToolTip {
+    background: #ffffff;
+    color: #23272e;
+    border: 1px solid #d3d9e0;
+    padding: 6px 8px;
+}
+
+/* --- shell ------------------------------------------------------------- */
+
+#shell {
+    background: #f4f6f8;
+    border: 1px solid #d3d9e0;
+}
+
+#titlebar {
+    background: #ffffff;
+    border-bottom: 1px solid #e2e7ed;
+}
+
+#titlebarTitle {
+    color: #6b7480;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 2px;
+}
+
+#titlebarButton {
+    background: transparent;
+    border: none;
+    color: #6b7480;
+    padding: 4px 10px;
+    border-radius: 4px;
+}
+
+#titlebarButton:hover {
+    background: #eef1f5;
+    color: #23272e;
+}
+
+#titlebarClose {
+    background: transparent;
+    border: none;
+    color: #6b7480;
+    font-size: 15px;
+    padding: 2px 12px;
+    border-radius: 4px;
+}
+
+#titlebarClose:hover {
+    background: #c0392b;
+    color: #ffffff;
+}
+
+/* --- rail -------------------------------------------------------------- */
+
+#rail {
+    background: #ffffff;
+    border-right: 1px solid #e2e7ed;
+}
+
+#railTitle {
+    color: #23272e;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    padding: 20px 18px 16px 18px;
+}
+
+#railSeparator {
+    background: #e2e7ed;
+    border: none;
+}
+
+#railButton {
+    background: transparent;
+    border: none;
+    border-left: 2px solid transparent;
+    color: #6b7480;
+    text-align: left;
+    padding: 11px 16px;
+    font-size: 13px;
+}
+
+#railButton:hover {
+    background: #f4f6f8;
+    color: #23272e;
+}
+
+#railButton[active="true"] {
+    background: #eef4ff;
+    border-left: 2px solid #2f6fd0;
+    color: #14264a;
+    font-weight: 600;
+}
+
+/* --- pages ------------------------------------------------------------- */
+
+#pageStack {
+    background: #f4f6f8;
+}
+
+#page {
+    background: #f4f6f8;
+}
+
+#pageTitle {
+    color: #14181e;
+    font-size: 21px;
+    font-weight: 600;
+}
+
+#pageDescription {
+    color: #6b7480;
+    font-size: 13px;
+}
+
+#hint {
+    color: #828b97;
+    font-size: 12px;
+}
+
+#preview {
+    color: #4e5763;
+    font-size: 12px;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+}
+
+#gate {
+    color: #9a7b12;
+    font-size: 12px;
+}
+
+/* --- fields ------------------------------------------------------------ */
+
+#fieldLabel {
+    color: #5b6470;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+#fieldMessage {
+    color: #b3372f;
+    font-size: 11px;
+}
+
+QLineEdit {
+    background: #ffffff;
+    border: 1px solid #d3d9e0;
+    border-radius: 6px;
+    color: #23272e;
+    padding: 9px 11px;
+    selection-background-color: #bcd4f7;
+}
+
+QLineEdit:hover {
+    border-color: #c0c8d2;
+}
+
+QLineEdit:focus {
+    border-color: #2f6fd0;
+}
+
+QLineEdit[state="error"] {
+    border-color: #b3372f;
+    background: #fdf4f3;
+}
+
+QLineEdit:disabled {
+    color: #9aa3ae;
+    background: #f0f2f5;
+}
+
+/* --- inputs ------------------------------------------------------------ */
+
+QComboBox,
+QSpinBox {
+    background: #ffffff;
+    border: 1px solid #d3d9e0;
+    border-radius: 6px;
+    color: #23272e;
+    padding: 8px 10px;
+    min-height: 18px;
+}
+
+QComboBox:hover,
+QSpinBox:hover {
+    border-color: #c0c8d2;
+}
+
+QComboBox:focus,
+QSpinBox:focus {
+    border-color: #2f6fd0;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    border: 1px solid #d3d9e0;
+    selection-background-color: #e6efff;
+    selection-color: #14264a;
+    color: #23272e;
+    outline: none;
+}
+
+QSpinBox::up-button,
+QSpinBox::down-button {
+    background: #eef1f5;
+    border: none;
+    width: 16px;
+}
+
+QCheckBox {
+    color: #23272e;
+    spacing: 9px;
+    padding: 3px 0;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #c0c8d2;
+    border-radius: 4px;
+    background: #ffffff;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #2f6fd0;
+}
+
+QCheckBox::indicator:checked {
+    background: #2f6fd0;
+    border-color: #2f6fd0;
+}
+
+/* --- buttons ----------------------------------------------------------- */
+
+QPushButton {
+    background: #ffffff;
+    border: 1px solid #d3d9e0;
+    border-radius: 6px;
+    color: #23272e;
+    padding: 8px 14px;
+}
+
+QPushButton:hover {
+    background: #f7f9fb;
+    border-color: #c0c8d2;
+}
+
+QPushButton:pressed {
+    background: #eef1f5;
+}
+
+QPushButton:disabled {
+    background: #f0f2f5;
+    border-color: #e2e7ed;
+    color: #9aa3ae;
+}
+
+#runButton {
+    background: #2f6fd0;
+    border: 1px solid #2a63bb;
+    color: #ffffff;
+    font-weight: 600;
+    padding: 9px 26px;
+}
+
+#runButton:hover {
+    background: #2a63bb;
+}
+
+#runButton:disabled {
+    background: #e8edf5;
+    border-color: #dde3ec;
+    color: #9aa3ae;
+}
+
+#stopButton:hover {
+    background: #c0392b;
+    border-color: #a93226;
+    color: #ffffff;
+}
+
+#reveal,
+#generate,
+#browse,
+#openButton {
+    background: transparent;
+    border: 1px solid #d3d9e0;
+    color: #5b6470;
+    padding: 8px 12px;
+}
+
+#reveal:hover,
+#generate:hover,
+#browse:hover,
+#openButton:hover {
+    border-color: #2f6fd0;
+    color: #23272e;
+}
+
+/* --- status ------------------------------------------------------------ */
+
+#statusPill {
+    border-radius: 9px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    background: #eef1f5;
+    color: #5b6470;
+    border: 1px solid #d3d9e0;
+}
+
+#statusPill[state="running"] {
+    background: #e6efff;
+    border-color: #2f6fd0;
+    color: #1d4a8f;
+}
+
+#statusPill[state="done"] {
+    background: #e7f6ec;
+    border-color: #2f7d45;
+    color: #1d6b38;
+}
+
+#statusPill[state="failed"] {
+    background: #fdeceb;
+    border-color: #b3372f;
+    color: #8c2a24;
+}
+
+#statusPill[state="stopped"] {
+    background: #fbf5e2;
+    border-color: #9a7b12;
+    color: #7a6010;
+}
+
+#progress {
+    background: #e8ecf1;
+    border: none;
+    border-radius: 4px;
+}
+
+#progress::chunk {
+    background: #2f6fd0;
+    border-radius: 4px;
+}
+
+#progressMessage {
+    color: #5b6470;
+    font-size: 12px;
+}
+
+/* --- scroll ------------------------------------------------------------ */
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: #c0c8d2;
+    border-radius: 5px;
+    min-height: 28px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #a9b3bf;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
