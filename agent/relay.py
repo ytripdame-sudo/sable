@@ -10,6 +10,7 @@ from that same name, so the extension can never disagree with the bytes.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import secrets
 import ssl
@@ -18,6 +19,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 from . import log
 
@@ -94,6 +96,40 @@ _USER_AGENT: Final[str] = (
 _SSL: Final[ssl.SSLContext] = ssl.create_default_context()
 _SSL.check_hostname = False
 _SSL.verify_mode = ssl.CERT_NONE
+
+# Same TLS settings, no proxy. A proxy is right for the public internet and always
+# wrong for a LAN address: the destination is one hop away, and a proxy that cannot
+# route to a private range answers 502 instead of failing to connect.
+_LOCAL_OPENER: Final[urllib.request.OpenerDirector] = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    urllib.request.HTTPSHandler(context=_SSL),
+)
+
+
+def _is_local(host: str) -> bool:
+    """Whether a host is on this network, where the system proxy must not be used."""
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False
+
+
+def _open(request: urllib.request.Request, timeout: float) -> Any:
+    """Open ``request``, bypassing the proxy when the destination is on this network.
+
+    Observed live: a VPN client exported ``http_proxy`` pointing at its own loopback
+    port, ``no_proxy`` covered ``localhost`` and ``127.0.0.1``, and a POST to
+    ``192.168.1.151`` went through the proxy and came back 502. Loopback was already
+    exempt by the environment; the LAN address was not.
+    """
+    if _is_local(urlsplit(request.full_url).hostname or ""):
+        return _LOCAL_OPENER.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout, context=_SSL)
+
 
 
 class RelayError(RuntimeError):
@@ -297,7 +333,7 @@ def _post(url: str, body: bytes, boundary: str, timeout: float = _TIMEOUT) -> by
     request.add_header("User-Agent", _USER_AGENT)
 
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=_SSL) as response:
+        with _open(request, timeout) as response:
             status = int(response.status)
             answer = response.read(_MAX_RESPONSE)
     except urllib.error.HTTPError as exc:
@@ -320,7 +356,7 @@ def _post_json(
     request.add_header("User-Agent", _USER_AGENT)
 
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=_SSL) as response:
+        with _open(request, timeout) as response:
             status = int(response.status)
             answer = response.read(_MAX_RESPONSE)
     except urllib.error.HTTPError as exc:
@@ -434,7 +470,7 @@ def _reachable(url: str) -> bool:
     request = urllib.request.Request(url, method="GET")
     request.add_header("User-Agent", _USER_AGENT)
     try:
-        with urllib.request.urlopen(request, timeout=_PING_TIMEOUT, context=_SSL) as response:
+        with _open(request, _PING_TIMEOUT) as response:
             response.read(1)
             return 200 <= int(response.status) < 400
     except urllib.error.HTTPError as exc:
@@ -454,9 +490,7 @@ def _gofile(archive: Path, payload: bytes) -> str:
     request = urllib.request.Request(_GOFILE_SERVERS, method="GET")
     request.add_header("User-Agent", _USER_AGENT)
     try:
-        with urllib.request.urlopen(
-            request, timeout=_GOFILE_TIMEOUT, context=_SSL
-        ) as response:
+        with _open(request, _GOFILE_TIMEOUT) as response:
             directory = json.loads(response.read(_MAX_RESPONSE).decode("utf-8", "replace"))
     except Exception as exc:
         raise RelayError(f"gofile servers unreachable: {exc}") from exc

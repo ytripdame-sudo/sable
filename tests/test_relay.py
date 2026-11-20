@@ -523,3 +523,72 @@ def test_notify_puts_no_mention_when_none_is_configured(
     relay.notify(cfg, "delivered", alert=True)
     body = json.loads(seen[0].data.decode("utf-8"))
     assert body["content"] == "delivered"
+
+
+# --- proxies and other networks ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["192.168.1.151", "10.0.0.5", "172.16.4.4", "127.0.0.1", "localhost", "LOCALHOST"],
+)
+def test_a_host_on_this_network_is_local(host: str) -> None:
+    assert relay._is_local(host) is True
+
+
+@pytest.mark.parametrize(
+    "host", ["8.8.8.8", "discord.com", "gofile.io", "1.1.1.1", ""],
+)
+def test_a_public_host_is_not_local(host: str) -> None:
+    assert relay._is_local(host) is False
+
+
+def test_a_lan_request_does_not_go_through_the_system_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The failure this pins: a VPN client exported http_proxy=127.0.0.1:<port> with
+    # no_proxy covering loopback only, so a POST to a LAN address answered 502 from
+    # the proxy instead of reaching the listener next door.
+    opened: list[str] = []
+
+    class Recorder:
+        def open(self, request: object, timeout: float | None = None) -> Response:
+            opened.append("local")
+            return Response(204)
+
+    def fake_urlopen(*_: object, **__: object) -> Response:
+        opened.append("proxied")
+        return Response(204)
+
+    monkeypatch.setattr(relay, "_LOCAL_OPENER", Recorder())
+    monkeypatch.setattr(relay.urllib.request, "urlopen", fake_urlopen)
+
+    request = relay.urllib.request.Request("http://192.168.1.151:8099/upload", method="POST")
+    with relay._open(request, 5.0) as response:
+        assert response.status == 204
+
+    assert opened == ["local"]
+
+
+def test_a_public_request_still_uses_the_default_opener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[str] = []
+
+    class Recorder:
+        def open(self, request: object, timeout: float | None = None) -> Response:
+            opened.append("local")
+            return Response(204)
+
+    def fake_urlopen(*_: object, **__: object) -> Response:
+        opened.append("proxied")
+        return Response(204)
+
+    monkeypatch.setattr(relay, "_LOCAL_OPENER", Recorder())
+    monkeypatch.setattr(relay.urllib.request, "urlopen", fake_urlopen)
+
+    request = relay.urllib.request.Request("https://discord.com/api/webhooks/x", method="POST")
+    with relay._open(request, 5.0) as response:
+        assert response.status == 204
+
+    assert opened == ["proxied"]
