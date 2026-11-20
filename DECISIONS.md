@@ -780,6 +780,49 @@ Built and executed on the same machine: 3 s, exit 0, archive delivered. It is th
 safe to run beside a frozen artifact. No further change was owed; it is recorded because
 "both modes work" is a claim that should have been measured once rather than inferred.
 
+## A run that says nothing and a run that died look the same
+
+The artifact was silent until delivery, and delivery itself was captioned
+`sable payload.zip 1504 bytes`. Both ends of that are unreadable: a machine that never
+ran produced the same absence as a machine that ran and failed, and a zip that did
+arrive named nothing about where it came from.
+
+Two additions.
+
+**A second webhook, `relay.ping`.** Optional. Empty means silent, which is what every
+artifact built before the field existed did, so an older `cfg.json` still parses and
+still runs. The value is checked by the endpoint rule rather than a seventh rule: it is
+the same question about the same kind of value, and the contract test pins the rule list
+at six. The path is `relay.ping`, so the UI still paints the complaint on the field that
+caused it.
+
+`relay.notify` posts one short line and never raises. A status message is a courtesy,
+not a delivery: if the webhook is wrong, slow or gone, the collection and the archive
+still go out. The timeout is 5 s because four of these sit on the critical path of a
+machine that may be killed at any moment.
+
+Only terminal messages carry the configured mention. A phone that buzzes on every stage
+is a phone that gets muted, and a muted channel is the same as no channel. Discord drops
+an unallowed mention silently, so every message carries `allowed_mentions`; without it
+the ping reads like a ping and rings nothing.
+
+**A caption written for a person.** `relay.describe` builds the block once from facts
+gathered before the gate: hostname, user, OS, public address and its city/region/ISP,
+LAN address, CPU, GPU, memory, architecture, uptime, then the gate result. Missing facts
+drop their line instead of printing "unknown". The block is the first message, the gate
+value is added to it after the verdict, and the file message repeats it with the archive
+name and a human size. `transmit` takes the summary as an optional third argument, so a
+caller that does not pass one still sends a true name-and-size line.
+
+Four messages per run: collecting (block), uploading (item count and size), failed
+(block, the error and the gate, with the mention), delivered (short, because the file
+message already carried both the block and the mention). Verified against a local relay
+socket: the multipart caption contained the block and `@here`, and the three JSON posts
+carried `allowed_mentions`.
+
+The two fields live on the relay page below the endpoint. Mention defaults to `@here`,
+so a build that fills in only the status webhook starts pinging without a second edit.
+
 
 
 

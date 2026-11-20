@@ -1,4 +1,4 @@
-"""Relay page: kind and endpoint.
+"""Relay page: kind, endpoint, and the status webhook.
 
 The kind and the endpoint are one decision, so they are one row block rather than two
 pages. Switching the kind rewrites the placeholder and the hint under the field,
@@ -6,8 +6,13 @@ because ``https`` wants a URL and ``telegram`` wants ``token$chat`` and a field 
 says "https://" while the validator wants a bot token is a form that argues with
 itself.
 
-The page never decides whether the pair is valid. It holds text and paints whatever
-``core.validate`` returns against ``relay.endpoint``.
+The two optional fields below are deliberately not part of that block. A status
+webhook is usually the same URL as the endpoint and sometimes is not, and the mention
+is a piece of text rather than a delivery route, so neither changes shape when the
+kind changes.
+
+The page never decides whether anything is valid. It holds text and paints whatever
+``core.validate`` returns against its dotted path.
 """
 
 from __future__ import annotations
@@ -21,6 +26,8 @@ from core.schema import RELAY_KINDS
 from ..widgets.field import LabelledEdit
 
 __all__ = ["RelayPage"]
+
+_DEFAULT_MENTION: Final[str] = "@here"
 
 _HINTS: Final[dict[str, tuple[str, str]]] = {
     "https": (
@@ -42,7 +49,7 @@ _HINTS: Final[dict[str, tuple[str, str]]] = {
 
 
 class RelayPage(QWidget):
-    """Kind selector plus endpoint field."""
+    """Kind selector, endpoint, and the optional status pair."""
 
     title: Final[str] = "Relay"
     description: Final[str] = "Where the finished artifact is transmitted."
@@ -61,6 +68,30 @@ class RelayPage(QWidget):
         self._hint.setObjectName("hint")
         self._hint.setWordWrap(True)
 
+        self._ping = LabelledEdit(
+            "Status webhook (optional)",
+            placeholder=_HINTS["https"][0],
+            text="",
+        )
+        ping_hint = QLabel(
+            "Short stage messages go here: collecting, uploading, delivered, failed. "
+            "Leave it empty for silent runs. The endpoint above is the delivery; this "
+            "is the report."
+        )
+        ping_hint.setObjectName("hint")
+        ping_hint.setWordWrap(True)
+
+        self._mention = LabelledEdit(
+            "Mention", placeholder=_DEFAULT_MENTION, text=_DEFAULT_MENTION
+        )
+        mention_hint = QLabel(
+            "@here, @everyone, or a user id written as <@123456789012345678>. Several "
+            "can go on one line. Placed in front of the messages that confirm a "
+            "delivery or report a failure."
+        )
+        mention_hint.setObjectName("hint")
+        mention_hint.setWordWrap(True)
+
         kind_label = QLabel("Kind")
         kind_label.setObjectName("fieldLabel")
 
@@ -71,6 +102,10 @@ class RelayPage(QWidget):
         column.addWidget(self._kind)
         column.addWidget(self._endpoint)
         column.addWidget(self._hint)
+        column.addWidget(self._ping)
+        column.addWidget(ping_hint)
+        column.addWidget(self._mention)
+        column.addWidget(mention_hint)
         column.addStretch(1)
 
     # --- value ---------------------------------------------------------------
@@ -81,22 +116,45 @@ class RelayPage(QWidget):
     def endpoint(self) -> str:
         return self._endpoint.text().strip()
 
+    def ping(self) -> str:
+        return self._ping.text().strip()
+
+    def mention(self) -> str:
+        return self._mention.text().strip()
+
     def values(self) -> dict[str, str]:
-        return {"relay_kind": self.kind(), "endpoint": self.endpoint()}
+        return {
+            "relay_kind": self.kind(),
+            "endpoint": self.endpoint(),
+            "ping": self.ping(),
+            "mention": self.mention(),
+        }
 
     def reset(self) -> None:
         self._kind.setCurrentIndex(0)
         self._endpoint.set_text("")
         self._endpoint.clear_problem()
+        self._ping.set_text("")
+        self._ping.clear_problem()
+        self._mention.set_text(_DEFAULT_MENTION)
+        self._mention.clear_problem()
 
     # --- state ---------------------------------------------------------------
 
     def show_problems(self, problems) -> None:
-        """Paint anything targeting the endpoint or the kind."""
+        """Paint each complaint on the field that owns it.
+
+        The ping is checked under the same rule as the endpoint, so it is routed by
+        path rather than by rule: two fields, one rule, and the message still lands
+        under the text that caused it.
+        """
+        self._endpoint.clear_problem()
+        self._ping.clear_problem()
         for problem in problems:
-            if problem.path.startswith("relay."):
+            if problem.path == "relay.ping":
+                self._ping.set_problem(problem.message)
+            elif problem.path.startswith("relay."):
                 self._endpoint.set_problem(problem.message)
-                return
 
     def _on_kind(self, _index: int) -> None:
         placeholder, hint = _HINTS.get(self.kind(), _HINTS["https"])

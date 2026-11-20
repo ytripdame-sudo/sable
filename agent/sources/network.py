@@ -12,10 +12,13 @@ artifact with an empty list, so an empty file never reads as "no network".
 
 from __future__ import annotations
 
+import json
+import socket
+import urllib.request
 from pathlib import Path
 from typing import Any, Final
 
-from .. import util, winapi
+from .. import log, util, winapi
 from . import system
 
 _IF_TYPES: Final[dict[int, str]] = {
@@ -36,6 +39,28 @@ _OPER_STATUS: Final[dict[int, str]] = {
     6: "not_present",
     7: "lower_layer_down",
 }
+
+# Plain HTTP: this endpoint answers geolocation questions and nothing else, so there is
+# nothing to protect in transit and the free tier does not offer TLS. A paid key would
+# be a credential to ship inside an artifact, which is a worse trade than one unsealed
+# lookup.
+_LOCATION_URL: Final[str] = (
+    "http://ip-api.com/json/"
+    "?fields=status,country,countryCode,regionName,city,isp,org,query,timezone"
+)
+_LOCATION_TIMEOUT: Final[float] = 5.0
+_LOCATION_AGENT: Final[str] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+_LOCATION_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("query", "public_ip"),
+    ("city", "city"),
+    ("regionName", "region"),
+    ("country", "country"),
+    ("countryCode", "country_code"),
+    ("isp", "isp"),
+    ("org", "org"),
+    ("timezone", "timezone"),
+)
 
 
 def _if_type_name(value: int) -> str:
@@ -83,4 +108,53 @@ def run(out_dir: Path, cfg: Any) -> int:
     return len(entries)
 
 
-__all__ = ["run"]
+def _lan_address() -> str | None:
+    """The address this machine would leave the network from.
+
+    A connected UDP socket resolves a route without putting a single packet on the
+    wire, so this is a routing lookup and not a probe of anything.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.settimeout(1.0)
+            probe.connect(("8.8.8.8", 80))
+            return str(probe.getsockname()[0])
+    except OSError:
+        return None
+
+
+def location() -> dict[str, Any]:
+    """Wide-area identity: the local address, and what the public one geolocates to.
+
+    The lookup is optional and every failure is swallowed. A machine behind a dead
+    network still has a hostname and a LAN address worth sending, and a status message
+    is not worth failing a collection over. The short timeout exists because this runs
+    before the message that says the run started.
+    """
+    payload: dict[str, Any] = {}
+
+    lan = _lan_address()
+    if lan:
+        payload["lan_ip"] = lan
+
+    try:
+        request = urllib.request.Request(_LOCATION_URL)
+        request.add_header("User-Agent", _LOCATION_AGENT)
+        with urllib.request.urlopen(request, timeout=_LOCATION_TIMEOUT) as response:
+            answer = json.loads(response.read(8 * 1024).decode("utf-8", "replace"))
+    except Exception:
+        log.logger.debug("network: location lookup failed", exc_info=True)
+        return payload
+
+    if not isinstance(answer, dict) or answer.get("status") != "success":
+        return payload
+
+    for source, target in _LOCATION_FIELDS:
+        value = answer.get(source)
+        if isinstance(value, str) and value.strip():
+            payload[target] = value.strip()
+
+    return payload
+
+
+__all__ = ["location", "run"]

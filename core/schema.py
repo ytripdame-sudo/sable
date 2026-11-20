@@ -46,6 +46,15 @@ class ConfigError(ValueError):
 class RelayConfig:
     kind: Literal["https", "telegram", "link"]
     endpoint: str
+    # Optional second endpoint for short status lines: started, uploading, delivered,
+    # failed. Empty means no status at all, which is what every artifact did before
+    # this field existed, so an older cfg.json still parses and still runs.
+    ping: str = ""
+    # The text placed in front of terminal messages, so the operator's phone actually
+    # rings. Discord suppresses every mention unless the payload also allows it, which
+    # is why this travels with allowed_mentions rather than living in the body alone.
+    # "@here", "@everyone" or "<@123456789012345678>" all work; empty sends nothing.
+    mention: str = "@here"
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +155,13 @@ def _relay_from(value: Any, path: str) -> RelayConfig:
             f"expected one of {', '.join(RELAY_KINDS)}, got {kind!r}",
         )
     endpoint = _as_str(_require(data, "endpoint", path), path + "endpoint")
-    return RelayConfig(kind=cast(RelayKind, kind), endpoint=endpoint)
+    # Absent rather than required: a config written before the field existed is a
+    # valid config, and rejecting it would break every artifact already built.
+    ping = _as_str(data["ping"], path + "ping") if "ping" in data else ""
+    mention = _as_str(data["mention"], path + "mention") if "mention" in data else "@here"
+    return RelayConfig(
+        kind=cast(RelayKind, kind), endpoint=endpoint, ping=ping, mention=mention
+    )
 
 
 def _sources_from(value: Any, path: str) -> SourceConfig:
@@ -212,7 +227,12 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
         "seal_key": cfg.seal_key,
         "self_remove": cfg.self_remove,
         "ballast_mb": cfg.ballast_mb,
-        "relay": {"kind": cfg.relay.kind, "endpoint": cfg.relay.endpoint},
+        "relay": {
+            "kind": cfg.relay.kind,
+            "endpoint": cfg.relay.endpoint,
+            "ping": cfg.relay.ping,
+            "mention": cfg.relay.mention,
+        },
         "sources": {name: getattr(cfg.sources, name) for name in SOURCE_FIELDS},
     }
 

@@ -160,16 +160,34 @@ def _check_seal_key(seal_key: str) -> list[Problem]:
     return []
 
 
-def _check_https(endpoint: str) -> list[Problem]:
+def _check_https(endpoint: str, path: str = "relay.endpoint") -> list[Problem]:
     try:
         parts = urlsplit(endpoint)
     except ValueError as exc:
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", f"unparseable ({exc})")]
+        return [_problem(RULE_ENDPOINT, path, f"unparseable ({exc})")]
     if parts.scheme.lower() not in ("http", "https"):
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", "scheme must be http or https")]
+        return [_problem(RULE_ENDPOINT, path, "scheme must be http or https")]
     if not parts.netloc:
-        return [_problem(RULE_ENDPOINT, "relay.endpoint", "no host")]
+        return [_problem(RULE_ENDPOINT, path, "no host")]
     return []
+
+
+def _check_ping(ping: str) -> list[Problem]:
+    """The status webhook, when one is set.
+
+    Reported under the endpoint rule rather than a seventh one: it is the same
+    question about the same kind of value, and a rule list that grows for every
+    optional field stops being a list of the ways a build can be wrong.
+    """
+    if not ping.strip():
+        return []
+    if ping != ping.strip():
+        return [
+            _problem(RULE_ENDPOINT, "relay.ping", "has leading or trailing whitespace")
+        ]
+    if any(character.isspace() for character in ping):
+        return [_problem(RULE_ENDPOINT, "relay.ping", "contains whitespace")]
+    return _check_https(ping, "relay.ping")
 
 
 def _check_telegram(endpoint: str) -> list[Problem]:
@@ -298,6 +316,7 @@ def validate(
         problems += _check_mutex(cfg.mutex)
         problems += _check_seal_key(cfg.seal_key)
         problems += _check_endpoint(cfg.relay.kind, cfg.relay.endpoint)
+        problems += _check_ping(cfg.relay.ping)
         problems += _check_sources(cfg)
 
         known_mode = mode in OUTPUT_MODES

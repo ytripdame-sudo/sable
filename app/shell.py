@@ -109,7 +109,8 @@ class MainWindow(QWidget):
         self._run.stop_requested.connect(self._stop)
         self._run.reveal_requested.connect(self._reveal)
 
-        for widget in (self._relay._endpoint, self._tuning._mutex, self._tuning._seal_key,
+        for widget in (self._relay._endpoint, self._relay._ping, self._relay._mention,
+                       self._tuning._mutex, self._tuning._seal_key,
                        self._tuning._output, self._forge._name, self._forge._stub):
             widget.changed.connect(self._revalidate)
         self._relay._kind.currentIndexChanged.connect(self._revalidate)
@@ -230,6 +231,8 @@ class MainWindow(QWidget):
         return config_from(
             relay_kind=relay["relay_kind"],
             endpoint=relay["endpoint"],
+            ping=relay["ping"],
+            mention=relay["mention"],
             mutex=tuning["mutex"],
             seal_key=tuning["seal_key"],
             sources=sources,

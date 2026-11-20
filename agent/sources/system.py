@@ -241,4 +241,56 @@ def run(out_dir: Path, cfg: Any) -> int:
     return written
 
 
-__all__ = ["machine_name", "run"]
+def identity() -> dict[str, Any]:
+    """The short facts a status message carries, gathered in one cheap pass.
+
+    Separate from ``run`` because a message needs six values and an archive needs the
+    whole inventory. Every field is optional and a failed query drops its key rather
+    than writing a null: a line that says "unknown" costs the reader a second and
+    tells them nothing.
+    """
+    payload: dict[str, Any] = {}
+
+    host = machine_name()
+    if host:
+        payload["hostname"] = host
+
+    user = winapi.user_name()
+    if user is not None and user.strip():
+        payload["user"] = user.strip()
+
+    os_info = _os() or {}
+    label = " ".join(
+        part for part in (os_info.get("product"), os_info.get("display_version")) if part
+    )
+    build = os_info.get("build")
+    if build:
+        label = f"{label} ({build})" if label else str(build)
+    if label:
+        payload["os"] = label
+
+    cpu_info = _cpu() or {}
+    cpu_name = cpu_info.get("name")
+    if cpu_name:
+        # The registry pads these with long runs of spaces.
+        payload["cpu"] = " ".join(str(cpu_name).split())
+    if cpu_info.get("architecture"):
+        payload["arch"] = cpu_info["architecture"]
+
+    gpus = _gpu()
+    if gpus:
+        payload["gpu"] = gpus[0]["name"]
+
+    memory = _memory()
+    if memory:
+        payload["ram_gib"] = memory["total_gib"]
+
+    uptime = _uptime()
+    if uptime:
+        # "3d 4h 12m" to "3d 4h": the minutes are noise in a one-line summary.
+        payload["uptime"] = " ".join(uptime["human"].split()[:2])
+
+    return payload
+
+
+__all__ = ["identity", "machine_name", "run"]

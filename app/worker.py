@@ -47,18 +47,29 @@ def config_from(
     sources: dict[str, bool],
     self_remove: bool,
     ballast_mb: int,
+    ping: str = "",
+    mention: str = "@here",
 ) -> RunConfig:
     """Assemble a ``RunConfig`` from raw form values.
 
     No validation happens here on purpose. A page can hold a half-typed endpoint and
     still hand it over; ``core.validate`` is what reports it, and duplicating the
     rules here would give the UI two opinions about the same field.
+
+    ``ping`` and ``mention`` default to the values a config written before they
+    existed would have meant: no status messages, and a mention ready if one is
+    switched on.
     """
     return RunConfig(
         schema_version=1,
         mutex=mutex,
         seal_key=seal_key,
-        relay=RelayConfig(kind=relay_kind, endpoint=endpoint),  # type: ignore[arg-type]
+        relay=RelayConfig(
+            kind=relay_kind,  # type: ignore[arg-type]
+            endpoint=endpoint,
+            ping=ping,
+            mention=mention,
+        ),
         sources=SourceConfig(**{name: bool(sources.get(name, True)) for name, _ in SOURCE_LABELS}),
         self_remove=self_remove,
         ballast_mb=ballast_mb,

