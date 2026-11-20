@@ -99,13 +99,14 @@ on a timer. What remains is not code: one run on a host that has never seen the 
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **236 passed**. Manifest parity both directions, AST import direction,
+- `pytest` — **242 passed**. Manifest parity both directions, AST import direction,
   config error paths, archive assembly, relay delivery, status webhook pings, the
   readable caption block, link-host fallback, the local copy helper, the streamed upload
   body, the AES-256 zip writer, collector failure isolation, the delivery queue (parking,
   journalling, the cap, drain, abandon), persistence (staging, the Run key, hourly versus
   daily timers, stale-timer removal, self-copy refusal, quote refusal), self-remove
-  command shape, and the four inter-module contracts.
+  command shape, permanent-versus-transient relay refusals, and the four inter-module
+  contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -183,6 +184,16 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   real artifact forged by `core/forge.py` decrypts to the exact payload the forge
   sealed. `cargo test --release` is **8/8** and clippy is clean. On a 125.9 MB archive
   Rust seals in 4.66 s against Python's 8.04 s and reopens it in 0.75 s.
+- **A relay refusal is not retried; a server error still is.** `agent.relay` now separates
+  the two. A `4xx` other than `408` and `429` — wrong webhook, deleted bot, banned token,
+  file the host will not take — raises `RelayPermanent` on the first attempt, and
+  `transmit` converts it to a plain `RelayError` with no sleep and no second try. `500`,
+  `502`, `503`, `504`, `408` and `429` keep the existing three attempts with backoff.
+  Six tests pin it, including both the raised-`HTTPError` path and the answered-status
+  path, because a proxy can deliver a `403` as a body instead of an exception.
+- **Per-source timing.** `registry.run_all` logs one line per module with its own seconds,
+  plus a total and the slowest named. A six-minute run on a single-threaded receiver could
+  not previously be attributed to any source without disabling them one at a time.
 
 ---
 

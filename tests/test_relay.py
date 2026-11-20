@@ -91,6 +91,46 @@ def test_an_unreachable_relay_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         relay._post("https://example.invalid/hook", b"body", "boundary")
 
 
+def test_a_refusal_is_permanent_and_a_server_error_is_not() -> None:
+    # Measured: a deleted webhook answers 404 and a banned token answers 403. The answer
+    # will be the same in two seconds, so those do not deserve a retry loop.
+    for status in (400, 401, 403, 404, 410, 413, 415):
+        assert relay._permanent(status), status
+    for status in (408, 429, 500, 502, 503, 504):
+        assert not relay._permanent(status), status
+
+
+def test_a_permanent_http_error_is_raised_as_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_error(*_: object, **__: object) -> Response:
+        raise urllib.error.HTTPError("https://example.invalid", 404, "gone", {}, None)
+
+    monkeypatch.setattr(relay.urllib.request, "urlopen", raise_error)
+    with pytest.raises(relay.RelayPermanent):
+        relay._post("https://example.invalid/hook", b"body", "boundary")
+
+
+def test_a_rate_limit_is_not_permanent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 429 means "later", which is precisely what a retry is for.
+    def raise_error(*_: object, **__: object) -> Response:
+        raise urllib.error.HTTPError("https://example.invalid", 429, "slow down", {}, None)
+
+    monkeypatch.setattr(relay.urllib.request, "urlopen", raise_error)
+    with pytest.raises(relay.RelayError) as caught:
+        relay._post("https://example.invalid/hook", b"body", "boundary")
+    assert not isinstance(caught.value, relay.RelayPermanent)
+
+
+def test_a_permanent_status_without_an_exception_is_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A proxy can answer 403 with a body instead of raising; both paths have to agree.
+    capture(monkeypatch, Response(403))
+    with pytest.raises(relay.RelayPermanent):
+        relay._post("https://example.invalid/hook", b"body", "boundary")
+
+
 # --- body shape -------------------------------------------------------------
 
 
@@ -153,6 +193,54 @@ def test_transmit_gives_up_after_three_attempts(
     def fail(*_: object, **__: object) -> None:
         attempts.append(1)
         raise relay.RelayError("nope")
+
+    monkeypatch.setattr(relay, "_send_https", fail)
+    monkeypatch.setattr(relay.time, "sleep", lambda _: None)
+
+    with pytest.raises(relay.RelayError):
+        relay.transmit(Config("https", "https://example.invalid/hook"), archive)
+
+    assert len(attempts) == relay._ATTEMPTS
+
+
+def test_transmit_stops_at_the_first_permanent_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+
+    attempts: list[int] = []
+
+    def refuse(*_: object, **__: object) -> None:
+        attempts.append(1)
+        raise relay.RelayPermanent("relay returned http 404")
+
+    monkeypatch.setattr(relay, "_send_https", refuse)
+    slept: list[float] = []
+    monkeypatch.setattr(relay.time, "sleep", slept.append)
+
+    with pytest.raises(relay.RelayError) as caught:
+        relay.transmit(Config("https", "https://example.invalid/hook"), archive)
+
+    assert len(attempts) == 1, "a refusal that cannot change was retried"
+    assert slept == [], "slept between attempts that were never going to work"
+    assert "404" in str(caught.value)
+    assert not isinstance(caught.value, relay.RelayPermanent), (
+        "callers catch RelayError; the permanent marker is internal"
+    )
+
+
+def test_transmit_still_retries_a_server_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+
+    attempts: list[int] = []
+
+    def fail(*_: object, **__: object) -> None:
+        attempts.append(1)
+        raise relay.RelayError("relay returned http 503")
 
     monkeypatch.setattr(relay, "_send_https", fail)
     monkeypatch.setattr(relay.time, "sleep", lambda _: None)

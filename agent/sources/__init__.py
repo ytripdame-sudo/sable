@@ -11,6 +11,7 @@ one broken artifact source cannot take the rest of the run with it.
 from __future__ import annotations
 
 import importlib
+import time
 from pathlib import Path
 from typing import Any, Final
 
@@ -37,16 +38,31 @@ def run_all(out_dir: Path, cfg: Any) -> tuple[dict[str, int], dict[str, str]]:
     """
     counts: dict[str, int] = {}
     failures: dict[str, str] = {}
+    timings: dict[str, float] = {}
+    started = time.perf_counter()
 
     for flag, modules in _PLAN:
         if not getattr(cfg.sources, flag):
             log.logger.debug("sources: %s disabled", flag)
             continue
         for name in modules:
-            written, reason = _run_one(name, out_dir, cfg)
+            written, reason, elapsed = _run_one(name, out_dir, cfg)
             counts[name] = written
+            timings[name] = elapsed
             if reason:
                 failures[name] = reason
+
+    # A six-minute run needs a number under it. Without this the only way to find the
+    # source that owns the time is to run them one at a time by hand.
+    if timings:
+        slowest = max(timings, key=lambda name: timings[name])
+        log.logger.debug(
+            "sources: %d modules in %.1f s, slowest %s at %.1f s",
+            len(timings),
+            time.perf_counter() - started,
+            slowest,
+            timings[slowest],
+        )
 
     return counts, failures
 
@@ -57,27 +73,32 @@ def _reason(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
-def _run_one(name: str, out_dir: Path, cfg: Any) -> tuple[int, str]:
-    """Run one collector. Returns items written and a failure reason, if any."""
+def _run_one(name: str, out_dir: Path, cfg: Any) -> tuple[int, str, float]:
+    """Run one collector. Returns items written, a failure reason, and seconds taken."""
+    started = time.perf_counter()
+
     try:
         module = importlib.import_module(f".{name}", __name__)
     except Exception as exc:
         log.logger.exception("sources: %s could not be imported", name)
-        return 0, _reason(exc)
+        return 0, _reason(exc), time.perf_counter() - started
 
     runner = getattr(module, "run", None)
     if runner is None:
         log.logger.error("sources: %s has no run()", name)
-        return 0, "no run()"
+        return 0, "no run()", time.perf_counter() - started
 
     try:
         written = int(runner(out_dir, cfg))
     except Exception as exc:
         log.logger.exception("sources: %s raised", name)
-        return 0, _reason(exc)
+        elapsed = time.perf_counter() - started
+        log.logger.debug("sources: %s failed after %.2f s", name, elapsed)
+        return 0, _reason(exc), elapsed
 
-    log.logger.debug("sources: %s wrote %d", name, written)
-    return written, ""
+    elapsed = time.perf_counter() - started
+    log.logger.debug("sources: %s wrote %d in %.2f s", name, written, elapsed)
+    return written, "", elapsed
 
 
 __all__ = ["run_all"]

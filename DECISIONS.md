@@ -1093,5 +1093,41 @@ unpackable, at the cost of a second build pipeline — and it waits until the re
 finalisation list is closed.
 
 
+## A refusal is not a failure to retry
+
+The relay had one error type and one retry loop: three attempts, two and four seconds of
+backoff, then park the archive in the queue and let a timer try again every fifteen
+minutes up to forty-eight times. That is right for a flaky network and wrong for a
+deleted webhook, and the two looked identical from inside the loop.
+
+Measured while reading the code back: a `403` from a webhook that had been deleted, or a
+`404` from one whose channel was gone, spent six seconds of the run and then parked the
+archive for twelve hours of hourly retries against an endpoint that was never going to
+accept it. The run still finished, so nothing looked broken; the cost was silent.
+
+The split is `RelayPermanent(RelayError)`, raised for `4xx` except `408` and `429`.
+`transmit` catches it before the general handler, logs one line, and re-raises a plain
+`RelayError` — deliberately, because every caller already catches `RelayError` and none
+of them should have to know this type exists. `408` and `429` stay transient: they mean
+"later", which is what a retry is.
+
+The archive still parks on a permanent refusal. That is not an oversight. The parked bytes
+have no opinion about where they go, and a later run drains them under whatever config is
+newest, which may point at a working endpoint. The permanent flag only stops the pointless
+retry loop inside one run.
+
+## Timing every source, because a slow run had no owner
+
+A 426 MB run took about six minutes against a single-threaded local receiver and there was
+no way to tell which collector owned that time. The only method was to disable sources one
+at a time and re-run, which changes the thing being measured.
+
+`_run_one` now returns `(written, reason, elapsed)` and `run_all` logs each module's own
+seconds plus a total and the slowest by name. The tuple grew and the two call sites in
+`tests/test_contracts.py` were checked rather than assumed. Nothing about ordering,
+isolation, or failure handling changed: a collector that raises is still counted as zero
+and the rest of the run continues.
+
+
 
 

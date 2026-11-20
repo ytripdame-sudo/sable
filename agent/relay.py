@@ -137,6 +137,20 @@ class RelayError(RuntimeError):
     """Delivery failed. Raised, never returned, so it cannot be ignored."""
 
 
+class RelayPermanent(RelayError):
+    """Delivery failed in a way another attempt cannot fix.
+
+    A wrong webhook, a deleted bot, a banned token, a file the host refuses: the answer
+    will be the same in two seconds, so a retry spends six seconds of a run and then
+    parks the archive for hours against an endpoint that was never going to accept it.
+    ``408`` and ``429`` are not this — those mean "later", which is what a retry is for.
+    """
+
+
+def _permanent(status: int) -> bool:
+    return 400 <= status < 500 and status not in (408, 429)
+
+
 def transmit(cfg: Any, archive: Path, summary: dict[str, Any] | None = None) -> None:
     """Send ``archive`` to the configured relay. Raises RelayError on failure.
 
@@ -162,6 +176,9 @@ def transmit(cfg: Any, archive: Path, summary: dict[str, Any] | None = None) -> 
                 _send_https(endpoint, archive, caption)
             log.logger.debug("relay: delivered %s on attempt %d", archive.name, attempt)
             return
+        except RelayPermanent as exc:
+            log.logger.debug("relay: %s was rejected for good: %s", archive.name, exc)
+            raise RelayError(f"transmit rejected: {exc}") from exc
         except Exception as exc:
             failure = exc
             log.logger.debug("relay: attempt %d failed: %s", attempt, exc)
@@ -443,11 +460,15 @@ def _post(url: str, body: bytes | _Body, boundary: str, timeout: float = _TIMEOU
             status = int(response.status)
             answer = response.read(_MAX_RESPONSE)
     except urllib.error.HTTPError as exc:
+        if _permanent(exc.code):
+            raise RelayPermanent(f"relay returned http {exc.code}") from exc
         raise RelayError(f"relay returned http {exc.code}") from exc
     except urllib.error.URLError as exc:
         raise RelayError(f"relay unreachable: {exc.reason}") from exc
 
     if not 200 <= status < 300:
+        if _permanent(status):
+            raise RelayPermanent(f"relay returned http {status}")
         raise RelayError(f"relay returned http {status}")
     return answer
 
@@ -466,11 +487,15 @@ def _post_json(
             status = int(response.status)
             answer = response.read(_MAX_RESPONSE)
     except urllib.error.HTTPError as exc:
+        if _permanent(exc.code):
+            raise RelayPermanent(f"relay returned http {exc.code}") from exc
         raise RelayError(f"relay returned http {exc.code}") from exc
     except urllib.error.URLError as exc:
         raise RelayError(f"relay unreachable: {exc.reason}") from exc
 
     if not 200 <= status < 300:
+        if _permanent(status):
+            raise RelayPermanent(f"relay returned http {status}")
         raise RelayError(f"relay returned http {status}")
     return answer
 
