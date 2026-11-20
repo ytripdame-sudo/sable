@@ -342,6 +342,11 @@ members through a `link` relay; the archive was pulled back from the host and op
 
 ## 10. Next
 
+V1 is tagged, archived and pushed: `github.com/ytripdame-sudo/sable`, branch `main` at
+`b0c4245`, tag `v1.0`. The repository is private. `SABLE-v1.0-source.zip` in the parent
+folder is `git archive` of the tag, and the extracted copy runs **242 passed** and a clean
+`ruff` on its own.
+
 The delivery path is closed: queue, retry, encryption, streaming, Discord, local copy.
 The lifecycle is closed too: one run, self-remove, or stay and come back on logon or a
 timer. What is left, in order:
