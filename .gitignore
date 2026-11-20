@@ -18,6 +18,9 @@ dist/
 htmlcov/
 .coverage
 
+# Native crate build output
+native/aes/target/
+
 # Operator-local
 .env
 *.log

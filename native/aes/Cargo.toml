@@ -1,0 +1,37 @@
+[package]
+name = "sable-aes"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "WinZip AES-256 archives and the SABL container, byte-compatible with the Python side"
+publish = false
+
+[dependencies]
+# Block cipher and the authenticated mode the container uses. Same primitives the
+# Python side gets from pycryptodome, so the two agree on every byte.
+aes = "0.8"
+aes-gcm = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = "0.12"
+# Raw deflate. The rust backend keeps this a pure-Rust build with no C toolchain
+# beyond the linker.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Salt and nonce bytes. OsRng from the operating system, never a userspace PRNG.
+getrandom = "0.2"
+
+[dev-dependencies]
+# Only the tests use this: fixtures need a plain zip to seal, and writing one by hand
+# would be testing the test.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[[bin]]
+name = "sable-aes"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

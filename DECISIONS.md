@@ -1030,8 +1030,67 @@ run, remove is the intended order, and no special case is needed to get it.
 Proven end to end on a normal account: first run staged the image, wrote the Run value and
 registered the timer; the staged copy ran again and delivered a second archive;
 `schtasks /run` on the timer delivered a third and the receiving folder's timestamp moved.
-All three cleaned up afterwards — task, Run value and folder — and the machine is back to
+All three cleaned up afterwards - task, Run value and folder - and the machine is back to
 what it was.
+
+
+## The native port starts where a byte order can break it
+
+The port was going to be either "rewrite the agent in Rust" or "rewrite nothing", and both
+are wrong by an order of magnitude. The agent is ordinary code that compiles, runs, and
+either produces an archive or does not — a language change buys speed nobody needs and
+introduces a hundred chances to be subtly wrong about a path, a registry call or a DPAPI
+blob.
+
+Two modules are different in kind. `agent/util.py::seal_zip` and the pair
+`core/seal.py` + `agent/loader.py` are formats. They are written down twice already, once
+to seal and once to open, because the launcher cannot import the module that seals. A
+single wrong byte order there does not throw a readable error on a developer machine — it
+produces a file that opens nowhere, discovered on a target. So the port starts there,
+where agreement is provable against real files, and everything else waits for that proof
+to hold.
+
+**Toolchain: `stable-x86_64-pc-windows-gnu`.** This machine has no Visual Studio Build
+Tools and no gcc. The GNU target links with what rustup brings, and the crate has no C
+dependencies — `flate2` runs on `miniz_oxide` — so nothing was installed beyond rustup
+itself. The MSVC target would have meant a multi-gigabyte workload for the same bytes.
+
+**The crate is `sable/native/aes`, not outside the tree.** It started at the repository
+root and was moved in for one reason: it belongs in version control. `tools/` already sits
+outside the fifty-file manifest, and the parity test only walks `agent/`, `core/` and
+`app/`, so a `native/` folder next to `tools/` keeps the manifest honest without needing an
+exemption.
+
+**The reader refuses zip64 instead of guessing.** An archive with zip64 markers returns a
+named error. The writer never produces one — 65535 members and 4 GiB per member are past
+anything a collection run generates — and a partial zip64 implementation is a way to be
+wrong quietly.
+
+**One member in memory at a time, and a stated ceiling.** Sealing reads a member, deflates
+it, encrypts it, writes it, drops it. The peak is the largest file in the tree, not the
+archive. A member claiming to expand past 2 GiB is refused as a corrupt length rather than
+handed to an allocator.
+
+Two mistakes were made and caught inside this crate, and they are recorded because they are
+the class of mistake this kind of port keeps producing:
+
+1. The reader hashed the plaintext instead of the ciphertext, so every archive that was
+   actually fine failed authentication. The format authenticates what is written; the tag
+   check has to happen before the buffer is decrypted in place.
+2. The verifier and the tag were reported as the same error until the failure was
+   instrumented. They are different problems — a wrong password against a damaged member —
+   and the caller should be able to tell them apart.
+
+Proof, not intention: 21/21 interop checks (`_harness/rust_interop.py`), 8/8 `cargo test`,
+clippy clean, a Rust seal opens in 7-Zip, a Python seal opens in Rust, a Python container
+opens in Rust, and a Rust blob opens in Python. A real artifact forged by `core/forge.py`
+with the frozen launcher decrypts to the exact payload the forge sealed. On a 125.9 MB
+archive Rust seals in 4.66 s against Python's 8.04 s and reopens it in 0.75 s.
+
+**Not decided here:** whether the frozen launcher becomes a Rust binary. That is a product
+decision — it would remove ~8 MB of runtime from every artifact and stop the reader being
+unpackable, at the cost of a second build pipeline — and it waits until the rest of the
+finalisation list is closed.
 
 
 

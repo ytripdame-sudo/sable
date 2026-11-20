@@ -14,6 +14,7 @@ file is the map.
 | `sable/MANIFEST.txt` | The locked 50 paths, approved order. Authoritative. |
 | `sable/DECISIONS.md` | Every judgement call, with the alternative that lost. Read before disagreeing with the code. |
 | `sable/SIGNATURES.md` | Locked Win32 prototypes. A guess never goes inline — it goes here first. |
+| `sable/native/aes` | The Rust crate. Both formats, byte-compatible, proven by `_harness/rust_interop.py`. Cargo project, outside the manifest like `tools/`. |
 | `C:\Users\Kuzenee\Desktop\55555\_harness\` | Standalone harnesses. Names listed in §7. Not part of the manifest. |
 | `C:\Users\Kuzenee\AppData\Local\Temp\opencode\py312\python.exe` | Portable CPython 3.12.10 used for every test run. Has `pycryptodome`, `PySide6-Essentials`, `pytest`, `ruff`, `setuptools`. |
 | `C:\Users\Kuzenee\AppData\Local\Temp\opencode\elev\invoke.py` | Elevated runner. See §6. |
@@ -174,6 +175,14 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   The first attempt used `schtasks /sc onlogon` and returned **Access is denied**, which is
   why the Run key is the logon mechanism; that failure is recorded in `DECISIONS.md`.
   Task, Run value and folder were all removed afterwards.
+- **Native AES pair, both directions, third-party verified.** `native/aes` writes and reads
+  both formats the Python tree owns: the WinZip AES-256 archive and the SABL container.
+  `_harness/rust_interop.py` passes **21/21**: a Rust-sealed archive opens in Rust and
+  in 7-Zip (and fails with the wrong key), a Python-sealed archive opens member for
+  member in Rust, a Python container opens in Rust, a Rust blob opens in Python, and a
+  real artifact forged by `core/forge.py` decrypts to the exact payload the forge
+  sealed. `cargo test --release` is **8/8** and clippy is clean. On a 125.9 MB archive
+  Rust seals in 4.66 s against Python's 8.04 s and reopens it in 0.75 s.
 
 ---
 
@@ -217,6 +226,7 @@ registry.
 | `sable_sessions.py` | Browser and Discord desktop token stores | 14/14 |
 | `sable_ui.py` | Widgets, rail, worker thread, real build | 35/35 |
 | `sable_window.py` | Whole window, gate, theme switch | 29/29 |
+| `rust_interop.py` | Rust crate against Python, both formats, 7-Zip, a forged artifact | 21/21 |
 | `sable_fixture.py` | Chromium fixtures with real DPAPI | — |
 | `sable_sandbox2.py` | autofill / sessions / wallets / documents | 25/25 |
 | `live_chrome.py` | Live probe; `--abe-unwrap` dispatch | — |
@@ -319,9 +329,12 @@ timer. What is left, in order:
 1. A host that has never seen the artifact. The operator's own Defender run passed, but his
    machine had history; a throwaway VM is the only way to see a cloud with no memory of the
    image. Still the last behavioural check, not a known failure.
-2. The native port. `native/aes` first: port `seal_zip` and the loader's reader, then prove a
-   Python-sealed archive opens in Rust and a Rust-sealed one opens in Python and in 7-Zip.
-   Nothing else gets ported until that pair agrees.
+2. The native port. `native/aes` is done and agrees in both directions — see §5. What comes
+   next is a decision, not code: whether the frozen launcher becomes a Rust binary that
+   reads the container and hands the payload to Python, or whether the Rust crate stays a
+   proven reference and the launcher stays PyInstaller. The first removes ~8 MB of runtime
+   from every artifact and makes the reader immune to `pyinstxtractor`; the second keeps one
+   build pipeline. Everything else is ported only after that choice.
 3. Smaller items, none blocking: the 426 MB run took 6 minutes against a single-threaded
    local receiver, so the real ceiling is unmeasured; per-source timing is not logged.
 
