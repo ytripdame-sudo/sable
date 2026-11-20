@@ -29,6 +29,10 @@ _SIDECARS: Final[tuple[str, ...]] = ("-wal", "-shm")
 # Chrome stores microseconds since 1601-01-01; Unix epoch is 11644473600 s later.
 _CHROME_EPOCH_OFFSET: Final[int] = 11_644_473_600
 
+# The earliest timestamp a zip entry can carry. Anything older raises inside zipfile,
+# and a copied profile is full of 1601-epoch files.
+_ZIP_EPOCH: Final[tuple[int, int, int, int, int, int]] = (1980, 1, 1, 0, 0, 0)
+
 _DETACHED_PROCESS: Final[int] = 0x00000008
 _CREATE_NEW_PROCESS_GROUP: Final[int] = 0x00000200
 
@@ -133,7 +137,17 @@ def _iter_files(root: Path, limit: int = _MAX_ARCHIVE_FILES) -> Iterator[Path]:
 
 
 def make_archive(source: Path, destination: Path) -> Path | None:
-    """Zip the collected tree. None when the source is gone or the zip cannot open."""
+    """Zip the collected tree. None when the source is gone or the zip cannot open.
+
+    Members are written through an explicit ``ZipInfo`` rather than
+    ``ZipFile.write``. ``write`` copies each file's mtime into the entry, and the zip
+    format cannot represent anything before 1980 — it raises ``ValueError`` and takes
+    the whole archive with it. Copied browser profiles contain exactly those
+    timestamps: LevelDB and SQLite files written by an installer or unpacked from an
+    image carry a 1601 epoch, which is Windows' zero and well before the format's
+    floor. A fixed epoch also makes two runs over the same tree produce comparable
+    members instead of recording when the copy happened.
+    """
     if not source.is_dir():
         log.logger.debug("archive source is not a directory: %s", source)
         return None
@@ -144,9 +158,18 @@ def make_archive(source: Path, destination: Path) -> Path | None:
                 if path == destination:
                     continue
                 try:
-                    archive.write(path, path.relative_to(source).as_posix())
+                    data = path.read_bytes()
                 except OSError:
                     log.logger.debug("archive skipped: %s", path, exc_info=True)
+                    continue
+
+                info = zipfile.ZipInfo(path.relative_to(source).as_posix(), _ZIP_EPOCH)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o600 << 16
+                try:
+                    archive.writestr(info, data)
+                except (OSError, ValueError):
+                    log.logger.debug("archive member refused: %s", path, exc_info=True)
     except OSError:
         log.logger.debug("archive creation failed: %s", destination, exc_info=True)
         return None

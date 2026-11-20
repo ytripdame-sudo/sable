@@ -24,12 +24,19 @@ __all__ = ["RelayPage"]
 
 _HINTS: Final[dict[str, tuple[str, str]]] = {
     "https": (
-        "https://relay.example/ingest",
-        "A URL that accepts a multipart POST. The artifact is uploaded whole.",
+        "https://discord.com/api/webhooks/...",
+        "A URL that accepts a multipart POST. The artifact is uploaded whole, so the "
+        "host's own file ceiling applies.",
     ),
     "telegram": (
         "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw$42",
         "Bot token, a $, then the chat id. The artifact is sent as a document.",
+    ),
+    "link": (
+        "https://discord.com/api/webhooks/...",
+        "The artifact is hosted first and only the link is posted, so the host's file "
+        "ceiling does not apply. Small archives go to catbox and stay; large ones go "
+        "to litterbox and expire in 72 hours.",
     ),
 }
 

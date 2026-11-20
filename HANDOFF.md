@@ -97,8 +97,9 @@ code: one VM run.
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **132 passed**. Manifest parity both directions, AST import direction,
-  config error paths, and the four inter-module contracts.
+- `pytest` — **162 passed**. Manifest parity both directions, AST import direction,
+  config error paths, archive assembly, relay delivery, and the four inter-module
+  contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
 - `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
@@ -251,10 +252,15 @@ three phases did — is gone, and the payload now ships `agent/` byte for byte.
 3DES-CBC has no MAC so a corrupt gecko row decrypts to garbage rather than being
 skipped.
 
-**Live VM run not performed.** Every Windows path below the source modules has been
-exercised on this machine, but no artifact has been detonated in a throwaway VM. That
-is the one check a sandbox cannot make. The launcher boot proof deliberately runs a
-fake payload so the real collectors never execute here.
+**Live runs performed, VM run not.** Three artifacts were built, sealed, and executed
+on a real machine and delivered to a real webhook. That found three faults no fixture
+could reach — the schema registration order, the pre-1980 zip timestamp, and the
+missing User-Agent — all fixed, all with a regression test. What a throwaway VM still
+adds is a host that has never seen the artifact: Defender's verdict, behaviour on a
+non-development profile, and `self_remove`.
+
+**Measured, not estimated.** A full run on the development machine: 8,740 items,
+**440 MB** archive, 138 s wall clock. A 300 MB upload to the expiring host: 134 s.
 
 ---
 
@@ -262,15 +268,15 @@ fake payload so the real collectors never execute here.
 
 No code is owed. In order:
 
-1. Run one artifact — `py` or `exe`, both now runnable — in a throwaway VM against a
-   relay you control: collection, transmit, and `self_remove` if it is switched on.
-   That is the last check, and it is the only one a sandbox cannot make.
+1. Run one artifact in a throwaway VM against a relay you control: Defender's verdict,
+   collection, transmit, and `self_remove` if it is switched on. That is the last check.
 2. Only then decide whether the two deliberately-unfixed items in §9 matter.
 
-The transport question is answered but not built: `relay.transmit` loads the archive
-into memory twice, which is fine at 200 MB and wrong at 2 GB, and Telegram's 50 MB
-document cap cannot carry a folder grab at all. Streaming multipart is the fix when
-the volume makes it worth the change.
+Streaming multipart is still the one real limitation: `relay.transmit` loads the
+archive into memory twice, which is fine at 440 MB and wrong at 2 GB. The `link` relay
+kind removed the platform ceiling from the problem — a webhook is no longer expected to
+carry a profile — so the remaining cost is memory on the target, not whether delivery
+is possible.
 
 The acceptance checklist the build was measured against, with its current state:
 

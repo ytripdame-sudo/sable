@@ -19,9 +19,9 @@ from typing import Any, Final, Literal, cast
 
 SCHEMA_VERSION: Final[int] = 1
 
-RelayKind = Literal["https", "telegram"]
+RelayKind = Literal["https", "telegram", "link"]
 
-RELAY_KINDS: Final[tuple[str, ...]] = ("https", "telegram")
+RELAY_KINDS: Final[tuple[str, ...]] = ("https", "telegram", "link")
 
 # Ballast is padding on the finished artifact, so the ceiling is a build-time sanity
 # bound rather than a policy: 4 GiB of padding is already an absurd artifact and
@@ -44,7 +44,7 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class RelayConfig:
-    kind: Literal["https", "telegram"]
+    kind: Literal["https", "telegram", "link"]
     endpoint: str
 
 

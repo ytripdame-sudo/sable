@@ -50,17 +50,28 @@ def _load_schema(archive: zipfile.ZipFile) -> ModuleType:
     source = archive.read(SCHEMA_MEMBER)
     module = ModuleType("sable_schema")
     module.__file__ = SCHEMA_MEMBER
+
+    # Registered before the exec, not after. ``schema.py`` carries
+    # ``from __future__ import annotations``, so every annotation is a string, and
+    # ``dataclasses`` resolves those strings through ``sys.modules`` while it processes
+    # each class. Unregistered, that lookup returns None and the decorator raises
+    # AttributeError partway through the module body — which is a config rejection on a
+    # target and invisible in a test that imports ``core.schema`` instead of exec'ing a
+    # copy out of a zip. Removal on failure keeps a half-executed module from staying
+    # behind for the retry.
+    sys.modules["sable_schema"] = module
     try:
         exec(compile(source, SCHEMA_MEMBER, "exec"), module.__dict__)
     except SyntaxError as exc:
+        sys.modules.pop("sable_schema", None)
         raise ConfigLoadError(f"{SCHEMA_MEMBER}: does not compile ({exc.msg})") from exc
+    except Exception:
+        sys.modules.pop("sable_schema", None)
+        raise
 
     if not hasattr(module, "from_json"):
         raise ConfigLoadError(f"{SCHEMA_MEMBER}: no from_json")
 
-    # Unconditional: a stale sable_schema left in sys.modules must never win over
-    # the copy that is actually inside this archive.
-    sys.modules["sable_schema"] = module
     _schema = module
     return module
 
