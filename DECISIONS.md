@@ -522,5 +522,79 @@ Agent, Relay, Transmit, Self-remove, Ballast, Fused, Forge and Seal mean, becaus
 words are used in code, in the UI and in the prose and a reader who arrives at any one
 of those should not have to infer the others.
 
+## The launcher is separate from the artifact, and the trailer is why
+
+A frozen launcher that carried the seal key would open exactly one build, so every
+artifact would need its own freeze — minutes of PyInstaller for a 40 KB payload, and a
+build farm the operator does not have. The key and the mutex therefore moved out of
+`agent/loader.py` and into a fixed-width block welded between the sealed blob and the
+footer:
+
+```
+[ launcher ][ ballast ][ sealed ][ trailer 868 ][ footer 12 ]
+```
+
+`TRAILER_MAGIC` is `b"SBLK"`, then a 64-byte key slot, then an 800-byte mutex slot.
+Fixed widths, not length prefixes: the reader computes one position from EOF and does
+no parsing at all. 800 bytes for the mutex is 200 WCHARs at four UTF-8 bytes each,
+which is the kernel's own ceiling, so anything `core/validate.py` accepts fits.
+
+What this replaced: `forge.rewrite_literals` patched `MUTEX_NAME` and `SEAL_KEY` into
+the archived copy of `agent/loader.py` at build time. It worked, and it is gone. Two
+sources of truth for the same value is drift waiting to happen, and the literal was the
+half that had to be rewritten on every build. The payload now ships `agent/` verbatim,
+byte for byte; `tests/test_contracts.py` asserts the archived loader equals the file on
+disk.
+
+The cost: a loader that reads a trailer cannot read an artifact built before trailers
+existed. Nothing was ever shipped, so there is nothing to stay compatible with.
+
+The `.py` artifact has no footer to hang a trailer on, so it spells both values out in
+its own header — and now takes the mutex before decrypting, which the frozen path
+already did and the script path previously did not.
+
+## `tools/` holds the launcher and is outside the manifest
+
+`MANIFEST.txt` declares the fifty files the payload is assembled from. The launcher is
+not one of them — it is build tooling that produces a build input. So
+`tools/launcher.py` and `tools/sable-launcher.spec` sit outside the manifest, and
+`tests/test_imports.py::test_no_unlisted_python_file` still holds because it walks
+`agent/`, `core/` and `app/` only.
+
+`tools/launcher.py` is the whole launcher: import `boot`, hand it the process. No key,
+no address, no config. `boot` reads the trailer, so one freeze opens every artifact;
+a re-freeze is only needed when the loader itself changes.
+
+The spec has one non-obvious requirement. A frozen interpreter cannot see the host's
+standard library, and PyInstaller's analysis only follows what `tools/launcher.py`
+imports — so every stdlib module the *payload* uses has to be named as a hidden import
+or it is simply absent at run time. `PAYLOAD_STDLIB` in the spec is that list, derived
+from `agent/` rather than guessed. `_harness/sable_launcher.py` imports the same set
+through a fake payload, so a missed module fails a check instead of a run.
+
+The launcher deliberately does not bundle `agent/`. Bundling it would satisfy the
+stdlib requirement the lazy way and would ship the collectors in clear inside the
+launcher, which defeats the seal for anyone willing to run an extractor.
+
+Measured: 10.1 MB, 17 seconds to build.
+
+## `MAX_SEAL_KEY_LENGTH` is a byte count, and it is the trailer's
+
+Twelve characters is the floor; the trailer's 64-byte slot is the ceiling. The ceiling
+is measured in UTF-8 bytes rather than characters because a character count stops
+being the same number the moment the passphrase is not ASCII — `forge._slot` would
+then refuse at the write stage, after validation had said the form was fine. Reporting
+it on the form, under the existing `seal_key` rule, keeps the rules at six.
+
+`MAX_MUTEX_LENGTH` stays 200 characters (the kernel's ceiling) and gains a byte check
+against `MUTEX_SLOT` for the same reason.
+
+## The Forge page finds the launcher instead of asking for it
+
+`app/pages/forge.py::default_stub` returns `tools/dist/sable-launcher.exe` when it
+exists. A remembered path is only used if the file is still there, so a launcher that
+has been moved or deleted does not sit in the field as a validation failure the
+operator has to diagnose.
+
 
 

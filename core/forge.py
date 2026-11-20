@@ -1,30 +1,28 @@
-"""Assemble the shipping artifact: payload, seal, ballast, footer.
+"""Assemble the shipping artifact: payload, seal, ballast, trailer, footer.
 
-Three things are owned here and nowhere else:
+Four things are owned here and nowhere else:
 
 1. The payload archive. ``agent/`` verbatim, ``core/schema.py`` copied in as
    ``sable_schema.py``, and ``cfg.json`` written from the validated ``RunConfig``.
    One archive, one config, one schema, and ``agent/config.py`` reads the copy that
    is inside the file it is running from.
-2. The two loader literals. ``MUTEX_NAME`` and ``SEAL_KEY`` must exist before
-   anything is decrypted, so they cannot live in ``cfg.json`` — which is inside the
-   archive those two unlock. The rewrite happens on the archived bytes, never on the
-   working tree: the source file keeps its stub literals and a build never mutates
-   the repository it was run from.
-3. The container. ``[ stub ][ ballast ][ sealed ][ footer 12 ]``, with the footer
-   last so ``agent/loader.py`` finds the sealed blob with one seek from EOF.
+2. The trailer. The seal key and the mutex name must exist before anything is
+   decrypted, so they cannot live in ``cfg.json`` — that file is inside the archive
+   those two unlock. They cannot live in the launcher either, or every build would
+   need its own fresh freeze. So both travel in a fixed-width block welded between
+   the sealed blob and the footer, and one launcher opens any artifact.
+3. The container. ``[ stub ][ ballast ][ sealed ][ trailer 868 ][ footer 12 ]``, with
+   the footer last so ``agent/loader.py`` finds the sealed blob with one seek.
+4. The two output modes. ``exe`` is the shipping artifact: a frozen launcher with the
+   sealed payload welded behind it. ``py`` is the inspectable one: a single runnable
+   script carrying the sealed blob as base64, for a machine with an interpreter and
+   no frozen launcher. Both run the same ``agent.entry`` and both carry the same key;
+   the script mode just spells it out in text instead of hiding it in a binary.
 
 The footer is ``b"SBLT"`` and the little-endian 64-bit offset of the sealed blob.
 The offset is measured from the start of the file, which is why ballast sits before
 the sealed blob rather than after the footer: appending ballast at the end would
 push the footer out of position, and the loader would have to scan.
-
-Two output modes exist because they answer different questions. ``exe`` is the
-shipping artifact: a frozen stub with the sealed payload welded behind it. ``py`` is
-the inspectable one: a single runnable script carrying the sealed blob as base64,
-for a machine with an interpreter and no frozen stub. Both run the same
-``agent.entry`` and both carry the same key; the script mode just spells it out in
-text instead of hiding it in a binary.
 """
 
 from __future__ import annotations
@@ -33,7 +31,6 @@ import base64
 import io
 import json
 import os
-import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -51,9 +48,27 @@ OUTPUT_MODES: Final[tuple[str, ...]] = (OUTPUT_EXE, OUTPUT_PY)
 FOOTER_MAGIC: Final[bytes] = b"SBLT"
 FOOTER_SIZE: Final[int] = 12
 
+# The trailer sits between the sealed blob and the footer and carries the two values a
+# launcher needs before it can decrypt anything: the seal key and the mutex name.
+#
+# Fixed-width slots, so a reader computes the position instead of parsing a length
+# prefix, and so a key of any length up to the slot costs the same bytes on disk.
+TRAILER_MAGIC: Final[bytes] = b"SBLK"
+
+# The seal key is a passphrase, capped in bytes because the slot is bytes. Twelve
+# characters is the floor over in ``core/validate.py``; sixty-four bytes is where a
+# PBKDF2 passphrase stops gaining anything and starts costing trailer space.
+KEY_SLOT: Final[int] = 64
+
+# A kernel object name is capped at 260 WCHARs. Two hundred leaves room for the
+# ``Global\`` prefix and still fails loudly well before the kernel does. Four bytes
+# per WCHAR is the widest UTF-8 can get, so the slot holds any name validate accepts.
+MUTEX_SLOT: Final[int] = 200 * 4
+
+TRAILER_SIZE: Final[int] = len(TRAILER_MAGIC) + KEY_SLOT + MUTEX_SLOT
+
 SCHEMA_MEMBER: Final[str] = "sable_schema.py"
 CONFIG_MEMBER: Final[str] = "cfg.json"
-LOADER_MEMBER: Final[str] = "agent/loader.py"
 
 _MIB: Final[int] = 1024 * 1024
 _COPY_CHUNK: Final[int] = 1024 * 1024
@@ -71,43 +86,9 @@ _REQUIRED_MEMBERS: Final[tuple[str, ...]] = (
     "agent/loader.py",
 )
 
-_MUTEX_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(MUTEX_NAME: Final\[str\] = ).*$", re.MULTILINE
-)
-_SEAL_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(SEAL_KEY: Final\[str\] = ).*$", re.MULTILINE
-)
-
 
 class ForgeError(RuntimeError):
     """The artifact could not be assembled. Raised, never returned."""
-
-
-# --- loader literals ----------------------------------------------------------
-
-
-def rewrite_literals(source: str, mutex: str, seal_key: str) -> str:
-    """Replace the two stub literals in ``agent/loader.py`` source text.
-
-    ``repr`` is used rather than quote-stuffing so a mutex name with a backslash or
-    an apostrophe still produces a legal Python literal.
-    """
-    if not mutex.strip():
-        raise ForgeError("mutex is empty")
-    if not seal_key.strip():
-        raise ForgeError("seal key is empty")
-
-    rewritten, mutex_hits = _MUTEX_PATTERN.subn(lambda match: match.group(1) + repr(mutex), source)
-    rewritten, seal_hits = _SEAL_PATTERN.subn(
-        lambda match: match.group(1) + repr(seal_key), rewritten
-    )
-
-    if mutex_hits != 1 or seal_hits != 1:
-        raise ForgeError(
-            f"{LOADER_MEMBER}: {mutex_hits} MUTEX_NAME and {seal_hits} SEAL_KEY matches, "
-            "expected exactly one of each"
-        )
-    return rewritten
 
 
 # --- payload ------------------------------------------------------------------
@@ -142,23 +123,20 @@ def _config_bytes(cfg: RunConfig) -> bytes:
 
 
 def payload(root: Path, cfg: RunConfig) -> bytes:
-    """The decrypted archive: agent tree, shipped schema, and cfg.json."""
+    """The decrypted archive: agent tree, shipped schema, and cfg.json.
+
+    The tree is shipped verbatim. Nothing is rewritten on the way in: the two values
+    that used to be patched into ``agent/loader.py`` now travel in the trailer, so the
+    source in the archive is byte-identical to the source on disk and a build cannot
+    mutate the repository it was run from.
+    """
     schema_path = root / "core" / "schema.py"
     try:
         schema = schema_path.read_bytes()
     except OSError as exc:
         raise ForgeError(f"{schema_path}: cannot read ({exc.strerror})") from exc
 
-    members: list[tuple[str, bytes]] = []
-    for name, data in _agent_members(root):
-        if name == LOADER_MEMBER:
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise ForgeError(f"{LOADER_MEMBER}: not UTF-8 ({exc.reason})") from exc
-            data = rewrite_literals(text, cfg.mutex, cfg.seal_key).encode("utf-8")
-        members.append((name, data))
-
+    members: list[tuple[str, bytes]] = _agent_members(root)
     members.append((SCHEMA_MEMBER, schema))
     members.append((CONFIG_MEMBER, _config_bytes(cfg)))
     members.sort(key=lambda item: item[0])
@@ -189,6 +167,29 @@ def expected_offset(stub_size: int, ballast_mb: int) -> int:
     return stub_size + _ballast(ballast_mb) * _MIB
 
 
+def _slot(text: str, width: int, name: str) -> bytes:
+    """One NUL-padded fixed-width slot. Length is position, not a prefix."""
+    encoded = text.encode("utf-8")
+    if not text.strip():
+        # Whitespace-only would encrypt fine and produce a mutex nobody can name and a
+        # key nobody can retype. validate rejects it; the write path must agree.
+        raise ForgeError(f"{name} is empty")
+    if b"\x00" in encoded:
+        raise ForgeError(f"{name} contains a NUL byte")
+    if len(encoded) > width:
+        raise ForgeError(f"{name} is {len(encoded)} bytes, the container carries {width}")
+    return encoded.ljust(width, b"\x00")
+
+
+def trailer(cfg: RunConfig) -> bytes:
+    """The bytes a launcher reads before it can decrypt anything."""
+    return (
+        TRAILER_MAGIC
+        + _slot(cfg.seal_key, KEY_SLOT, "seal key")
+        + _slot(cfg.mutex, MUTEX_SLOT, "mutex")
+    )
+
+
 def _write_ballast(handle: object, megabytes: int) -> None:
     # Streamed in chunks: ballast_mb can legitimately reach 4096, and holding that
     # as one bytes object would fail before it finished allocating.
@@ -199,7 +200,9 @@ def _write_ballast(handle: object, megabytes: int) -> None:
         remaining -= chunk
 
 
-def _write_exe(destination: Path, stub: Path, sealed: bytes, ballast_mb: int) -> Path:
+def _write_exe(
+    destination: Path, stub: Path, sealed: bytes, ballast_mb: int, cfg: RunConfig
+) -> Path:
     try:
         stub_size = stub.stat().st_size
     except OSError as exc:
@@ -208,6 +211,7 @@ def _write_exe(destination: Path, stub: Path, sealed: bytes, ballast_mb: int) ->
         raise ForgeError(f"{stub}: stub is empty")
 
     offset = expected_offset(stub_size, ballast_mb)
+    block = trailer(cfg)
     staging = destination.with_name(destination.name + ".part")
 
     try:
@@ -217,6 +221,7 @@ def _write_exe(destination: Path, stub: Path, sealed: bytes, ballast_mb: int) ->
                 shutil.copyfileobj(source, handle, _COPY_CHUNK)
             _write_ballast(handle, ballast_mb)
             handle.write(sealed)
+            handle.write(block)
             handle.write(FOOTER_MAGIC + offset.to_bytes(_OFFSET_BYTES, "little"))
         # Same directory, so a half-written artifact is never visible under the
         # shipping name.
@@ -227,8 +232,8 @@ def _write_exe(destination: Path, stub: Path, sealed: bytes, ballast_mb: int) ->
     return destination
 
 
-def _write_script(destination: Path, sealed: bytes, seal_key: str) -> Path:
-    text = script_text(sealed, seal_key)
+def _write_script(destination: Path, sealed: bytes, cfg: RunConfig) -> Path:
+    text = script_text(sealed, cfg.seal_key, cfg.mutex)
     staging = destination.with_name(destination.name + ".part")
 
     try:
@@ -246,9 +251,10 @@ _SCRIPT_TEMPLATE: Final[str] = '''#!/usr/bin/env python3
 """SABLE payload script.
 
 Generated by core/forge.py. The archive is sealed with AES-256-GCM under a key
-derived from the literal below, the same way the frozen stub carries it. Running
-this file decrypts to a temporary directory, hands the archive to the loader, and
-runs the entry point the stub runs.
+derived from the literal below. The frozen container carries the same two values in
+a trailer behind the sealed blob; a text file has nowhere to put one, so they are
+spelled out here instead. Running this file takes the mutex, decrypts to a temporary
+directory, hands the archive to the loader, and runs the entry point the launcher runs.
 """
 
 from __future__ import annotations
@@ -260,6 +266,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+MUTEX = {mutex}
 SEAL_KEY = {key}
 SEALED = base64.b64decode({blob})
 
@@ -307,6 +314,9 @@ def main() -> int:
     try:
         from agent import entry, loader
 
+        if not loader.acquire(MUTEX):
+            return 0
+
         loader.adopt(zipfile.ZipFile(target), workspace, target)
         return int(entry.main([]))
     finally:
@@ -322,14 +332,18 @@ if __name__ == "__main__":
 '''
 
 
-def script_text(sealed: bytes, seal_key: str) -> str:
+def script_text(sealed: bytes, seal_key: str, mutex: str) -> str:
     """The ``.py`` artifact as text. Deterministic for a given seal."""
-    if not seal_key:
+    if not seal_key.strip():
         raise ForgeError("seal key is empty")
+    if not mutex.strip():
+        raise ForgeError("mutex is empty")
 
     encoded = base64.b64encode(sealed).decode("ascii")
     lines = "\n".join(f'    b"{encoded[index:index + 76]}"' for index in range(0, len(encoded), 76))
-    return _SCRIPT_TEMPLATE.format(key=repr(seal_key), blob="\n" + lines + "\n")
+    return _SCRIPT_TEMPLATE.format(
+        mutex=repr(mutex), key=repr(seal_key), blob="\n" + lines + "\n"
+    )
 
 
 def build(
@@ -353,27 +367,31 @@ def build(
     if mode == OUTPUT_EXE:
         if stub is None:
             raise ForgeError("exe output needs a frozen stub")
-        return _write_exe(destination, stub, sealed, _ballast(cfg.ballast_mb))
+        return _write_exe(destination, stub, sealed, _ballast(cfg.ballast_mb), cfg)
 
     # Script output carries no ballast. The pad exists to change the size of a
     # binary; padding a text file with comment lines would only make the build
     # slower to read for the same number. Recorded in DECISIONS.md.
-    return _write_script(destination, sealed, cfg.seal_key)
+    return _write_script(destination, sealed, cfg)
 
 
 __all__ = [
     "CONFIG_MEMBER",
     "FOOTER_MAGIC",
     "FOOTER_SIZE",
+    "KEY_SLOT",
+    "MUTEX_SLOT",
     "OUTPUT_EXE",
     "OUTPUT_MODES",
     "OUTPUT_PY",
     "SCHEMA_MEMBER",
+    "TRAILER_MAGIC",
+    "TRAILER_SIZE",
     "ForgeError",
     "OutputMode",
     "build",
     "expected_offset",
     "payload",
-    "rewrite_literals",
     "script_text",
+    "trailer",
 ]

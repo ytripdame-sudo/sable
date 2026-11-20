@@ -103,6 +103,16 @@ def test_seal_constants_are_pinned_to_the_loader() -> None:
     assert loader.KDF_ITERATIONS == seal.KDF_ITERATIONS
     assert loader.FOOTER_MAGIC == forge.FOOTER_MAGIC
     assert loader.FOOTER_SIZE == forge.FOOTER_SIZE
+    assert loader.TRAILER_MAGIC == forge.TRAILER_MAGIC
+    assert loader.KEY_SLOT == forge.KEY_SLOT
+    assert loader.MUTEX_SLOT == forge.MUTEX_SLOT
+    assert loader.TRAILER_SIZE == forge.TRAILER_SIZE
+
+
+def test_the_key_and_mutex_slots_fit_what_validate_accepts() -> None:
+    """A form that passes must always produce a trailer forge can write."""
+    assert validate_module.MAX_SEAL_KEY_LENGTH == forge.KEY_SLOT
+    assert validate_module.MAX_MUTEX_LENGTH * 4 <= loader.MUTEX_SLOT
 
 
 @needs_crypto
@@ -166,20 +176,18 @@ def test_payload_carries_the_whole_agent_tree() -> None:
         assert shipped == on_disk, "the archive and agent/ disagree"
 
 
-def test_payload_rewrites_the_two_literals_and_only_in_the_archive() -> None:
+def test_payload_ships_the_loader_verbatim() -> None:
+    """Nothing is patched on the way in; the trailer carries the two secrets."""
     data = forge.payload(ROOT, config())
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        shipped = archive.read(forge.LOADER_MEMBER).decode("utf-8")
+        shipped = archive.read("agent/loader.py")
 
-    assert f"MUTEX_NAME: Final[str] = {MUTEX!r}" in shipped
-    assert f"SEAL_KEY: Final[str] = {SEAL_KEY!r}" in shipped
-    assert "SABLE_STUB_MUTEX" not in shipped
-    assert "SABLE_STUB_KEY" not in shipped
+    assert shipped == (ROOT / "agent" / "loader.py").read_bytes()
 
-    # A build never mutates the tree it was run from.
-    on_disk = (ROOT / forge.LOADER_MEMBER).read_text(encoding="utf-8")
-    assert "SABLE_STUB_MUTEX" in on_disk
-    assert MUTEX not in on_disk
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        text = archive.read("agent/loader.py").decode("utf-8")
+    assert MUTEX not in text
+    assert SEAL_KEY not in text
 
 
 def test_payload_copies_the_schema_byte_for_byte() -> None:
@@ -203,17 +211,27 @@ def test_payload_config_is_readable_by_the_schema_it_ships() -> None:
     assert from_dict(document) == cfg
 
 
-def test_rewrite_refuses_a_mutex_that_is_only_whitespace() -> None:
-    source = (ROOT / forge.LOADER_MEMBER).read_text(encoding="utf-8")
-    with pytest.raises(forge.ForgeError):
-        forge.rewrite_literals(source, "   ", SEAL_KEY)
-    with pytest.raises(forge.ForgeError):
-        forge.rewrite_literals(source, MUTEX, "")
+def test_trailer_carries_the_key_and_the_mutex_in_fixed_slots() -> None:
+    block = forge.trailer(config())
+    assert len(block) == forge.TRAILER_SIZE
+    assert block[:4] == forge.TRAILER_MAGIC
+
+    key = block[4:4 + forge.KEY_SLOT]
+    assert key.rstrip(b"\x00") == SEAL_KEY.encode("utf-8")
+    assert len(key) == forge.KEY_SLOT
+
+    mutex = block[4 + forge.KEY_SLOT:]
+    assert mutex.rstrip(b"\x00") == MUTEX.encode("utf-8")
+    assert len(mutex) == forge.MUTEX_SLOT
 
 
-def test_rewrite_refuses_a_source_without_the_literal() -> None:
+def test_trailer_refuses_a_value_that_does_not_fit_its_slot() -> None:
     with pytest.raises(forge.ForgeError):
-        forge.rewrite_literals("x = 1\n", MUTEX, SEAL_KEY)
+        forge.trailer(config(seal_key="k" * (forge.KEY_SLOT + 1)))
+    with pytest.raises(forge.ForgeError):
+        forge.trailer(config(mutex="Global\\" + "m" * forge.MUTEX_SLOT))
+    with pytest.raises(forge.ForgeError):
+        forge.trailer(config(mutex="Global\\SABLE\x00MUTEX"))
 
 
 # --- container --------------------------------------------------------------
@@ -226,12 +244,71 @@ def test_exe_container_offset_and_footer(tmp_path: Path, stub: Path) -> None:
     built = forge.build(config(), blob, tmp_path / "artifact.exe", mode="exe", stub=stub)
 
     raw = built.read_bytes()
-    assert len(raw) == stub.stat().st_size + len(blob) + forge.FOOTER_SIZE
+    assert len(raw) == stub.stat().st_size + len(blob) + forge.TRAILER_SIZE + forge.FOOTER_SIZE
     assert raw[: stub.stat().st_size] == stub.read_bytes()
 
     footer = raw[-forge.FOOTER_SIZE:]
     assert footer[:4] == forge.FOOTER_MAGIC
     assert int.from_bytes(footer[4:], "little") == stub.stat().st_size
+
+    # The trailer sits between the sealed blob and the footer, so the blob ends
+    # exactly where the trailer starts.
+    trailer_start = len(raw) - forge.FOOTER_SIZE - forge.TRAILER_SIZE
+    assert raw[trailer_start:trailer_start + 4] == forge.TRAILER_MAGIC
+    assert raw[trailer_start - len(blob):trailer_start] == blob
+
+
+@needs_crypto
+def test_the_trailer_returns_the_values_the_config_was_built_from(
+    tmp_path: Path, stub: Path
+) -> None:
+    data = forge.payload(ROOT, config())
+    built = forge.build(
+        config(), seal.seal(data, SEAL_KEY), tmp_path / "artifact.exe", mode="exe", stub=stub
+    )
+
+    header = loader._read_trailer(built)
+    assert header.seal_key == SEAL_KEY
+    assert header.mutex == MUTEX
+    assert loader._open_sealed(loader._read_sealed(built, loader._archive_offset(built)), header.seal_key) == data
+
+
+@needs_crypto
+def test_two_builds_share_a_launcher_and_keep_their_own_keys(
+    tmp_path: Path, stub: Path
+) -> None:
+    """The whole point of the trailer: one freeze, any artifact."""
+    other_key = "k-77bb-second-build"
+    other_mutex = "Global\\SABLE_SECOND_MUTEX_4a1e"
+
+    first_cfg = config()
+    second_cfg = config(seal_key=other_key, mutex=other_mutex)
+
+    first = forge.build(
+        first_cfg,
+        seal.seal(forge.payload(ROOT, first_cfg), first_cfg.seal_key),
+        tmp_path / "one.exe",
+        mode="exe",
+        stub=stub,
+    )
+    second = forge.build(
+        second_cfg,
+        seal.seal(forge.payload(ROOT, second_cfg), second_cfg.seal_key),
+        tmp_path / "two.exe",
+        mode="exe",
+        stub=stub,
+    )
+
+    assert loader._read_trailer(first).mutex == MUTEX
+    assert loader._read_trailer(second).mutex == other_mutex
+    assert loader._read_trailer(second).seal_key == other_key
+
+    # Neither key opens the other artifact.
+    with pytest.raises(loader.ArchiveError):
+        loader._open_sealed(
+            loader._read_sealed(second, loader._archive_offset(second)),
+            loader._read_trailer(first).seal_key,
+        )
 
 
 @needs_crypto
@@ -284,6 +361,8 @@ def test_script_container_is_runnable_text_and_ignores_ballast(tmp_path: Path) -
     text = plain.read_text(encoding="utf-8")
     assert compile(text, str(plain), "exec")
     assert f"SEAL_KEY = {SEAL_KEY!r}" in text
+    assert f"MUTEX = {MUTEX!r}" in text
+    assert "loader.acquire(MUTEX)" in text
     assert "loader.adopt(" in text
     assert text.startswith("#!/usr/bin/env python3")
 
@@ -319,11 +398,41 @@ def test_a_footer_that_is_not_there_is_refused(tmp_path: Path, stub: Path) -> No
 
     with pytest.raises(loader.ArchiveError):
         loader._archive_offset(plain)
+    with pytest.raises(loader.ArchiveError):
+        loader._read_trailer(plain)
 
     tiny = tmp_path / "tiny.exe"
     tiny.write_bytes(b"MZ")
     with pytest.raises(loader.ArchiveError):
         loader._archive_offset(tiny)
+    with pytest.raises(loader.ArchiveError):
+        loader._read_trailer(tiny)
+
+
+@needs_crypto
+def test_a_trailer_that_is_truncated_is_refused(tmp_path: Path, stub: Path) -> None:
+    data = forge.payload(ROOT, config())
+    built = forge.build(
+        config(), seal.seal(data, SEAL_KEY), tmp_path / "artifact.exe", mode="exe", stub=stub
+    )
+    raw = built.read_bytes()
+
+    # Every length from "no trailer" to "one byte short" is refused, never guessed at.
+    for cut in (0, 1, 4, forge.KEY_SLOT, forge.TRAILER_SIZE - 1):
+        damaged = tmp_path / f"cut-{cut}.exe"
+        damaged.write_bytes(raw[: len(raw) - forge.TRAILER_SIZE - forge.FOOTER_SIZE + cut])
+        with pytest.raises(loader.ArchiveError):
+            loader._read_trailer(damaged)
+
+
+@needs_crypto
+def test_an_empty_slot_is_refused_rather_than_silently_blank(tmp_path: Path) -> None:
+    path = tmp_path / "blank.exe"
+    block = forge.TRAILER_MAGIC + b"\x00" * (forge.KEY_SLOT + forge.MUTEX_SLOT)
+    path.write_bytes(b"\x00" * 64 + block + forge.FOOTER_MAGIC + (0).to_bytes(8, "little"))
+
+    with pytest.raises(loader.ArchiveError):
+        loader._read_trailer(path)
 
 
 # --- rename -----------------------------------------------------------------
@@ -491,6 +600,21 @@ def test_ballast_on_a_script_is_a_note_not_a_stop() -> None:
 def test_seal_key_below_the_floor_is_blocking() -> None:
     problems = validate_module.validate(config(seal_key="short"), mode=forge.OUTPUT_PY)
     assert [problem.path for problem in problems] == ["seal_key"]
+    assert problems[0].blocking is True
+
+
+def test_seal_key_over_the_slot_is_blocking() -> None:
+    """A key the trailer cannot carry must fail on the form, not at the write stage."""
+    problems = validate_module.validate(
+        config(seal_key="k" * (validate_module.MAX_SEAL_KEY_LENGTH + 1)), mode=forge.OUTPUT_PY
+    )
+    assert [problem.path for problem in problems] == ["seal_key"]
+    assert str(validate_module.MAX_SEAL_KEY_LENGTH) in problems[0].message
+
+
+def test_a_key_at_the_byte_ceiling_passes() -> None:
+    exact = "k" * forge.KEY_SLOT
+    assert validate_module.validate(config(seal_key=exact), mode=forge.OUTPUT_PY) == []
 
 
 def test_a_name_without_an_extension_is_a_note() -> None:

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
 
-from .forge import OUTPUT_EXE, OUTPUT_MODES, OUTPUT_PY
+from .forge import KEY_SLOT, MUTEX_SLOT, OUTPUT_EXE, OUTPUT_MODES, OUTPUT_PY
 from .rename import MAX_NAME_LENGTH, RenameError, sanitize, sanitize_suffix
 from .schema import MAX_BALLAST_MB, RELAY_KINDS, SOURCE_FIELDS, RunConfig
 
@@ -33,6 +33,12 @@ from .schema import MAX_BALLAST_MB, RELAY_KINDS, SOURCE_FIELDS, RunConfig
 # the number exists to stop a four-character key being shipped, not to substitute for
 # entropy.
 MIN_SEAL_KEY_LENGTH: Final[int] = 12
+
+# The trailer carries one 64-byte slot per key. A character count stops being the same
+# number once the passphrase is not ASCII, so the ceiling is measured in the bytes that
+# actually land in the slot — forge would refuse the oversized one later, and a build
+# that fails at the write stage is a mystery the form should have solved.
+MAX_SEAL_KEY_LENGTH: Final[int] = KEY_SLOT
 
 # A kernel object name is capped at 260 characters including the namespace prefix;
 # 200 leaves room for ``Global\`` and still fails loudly well before the kernel does.
@@ -108,6 +114,11 @@ def _check_mutex(mutex: str) -> list[Problem]:
         return [
             _problem(RULE_MUTEX, "mutex", f"{len(mutex)} characters, limit {MAX_MUTEX_LENGTH}")
         ]
+    encoded = len(mutex.encode("utf-8"))
+    if encoded > MUTEX_SLOT:
+        return [
+            _problem(RULE_MUTEX, "mutex", f"{encoded} bytes, the container carries {MUTEX_SLOT}")
+        ]
     illegal = sorted({character for character in mutex if character in _MUTEX_FORBIDDEN})
     if illegal:
         return [
@@ -135,6 +146,15 @@ def _check_seal_key(seal_key: str) -> list[Problem]:
                 RULE_SEAL_KEY,
                 "seal_key",
                 f"{len(seal_key)} characters, minimum {MIN_SEAL_KEY_LENGTH}",
+            )
+        ]
+    encoded = len(seal_key.encode("utf-8"))
+    if encoded > MAX_SEAL_KEY_LENGTH:
+        return [
+            _problem(
+                RULE_SEAL_KEY,
+                "seal_key",
+                f"{encoded} bytes, the container carries {MAX_SEAL_KEY_LENGTH}",
             )
         ]
     return []
@@ -304,6 +324,7 @@ def validate(
 
 __all__ = [
     "MAX_MUTEX_LENGTH",
+    "MAX_SEAL_KEY_LENGTH",
     "MIN_SEAL_KEY_LENGTH",
     "RULES",
     "RULE_BALLAST",

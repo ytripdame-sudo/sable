@@ -1,21 +1,23 @@
-"""Archive loader: mutex, footer, decryption, mount.
+"""Archive loader: trailer, mutex, footer, decryption, mount.
 
 This is the only module that decrypts, and the only one that runs before a config
-exists. ``MUTEX_NAME`` and ``SEAL_KEY`` are compile-time literals that
-``core/forge.py`` rewrites at build time, because both are needed before anything is
-decrypted; ``cfg.json`` carries the same two values for the UI and for validation.
+exists. The two values it needs before anything else — the seal key and the mutex
+name — come from the trailer, a fixed-width block welded between the sealed blob and
+the footer. That is what makes a frozen launcher artifact-independent: the launcher
+carries the reader, never the key, so one freeze opens every build.
 
 Layout of the built artifact, last byte backwards:
 
-    [ frozen exe ][ ballast ][ sealed blob ][ footer 12 bytes ]
+    [ launcher ][ ballast ][ sealed blob ][ trailer 868 ][ footer 12 bytes ]
 
 The footer is ``b"SBLT"`` followed by the little-endian offset of the sealed blob, so
-it is found with one seek from EOF. The ballast sits before the sealed blob rather
-than after the footer: with the footer last, the offset needs no length field, and a
-ballast appended after the footer would make the footer unlocatable without a scan.
+it is found with one seek from EOF. The trailer is a fixed size, so its start is the
+same arithmetic. The ballast sits before the sealed blob rather than after the
+footer: with the footer last, the offset needs no length field, and a ballast
+appended after the footer would make the footer unlocatable without a scan.
 
 The decrypt half of the seal lives here rather than in ``core/seal.py`` because the
-stub cannot import a module that is inside the archive it has not decrypted yet.
+launcher cannot import a module that is inside the archive it has not decrypted yet.
 ``tests/test_contracts.py`` seals with ``core.seal`` and opens with this function, so
 the two cannot drift apart silently.
 """
@@ -36,13 +38,16 @@ from typing import Any, Final, NamedTuple
 
 from . import log, util, winapi
 
-# FILL: core/forge.py rewrites both literals at build time. They cannot come from
-# cfg.json, because cfg.json is inside the archive these two unlock.
-MUTEX_NAME: Final[str] = "Global\\SABLE_STUB_MUTEX"
-SEAL_KEY: Final[str] = "SABLE_STUB_KEY"
-
+# Pinned to core/forge.py by tests/test_contracts.py. Declared twice on purpose: this
+# module ships inside the archive and cannot import the build side.
 FOOTER_MAGIC: Final[bytes] = b"SBLT"
 FOOTER_SIZE: Final[int] = 12
+
+TRAILER_MAGIC: Final[bytes] = b"SBLK"
+KEY_SLOT: Final[int] = 64
+MUTEX_SLOT: Final[int] = 200 * 4
+TRAILER_SIZE: Final[int] = len(TRAILER_MAGIC) + KEY_SLOT + MUTEX_SLOT
+
 SALT_SIZE: Final[int] = 16
 NONCE_SIZE: Final[int] = 12
 TAG_SIZE: Final[int] = 16
@@ -56,6 +61,13 @@ class ArchiveError(RuntimeError):
     """The artifact is not shaped like an archive this loader can open."""
 
 
+class Trailer(NamedTuple):
+    """The two values read out of the block before the footer."""
+
+    seal_key: str
+    mutex: str
+
+
 class Prepared(NamedTuple):
     archive: zipfile.ZipFile
     workspace: Path
@@ -63,7 +75,7 @@ class Prepared(NamedTuple):
 
 
 def _state() -> dict[str, Any]:
-    """Process-wide state shared across the stub and payload copies of this module.
+    """Process-wide state shared across the launcher and payload copies of this module.
 
     ``sys`` is one object per process; the module globals are not, because the
     payload carries its own copy of every file. Both copies must agree that the
@@ -77,15 +89,21 @@ def _state() -> dict[str, Any]:
     return state
 
 
-def acquire() -> bool:
-    """Take the mutex guard. False when another instance already holds it."""
+def acquire(mutex: str | None = None) -> bool:
+    """Take the mutex guard. False when another instance already holds it.
+
+    ``mutex`` is given by the ``.py`` artifact, which has no trailer to read. The
+    launcher passes nothing and the name comes out of the trailer. A second call in
+    the same process is a no-op that reports the first call's answer.
+    """
     state = _state()
     if state["held"]:
         return True
 
-    handle, created = winapi.create_mutex(MUTEX_NAME)
+    name = mutex if mutex is not None else _read_trailer(util.executable_path()).mutex
+    handle, created = winapi.create_mutex(name)
     if not created:
-        log.logger.debug("loader: mutex %s is already held", MUTEX_NAME)
+        log.logger.debug("loader: mutex %s is already held", name)
         return False
 
     state["held"] = True
@@ -94,16 +112,17 @@ def acquire() -> bool:
 
 
 def prepare() -> Prepared:
-    """Read the footer, decrypt to a temp file, replace it into place, open it."""
+    """Read the trailer and footer, decrypt to a temp file, replace it, open it."""
     state = _state()
     cached = state["prepared"]
     if cached is not None:
         return cached
 
     executable = util.executable_path()
+    seal_key = _read_trailer(executable).seal_key
     offset = _archive_offset(executable)
     sealed = _read_sealed(executable, offset)
-    plaintext = _open_sealed(sealed, SEAL_KEY)
+    plaintext = _open_sealed(sealed, seal_key)
 
     workspace = Path(tempfile.mkdtemp(prefix="sable-"))
     target = workspace / "payload.zip"
@@ -125,8 +144,8 @@ def adopt(archive: zipfile.ZipFile, workspace: Path, source: Path) -> None:
 
     The generated ``.py`` artifact decrypts its own payload and hands it here, so
     the rest of the boot path — config, gate, collection — runs exactly as it does
-    behind a frozen stub. ``prepare`` returns this instead of seeking a footer that
-    a text file does not have. Replacing a previous entry closes it first.
+    behind a frozen launcher. ``prepare`` returns this instead of seeking a trailer
+    that a text file does not have. Replacing a previous entry closes it first.
     """
     state = _state()
     previous = state["prepared"]
@@ -153,7 +172,7 @@ def cleanup() -> None:
 
 
 def boot() -> int:
-    """Stub entry: guard, prepare, load the payload entry, run it, clean up."""
+    """Launcher entry: guard, prepare, load the payload entry, run it, clean up."""
     if not acquire():
         return 0
 
@@ -176,12 +195,49 @@ def boot() -> int:
         cleanup()
 
 
+def _slot_text(field: bytes, name: str) -> str:
+    """One NUL-terminated slot. Everything after the first NUL is padding."""
+    text = field.split(b"\x00", 1)[0]
+    if not text:
+        raise ArchiveError(f"trailer {name} is empty")
+    try:
+        return text.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ArchiveError(f"trailer {name} is not UTF-8") from exc
+
+
+def _read_trailer(executable: Path) -> Trailer:
+    try:
+        size = executable.stat().st_size
+    except OSError as exc:
+        raise ArchiveError(f"{executable.name}: cannot stat") from exc
+
+    minimum = TRAILER_SIZE + FOOTER_SIZE + 1
+    if size < minimum:
+        raise ArchiveError(f"{executable.name}: {size} bytes cannot carry a trailer")
+
+    with executable.open("rb") as handle:
+        handle.seek(size - FOOTER_SIZE - TRAILER_SIZE)
+        block = handle.read(TRAILER_SIZE)
+
+    if len(block) != TRAILER_SIZE or block[: len(TRAILER_MAGIC)] != TRAILER_MAGIC:
+        raise ArchiveError(f"{executable.name}: no {TRAILER_MAGIC!r} trailer")
+
+    head = len(TRAILER_MAGIC)
+    return Trailer(
+        seal_key=_slot_text(block[head:head + KEY_SLOT], "seal key"),
+        mutex=_slot_text(block[head + KEY_SLOT:], "mutex"),
+    )
+
+
 def _archive_offset(executable: Path) -> int:
     try:
         size = executable.stat().st_size
     except OSError as exc:
         raise ArchiveError(f"{executable.name}: cannot stat") from exc
-    if size <= FOOTER_SIZE:
+
+    tail = FOOTER_SIZE + TRAILER_SIZE
+    if size <= tail + 1:
         raise ArchiveError(f"{executable.name}: {size} bytes cannot carry a footer")
 
     with executable.open("rb") as handle:
@@ -192,13 +248,13 @@ def _archive_offset(executable: Path) -> int:
         raise ArchiveError(f"{executable.name}: no {FOOTER_MAGIC!r} footer")
 
     offset = int.from_bytes(footer[4:], "little")
-    if offset <= 0 or offset >= size - FOOTER_SIZE:
+    if offset <= 0 or offset >= size - tail:
         raise ArchiveError(f"{executable.name}: footer offset {offset} is outside the file")
     return offset
 
 
 def _read_sealed(executable: Path, offset: int) -> bytes:
-    end = executable.stat().st_size - FOOTER_SIZE
+    end = executable.stat().st_size - FOOTER_SIZE - TRAILER_SIZE
     length = end - offset
     if length <= 0 or length > MAX_SEALED_BYTES:
         raise ArchiveError(f"sealed blob is {length} bytes")
@@ -259,10 +315,15 @@ def _load_entry(archive_path: Path) -> ModuleType:
 
 
 __all__ = [
-    "MUTEX_NAME",
-    "SEAL_KEY",
+    "FOOTER_MAGIC",
+    "FOOTER_SIZE",
+    "KEY_SLOT",
+    "MUTEX_SLOT",
+    "TRAILER_MAGIC",
+    "TRAILER_SIZE",
     "ArchiveError",
     "Prepared",
+    "Trailer",
     "acquire",
     "adopt",
     "boot",
