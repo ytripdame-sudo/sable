@@ -259,10 +259,10 @@ def _load_entry(archive_path: Path) -> ModuleType:
 
 
 __all__ = [
-    "ArchiveError",
     "MUTEX_NAME",
-    "Prepared",
     "SEAL_KEY",
+    "ArchiveError",
+    "Prepared",
     "acquire",
     "adopt",
     "boot",

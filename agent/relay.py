@@ -113,15 +113,15 @@ def _multipart(
     for name, value in fields.items():
         parts.append(
             f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
-            f"{value}\r\n".encode("utf-8")
+            f"{value}\r\n".encode()
         )
 
     parts.append(
         f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; '
-        f'filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n'.encode("utf-8")
+        f'filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n'.encode()
     )
     parts.append(payload)
-    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
 
     return b"".join(parts), boundary
 

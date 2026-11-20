@@ -19,6 +19,7 @@ the life of the process, and the run spends at most ``_MAX_VALIDATIONS`` request
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import re
 import urllib.error
@@ -83,19 +84,14 @@ def _scan(leveldb: Path) -> list[tuple[bytes, bool, str]]:
 
         scanned += 1
 
-        found = 0
-        for match in _ENCRYPTED_PATTERN.finditer(blob):
+        # islice bounds the walk: a LevelDB record set can hold thousands of matches and
+        # the run only ever transmits _MAX_HITS of each shape, so counting by hand and
+        # breaking was the same thing with more state.
+        for match in itertools.islice(_ENCRYPTED_PATTERN.finditer(blob), _MAX_HITS):
             hits.append((match.group(1), True, item.name))
-            found += 1
-            if found >= _MAX_HITS:
-                break
 
-        found = 0
-        for match in _PLAIN_PATTERN.finditer(blob):
+        for match in itertools.islice(_PLAIN_PATTERN.finditer(blob), _MAX_HITS):
             hits.append((match.group(0), False, item.name))
-            found += 1
-            if found >= _MAX_HITS:
-                break
 
     return hits
 

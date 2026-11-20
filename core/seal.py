@@ -104,8 +104,8 @@ def seal_file(source: Path, destination: Path, key_text: str) -> Path:
 
 
 __all__ = [
-    "KEY_BYTES",
     "KDF_ITERATIONS",
+    "KEY_BYTES",
     "MIN_SEALED_BYTES",
     "NONCE_SIZE",
     "SALT_SIZE",

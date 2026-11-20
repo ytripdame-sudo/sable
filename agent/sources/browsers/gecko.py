@@ -243,10 +243,9 @@ def _encrypted_pairs(blob: bytes, scheme: _Scheme) -> list[tuple[bytes, bytes]]:
 
 
 def _derive(global_salt: bytes, candidate: _Pbe, password: bytes) -> bytes:
-    if candidate.prehash:
-        material = hashlib.sha1(global_salt + password).digest()
-    else:
-        material = password
+    material = (
+        hashlib.sha1(global_salt + password).digest() if candidate.prehash else password
+    )
     rounds = max(1, min(candidate.iterations, _MAX_ITERATIONS))
     return hashlib.pbkdf2_hmac(
         candidate.prf, material, candidate.salt, rounds, candidate.key_bytes
@@ -392,23 +391,26 @@ def _layout_legacy(children: list[_Element]) -> list[_Pbe]:
             )
 
     # Layout B: SEQ[ OCTET STRING salt, INTEGER iterations, OCTET STRING iv, OCTET STRING ct ]
-    if len(children) >= 4 and children[0].tag == _TAG_OCTET_STRING:
-        if children[1].tag == _TAG_INTEGER:
-            iv = children[2].value
-            ciphertext = children[3].value
-            if len(iv) == 8 and ciphertext:
-                candidates.append(
-                    _Pbe(
-                        children[0].value,
-                        int.from_bytes(children[1].value, "big"),
-                        iv,
-                        ciphertext,
-                        "des3",
-                        "sha1",
-                        24,
-                        True,
-                    )
+    if (
+        len(children) >= 4
+        and children[0].tag == _TAG_OCTET_STRING
+        and children[1].tag == _TAG_INTEGER
+    ):
+        iv = children[2].value
+        ciphertext = children[3].value
+        if len(iv) == 8 and ciphertext:
+            candidates.append(
+                _Pbe(
+                    children[0].value,
+                    int.from_bytes(children[1].value, "big"),
+                    iv,
+                    ciphertext,
+                    "des3",
+                    "sha1",
+                    24,
+                    True,
                 )
+            )
 
     return candidates
 

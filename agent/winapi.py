@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import ctypes
 import sys
+from collections.abc import Iterator
 from ctypes import wintypes
-from typing import Final, Iterator, NamedTuple
+from typing import Final, NamedTuple
 
 from . import log
 
@@ -881,13 +882,13 @@ def crypt_unprotect(blob: bytes) -> bytes | None:
 
 
 __all__ = [
-    "AdapterInfo",
     "HKEY_CURRENT_USER",
     "HKEY_LOCAL_MACHINE",
-    "MemoryStatus",
-    "MonitorInfo",
     "PAGE_EXECUTE_READWRITE",
     "PAGE_READWRITE",
+    "AdapterInfo",
+    "MemoryStatus",
+    "MonitorInfo",
     "SystemInfo",
     "acpi_vendor_strings",
     "adapters",

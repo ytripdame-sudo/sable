@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sable"
+version = "0.1.0"
+description = "Source collection with a sealed payload, a forge and a desktop relay form"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    # The UI binding. Essentials rather than the full wheel: the addons module is not
+    # imported anywhere, and it is the larger half of the download.
+    "PySide6-Essentials>=6.6",
+    # AES-256-GCM and PBKDF2 for the seal. The agent side cannot vendor this, so it is
+    # a hard runtime dependency of both the builder and the built artifact.
+    "pycryptodome>=3.20",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+# Entry point is a console script rather than ``python -m app``: there is no
+# ``app/__main__.py`` on purpose, because a module run as ``__main__`` and the same
+# module imported by the console script end up as two objects in ``sys.modules`` and
+# the second one re-runs the module body.
+sable = "app.main:main"
+
+[tool.setuptools.packages.find]
+include = ["agent*", "core*", "app*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+# The two stylesheets are read at runtime by ``app.main.read_theme``; an installed
+# wheel without them starts with the fallback palette and no error.
+app = ["theme/*.qss"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The tests import ``agent``, ``core`` and ``app`` as top-level packages from the
+# repository root, the same way the console script does after an editable install.
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = ["error::DeprecationWarning:agent.*", "error::DeprecationWarning:core.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    # Long URLs and long dotted paths read worse wrapped.
+    "E501",
+    # ``except Exception`` is load-bearing in the worker, the loader, the emitter and
+    # the validator: each one has to turn an unclassified failure into a message.
+    "BLE001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into private helpers deliberately: the contract is the private function.
+"tests/*" = ["SLF001", "S101"]

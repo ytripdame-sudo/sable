@@ -10,7 +10,8 @@ time, so a silent exit is the one outcome that teaches nobody anything.
 from __future__ import annotations
 
 import os
-from typing import Callable, Final, NamedTuple
+from collections.abc import Callable
+from typing import Final, NamedTuple
 
 from . import log, winapi
 
@@ -63,7 +64,7 @@ class Verdict(NamedTuple):
 
 def _system_drive() -> str:
     try:
-        root = os.environ["SystemDrive"]
+        root = os.environ["SYSTEMDRIVE"]
     except KeyError:
         root = "C:"
     return root + "\\"

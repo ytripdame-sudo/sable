@@ -121,10 +121,7 @@ def gecko_roots() -> list[Root]:
 
 
 def _has_marker(directory: Path, markers: tuple[str, ...]) -> bool:
-    for marker in markers:
-        if (directory / marker).is_file():
-            return True
-    return False
+    return any((directory / marker).is_file() for marker in markers)
 
 
 def _natural_key(text: str) -> tuple[tuple[int, int | str], ...]:

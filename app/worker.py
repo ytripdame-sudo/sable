@@ -26,7 +26,7 @@ from PySide6.QtCore import QThread, Signal
 from core import pipeline
 from core.schema import RelayConfig, RunConfig, SourceConfig
 
-__all__ = ["BuildWorker", "SOURCE_LABELS"]
+__all__ = ["SOURCE_LABELS", "BuildWorker"]
 
 SOURCE_LABELS: Final[tuple[tuple[str, str], ...]] = (
     ("system", "Machine and OS"),
@@ -109,7 +109,7 @@ class BuildWorker(QThread):
 
     # --- the run -------------------------------------------------------------
 
-    def run(self) -> None:  # noqa: D401 - QThread entry point
+    def run(self) -> None:
         try:
             outcome = pipeline.run(
                 self._cfg,
@@ -130,7 +130,7 @@ class BuildWorker(QThread):
         except pipeline.PipelineError as exc:
             self.failed.emit(exc.stage, exc.message, exc.artifact)
             return
-        except Exception as exc:  # noqa: BLE001 - a crash in the thread must reach the UI
+        except Exception as exc:
             # Anything the pipeline did not classify still has to arrive as a message
             # rather than a silent dead thread with a spinner on it.
             self.failed.emit("internal", f"{type(exc).__name__}: {exc}", None)

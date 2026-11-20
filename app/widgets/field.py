@@ -15,9 +15,9 @@ second file for that is a file whose whole content is a callback to
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Final
+from typing import Final
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,

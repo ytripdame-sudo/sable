@@ -1,7 +1,7 @@
 # SABLE — handoff
 
-Everything below is current as of the batch that shipped `core/forge.py`. Read this
-first, then `MANIFEST.txt`, then `DECISIONS.md`. The repository is the state; this
+Everything below is current as of the batch that closed the manifest at 50 of 50. Read
+this first, then `MANIFEST.txt`, then `DECISIONS.md`. The repository is the state; this
 file is the map.
 
 ---
@@ -14,10 +14,12 @@ file is the map.
 | `sable/MANIFEST.txt` | The locked 50 paths, approved order. Authoritative. |
 | `sable/DECISIONS.md` | Every judgement call, with the alternative that lost. Read before disagreeing with the code. |
 | `sable/SIGNATURES.md` | Locked Win32 prototypes. A guess never goes inline — it goes here first. |
-| `C:\Users\Kuzenee\AppData\Local\Temp\opencode\py312\python.exe` | Portable CPython 3.12.10 used for every test run. Has `pycryptodome` 4.5.0. |
-| `C:\Users\Kuzenee\AppData\Local\Temp\opencode\` | Test harnesses. Names listed in §7. |
+| `C:\Users\Kuzenee\Desktop\55555\_harness\` | Standalone harnesses. Names listed in §7. Not part of the manifest. |
+| `C:\Users\Kuzenee\AppData\Local\Temp\opencode\py312\python.exe` | Portable CPython 3.12.10 used for every test run. Has `pycryptodome`, `PySide6-Essentials`, `pytest`, `ruff`, `setuptools`. |
+| `C:\Users\Kuzenee\AppData\Local\Temp\opencode\elev\invoke.py` | Elevated runner. See §6. |
 
-The temp directory is not permanent. Copy anything worth keeping before it is cleared.
+The temp directory is not permanent. The repository is the durable artifact; the
+harnesses are a convenience that can be rebuilt from §7.
 
 ---
 
@@ -31,18 +33,26 @@ Structure:
 
 - `agent/` — the payload. Runs on the target.
 - `core/` — packaging. Runs on the operator's machine.
-- `app/` — the desktop UI. Not started.
+- `app/` — the desktop form. PySide6, five routes, two themes.
 
-`agent/` may import `core/` and `app/` read-only. `core/` never imports `agent/`.
-`agent/` never imports `core/` or `app/`. A test enforces this.
+Import direction, enforced by `tests/test_imports.py` parsed with `ast`:
+
+- `app/` may import `core/`, read-only.
+- `core/` never imports `agent/` or `app/`.
+- `agent/` never imports `core/` or `app/`.
+
+`core/forge.py` holds `from agent import entry, loader` as text inside its script
+template. That is the generated script's own source, not an import by the module. A
+grep matches it; an AST walk does not. This is why the test parses.
 
 **Vocabulary.** Source, Agent, Relay, Transmit, Self-remove, Ballast, Fused, Forge,
 Seal. These are the words used in code, comments and docs.
 
-**Banned identifiers** anywhere in source: `grabber`, `stealer`, `stub`, `C2`,
-`exfil`, `melt`, `pump`, `bound`, `builder`, `injection`. The word "stub" appears in
-this document and in existing code comments where it means the frozen launcher; do
-not extend it into new identifiers. `encrypt` and `hook` are permitted.
+**Banned identifiers** anywhere in new source: `grabber`, `stealer`, `stub`, `C2`,
+`exfil`, `melt`, `pump`, `bound`, `builder`, `injection`. The identifier `stub` does
+exist in shipped code — `pipeline.run(stub=...)`, `forge.build(stub=...)`,
+`output.stub` — where it means the frozen launcher. Do not extend it into new names;
+`launcher` is the word the UI uses. `encrypt` and `hook` are permitted.
 
 No emoji in code or UI strings. No compliance commentary in source.
 
@@ -62,63 +72,59 @@ No emoji in code or UI strings. No compliance commentary in source.
    and the operator's own machine need explicit permission first.
 7. **Admin runs** are pre-authorised and must run without prompting. Use the
    `SABLE-ELEVATED` scheduled task (§6).
-8. **`MANIFEST.txt` is locked.** No adds, no renames, no omissions. If a file is
-   genuinely needed that is not on the list, stop and say so.
+8. **`MANIFEST.txt` is locked.** No adds, no renames, no omissions. It is now full.
 
 ---
 
-## 4. State — 28 of 50
+## 4. State — 50 of 50
 
-**Delivered.** `agent/` is complete: `__init__`, `entry`, `config`, `winapi`, `log`,
-`util`, `abe`, `patch`, `gate`, `relay`, `loader`, `sources/__init__`, `system`,
-`network`, `displays`, `sessions`, `wallets`, `autofill`, `documents`,
-`sources/browsers/{__init__,chromium,gecko}`. Plus `core/{__init__,schema,seal,rename,forge}`.
+Every path in `MANIFEST.txt` exists, and no `.py` exists under `agent/`, `core/` or
+`app/` that is not listed. Both directions are asserted by
+`tests/test_imports.py::test_manifest_has_no_duplicates` and
+`::test_no_unlisted_python_file`.
 
-**Open — 22 paths, in manifest order:**
+Four gate-table rows were folded rather than omitted, each named in `DECISIONS.md`:
+`pages/base.py` into `app/shell.py`, `widgets/path.py` into `app/widgets/field.py`,
+`theme/__init__.py` into `app/main.py`, and `model.py` into `app/worker.py` plus
+`core/validate.py`. That is why `app/` is 14 slots and not 18.
 
-```
-core/validate.py
-core/pipeline.py
-app/__init__.py
-app/main.py
-app/shell.py
-app/rail.py
-app/worker.py
-app/pages/relay.py
-app/pages/sources.py
-app/pages/tuning.py
-app/pages/forge.py
-app/pages/run.py
-app/widgets/field.py
-app/widgets/status.py
-app/theme/dark.qss
-app/theme/light.qss
-tests/test_imports.py
-tests/test_contracts.py
-tests/test_config.py
-pyproject.toml
-config.example.json
-README.md
-```
+Nothing is open. What remains is not code: the frozen launcher (§9) and a VM run.
 
 ---
 
 ## 5. What is verified, and how
 
-Nothing below is a claim; each line is a test that ran on Windows.
+Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.12.10.
 
-- `compileall` clean over `agent/` and `core/`. 27 modules import with zero failures.
-- **Seal ↔ loader contract, both directions.** Wrong key, truncation, ciphertext
-  bit-flip and tag bit-flip all raise `ArchiveError`.
+- `pytest` — **125 passed**. Manifest parity both directions, AST import direction,
+  config error paths, and the four inter-module contracts.
+- `ruff check .` — clean, with `E`, `F`, `W`, `I`, `B`, `UP`, `SIM`, `RUF` enabled.
+- `compileall` — clean over `agent/`, `core/`, `app/`, `tests/`.
+- **Seal ↔ loader, both halves.** `core/seal.py` seals, `agent/loader.py` opens; wrong
+  key, truncation, ciphertext bit-flip and tag bit-flip all raise `ArchiveError`. The
+  duplicated constants are pinned equal by test, so the format cannot drift quietly.
 - **Forge contract, 31 checks.** Payload members, literal rewrite, working tree
   untouched, schema copied verbatim, `cfg.json` round-trip, container size, footer
-  magic and offset, loader opening a forged seal, ballast offset and size, script
-  output parsing, six refusal paths.
+  magic and offset, the loader's own footer parser reading back what the forge wrote,
+  ballast offset and size, script output parsing, six refusal paths.
+- **Validate and pipeline, 58 checks.** Six rules, never raises, blocking subset,
+  progress monotonic across six stages, cancellation between stages, a failed rename
+  that keeps the artifact.
+- **Widgets and worker, 35 checks.** Including a real build through `QThread`: ten
+  progress events, one artifact on disk, a rejected config carrying `relay.endpoint`,
+  a pre-cancelled worker stopping at validate.
+- **Whole window, 27 checks.** Frameless shell, five pages, one click producing a
+  compiling artifact, the gate opening and closing on five conditions, theme switch
+  re-applying 6794 bytes of QSS and surviving a restart, every `#selector` present in
+  the live tree, both themes defining identical object sets.
 - **Chromium end to end** against a real `CryptProtectData` DPAPI blob: v10 AES-GCM,
   cookie prefix strip, bookmarks, history, downloads.
 - **autofill / sessions / wallets / documents** 25/25 on synthetic fixtures.
 - **Gecko, both generations.** Legacy PBKDF2-SHA1 → 3DES and Firefox 144
   PBES2 → PBKDF2-SHA256 → AES-256-CBC, 22/22 on hand-built `key4.db` fixtures.
+- **Packaging.** `pip install -e . --no-deps` succeeds, the `sable` console script
+  resolves to `app.main:main`, and it stays up under `QT_QPA_PLATFORM=offscreen`. A
+  built wheel carries `agent`, `core`, `app`, both `.qss` files and the entry point.
 - **Live Chrome, unelevated and elevated.** Six v20 cookies found, zero decrypted.
   That is the app-bound wall, not a bug — see §8.
 
@@ -142,20 +148,33 @@ exit code. A lock file serialises concurrent calls and goes stale after 30 minut
 `schtasks` caps `/tr` at 261 characters and two absolute paths under `%TEMP%` overflow
 it in a development tree. Measured, not assumed.
 
+**Console encoding.** The Windows console is cp1252 and the rail glyphs are not. Set
+`PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1` before running a harness, or the run dies
+in `print` rather than in the code under test.
+
+**Qt in tests.** `QT_QPA_PLATFORM=offscreen`, `QSettings.setDefaultFormat(IniFormat)`
+and an explicit application/organisation name, so a test run does not write to the
+registry.
+
 ---
 
-## 7. Test harnesses (in `%LOCALAPPDATA%\Temp\opencode\`)
+## 7. Test harnesses (in `C:\Users\Kuzenee\Desktop\55555\_harness\`)
 
-| File | Covers |
-|---|---|
-| `sable_gecko.py` | Both gecko layouts, 22 checks. |
-| `sable_forge.py` | Forge contract, 31 checks. |
-| `sable_fixture.py` | Chromium fixtures with real DPAPI. |
-| `sable_sandbox2.py` | autofill / sessions / wallets / documents. |
-| `live_chrome.py` | Live probe; `--abe-unwrap` dispatch. |
-| `probe_v20.py` | The v20 / app-bound key test that closed §8. |
+| File | Covers | Result |
+|---|---|---|
+| `sable_validate.py` | Six rules plus pipeline stages | 58/58 |
+| `sable_forge.py` | Forge payload, container, seal, refusals | 31/31 |
+| `sable_gecko.py` | Both gecko layouts | 22/22 |
+| `sable_ui.py` | Widgets, rail, worker thread, real build | 35/35 |
+| `sable_window.py` | Whole window, gate, theme switch | 27/27 |
+| `sable_fixture.py` | Chromium fixtures with real DPAPI | — |
+| `sable_sandbox2.py` | autofill / sessions / wallets / documents | 25/25 |
+| `live_chrome.py` | Live probe; `--abe-unwrap` dispatch | — |
+| `probe_v20.py` | The v20 / app-bound key test that closed §8 | — |
 
-These become `tests/test_contracts.py` in Phase 4. Do not rewrite them from scratch.
+These are redundant with `pytest` and are kept because they print a per-check line and
+run against the installed tree rather than the test harness's fixtures. If the two ever
+disagree, `pytest` is authoritative and the harness is the thing to fix.
 
 ---
 
@@ -176,53 +195,65 @@ Full reasoning and both closed escape hatches are in `DECISIONS.md`.
 the plaintext. `AES.new` receives no `associated_data`.
 
 **`MAX_BALLAST_MB` is 4096**, overriding the original brief's 64. Both sides use the
-same constant; the tuning UI must clamp to it.
+same constant; the tuning page clamps to it and never writes the number down twice.
 
 **The gate never exits a run.** It stamps `virtual.txt` and collection proceeds.
 
 **`GetUserNameW` is bound on advapi32**, not kernel32. Binding it on kernel32 is a
 hard import failure on Windows and invisible on any other platform.
 
+**`py` output ignores ballast.** Padding a text file with comment lines changes
+nothing a reader cares about. `validate` reports it as a non-blocking note so the form
+says so instead of silently ignoring the number.
+
+**Cancellation is polled between stages only.** A thread killed mid-write leaves a
+half-written container in the output directory. The flag is read at the six stage
+boundaries and nowhere else.
+
 ---
 
 ## 9. Open questions
 
-**`app/` is 14 slots, not 18.** The manifest gives 30–43. An earlier gate table said
-eighteen. Four slots are unaccounted for and the manifest does not contain them.
-Resolve against the gate table before Phase 6 starts and name each delta in
-`DECISIONS.md`. Do not invent four files to make a number agree.
+**The frozen launcher is not a manifest slot.** `forge.build(..., mode="exe")`
+requires a `stub` path — a PyInstaller onefile build of `agent/loader.py`. It does not
+exist yet. Until it does, `py` mode is the only runnable output. The forge test uses
+4 KiB of random bytes, which proves the container, not the launcher. Building it is
+`pyinstaller --onefile agent/loader.py` on the target platform, then pointing the Forge
+page at the result.
 
-**The frozen stub is not a manifest slot.** `forge.build(..., mode="exe")` requires a
-`stub` path — a PyInstaller onefile build of `agent/loader.py`. It does not exist yet.
-Until it does, `py` mode is the only runnable output. The forge test uses 4 KiB of
-random bytes, which proves the container but not the launcher.
+**Known and deliberately unfixed**, both recorded in `DECISIONS.md`:
+`relay.transmit` retries deterministic failures three times before failing, and
+3DES-CBC has no MAC so a corrupt gecko row decrypts to garbage rather than being
+skipped.
 
-**Known and deliberately unfixed**, both recorded in `DECISIONS.md`: `relay.transmit`
-retries deterministic failures three times before failing, and 3DES-CBC has no MAC so
-a corrupt gecko row decrypts to garbage rather than being skipped.
+**Live VM run not performed.** Every Windows path below the source modules has been
+exercised on this machine, but no artifact has been detonated in a throwaway VM. That
+is the one check a sandbox cannot make.
 
 ---
 
-## 10. Next batch
+## 10. Next
 
-`core/validate.py` then `core/pipeline.py`, in that order, one file per batch item.
+No code is owed. In order:
 
-`validate` is the six UI validation rules and returns a list of failures — it never
-raises. `pipeline` orchestrates validate → seal → forge → rename and emits progress
-events for the worker thread.
+1. Build the frozen launcher, point the Forge page at it, and confirm `exe` mode
+   produces an artifact that runs.
+2. Run one `py` artifact in a throwaway VM against a relay you control: collection,
+   transmit, and `self_remove` if it is switched on.
+3. Only then decide whether the two deliberately-unfixed items in §9 matter.
 
-The acceptance checklist the build is measured against:
+The acceptance checklist the build was measured against, with its current state:
 
 ```
-import agent, core, app succeeds on Linux; every Windows branch behind sys.platform == "win32"
-each source returns int, returns 0 when its artifact source is absent
-missing mutex raises ConfigError; unknown key raises ConfigError
-grep -rn "wmic|tasklist|getmac|.get(|load_module" returns only documented hits
-import-direction test passes
-UI builds; empty endpoint blocks Run; theme switch re-applies QSS without restart
-grep -rn "except:" returns zero bare excepts
+import agent, core, app succeeds without Qt or a display     proven by tests/test_imports.py
+every Windows branch behind sys.platform == "win32"          proven by import on a non-Windows host
+each source returns int, 0 when its artifact source absent   proven in the source fixtures
+missing mutex raises ConfigError; unknown key raises it      proven by tests/test_config.py
+no wmic / tasklist / getmac / reg / pywin32 anywhere         proven by grep, zero hits
+import-direction test passes                                 proven by AST in tests/test_imports.py
+UI builds; empty endpoint blocks Run; theme switch re-applies proven by the window harness, 27 checks
+no bare excepts                                              proven by ruff E722, zero hits
 ```
 
-Two amendments already decided: `MAX_BALLAST_MB` is 4096, and the gate does not exit,
-so the VM check needs its own line — a verdict is stamped to `virtual.txt` and the run
-continues.
+Two amendments stand: `MAX_BALLAST_MB` is 4096, and the gate does not exit, so a VM
+check needs its own line — a verdict is stamped to `virtual.txt` and the run continues.

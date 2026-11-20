@@ -16,6 +16,7 @@ Bindings are PySide6. The three names that differ from PyQt (``Signal``, ``Slot`
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 from typing import Final
@@ -120,10 +121,8 @@ def build_application(argv: list[str] | None = None) -> object:
         # A missing stylesheet is not a reason to fail to start: the default widgets
         # are ugly, not broken, and the fallback theme may still be on disk.
         if name != DEFAULT_THEME:
-            try:
+            with contextlib.suppress(ThemeError):
                 apply_theme(app, DEFAULT_THEME)
-            except ThemeError:
-                pass
 
     return app
 

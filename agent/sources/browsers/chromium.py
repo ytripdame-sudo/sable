@@ -240,10 +240,7 @@ def secret_value(blob: Any, keys: Keys, aad: bytes) -> bytes | None:
     if not isinstance(blob, (bytes, bytearray)) or not blob:
         return None
     raw = bytes(blob)
-    if raw[:3] == _PREFIX_V20:
-        key = keys.app_bound
-    else:
-        key = keys.user
+    key = keys.app_bound if raw[:3] == _PREFIX_V20 else keys.user
     return decrypt_value(raw, key, aad)
 
 

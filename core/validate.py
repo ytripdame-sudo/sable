@@ -305,7 +305,7 @@ def validate(
 __all__ = [
     "MAX_MUTEX_LENGTH",
     "MIN_SEAL_KEY_LENGTH",
-    "Problem",
+    "RULES",
     "RULE_BALLAST",
     "RULE_ENDPOINT",
     "RULE_INTERNAL",
@@ -313,7 +313,7 @@ __all__ = [
     "RULE_OUTPUT",
     "RULE_SEAL_KEY",
     "RULE_SOURCES",
-    "RULES",
+    "Problem",
     "blocking",
     "describe",
     "validate",

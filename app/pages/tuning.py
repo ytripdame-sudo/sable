@@ -18,7 +18,7 @@ from __future__ import annotations
 import secrets
 from typing import Final
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,

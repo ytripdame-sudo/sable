@@ -13,8 +13,9 @@ not part of the contract.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from typing import Any, Final, Literal, Mapping, cast
+from typing import Any, Final, Literal, cast
 
 SCHEMA_VERSION: Final[int] = 1
 
@@ -90,7 +91,9 @@ def _require(mapping: Mapping[str, Any], key: str, path: str) -> Any:
 
 def _as_mapping(value: Any, path: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ConfigError(path or "<root>", f"expected object, got {_kind_of(value)}")
+        # Nested paths arrive with their separator already attached ("relay."), and an
+        # error naming "relay." sends the reader looking for a key that is not there.
+        raise ConfigError(path.rstrip(". ") or "<root>", f"expected object, got {_kind_of(value)}")
     return value
 
 
@@ -215,16 +218,16 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
 
 
 __all__ = [
-    "ConfigError",
     "MAX_BALLAST_MB",
     "RELAY_FIELDS",
     "RELAY_KINDS",
     "RUN_FIELDS",
+    "SCHEMA_VERSION",
+    "SOURCE_FIELDS",
+    "ConfigError",
     "RelayConfig",
     "RelayKind",
     "RunConfig",
-    "SCHEMA_VERSION",
-    "SOURCE_FIELDS",
     "SourceConfig",
     "from_dict",
     "from_json",

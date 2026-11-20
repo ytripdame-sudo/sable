@@ -14,10 +14,11 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Iterator
+from typing import Any, Final
 
 from . import log
 
@@ -92,7 +93,7 @@ def chrome_time(value: int) -> str | None:
     if value <= 0:
         return None
     try:
-        stamp = datetime.fromtimestamp(value / 1_000_000 - _CHROME_EPOCH_OFFSET, tz=timezone.utc)
+        stamp = datetime.fromtimestamp(value / 1_000_000 - _CHROME_EPOCH_OFFSET, tz=UTC)
     except (OverflowError, OSError, ValueError):
         return None
     return stamp.isoformat()
@@ -103,7 +104,7 @@ def unix_time(value: int) -> str | None:
     if value <= 0:
         return None
     try:
-        stamp = datetime.fromtimestamp(value, tz=timezone.utc)
+        stamp = datetime.fromtimestamp(value, tz=UTC)
     except (OverflowError, OSError, ValueError):
         return None
     return stamp.isoformat()

@@ -89,7 +89,7 @@ def load(archive: zipfile.ZipFile) -> Any:
 
 __all__ = [
     "CONFIG_MEMBER",
-    "ConfigLoadError",
     "SCHEMA_MEMBER",
+    "ConfigLoadError",
     "load",
 ]

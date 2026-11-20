@@ -432,4 +432,95 @@ A missing or empty stylesheet falls back to the default theme and then to no
 stylesheet at all: default widgets are ugly, not broken, and refusing to start over a
 `.qss` is the worse failure.
 
+## `tests/` is four files, and the contract one is the point
+
+`test_imports.py` proves the manifest and the import direction, `test_config.py` proves
+the error paths, `test_contracts.py` proves the four seams where two modules have to
+agree without importing each other, and that split is deliberate: three of the four
+files test a single module, and the fourth tests pairs.
+
+`test_contracts.py` absorbs the standalone harnesses rather than replacing them. The
+harnesses print a per-check line and run against the installed tree; pytest runs
+against fixtures and fails the build. Keeping both was the alternative, and it is what
+shipped — but pytest is authoritative, and a disagreement means the harness is wrong.
+
+The seal pair is the reason the file exists at all. `core/seal.py` writes the blob and
+`agent/loader.py` reads it, and neither may import the other, so the byte layout is
+declared twice on purpose. Sealing with one and opening with the other, then pinning
+the constants equal, converts a silent format drift into a red test. That is cheaper
+than discovering it on a machine that cannot be debugged.
+
+The container test does the same for the footer: it builds a real artifact and reads
+it back through `loader._archive_offset` and `loader._read_sealed`, so the offset the
+forge writes and the offset the loader parses cannot disagree.
+
+## A nested config error named a path that does not exist
+
+`_as_mapping` was raising `ConfigError(path or "<root>")` where nested calls pass
+`"relay."` with the separator already attached, so the message read `relay.: expected
+object, got str`. A dotted path with a trailing dot names a key nobody can find. It now
+strips the separator before naming the container.
+
+Found by `test_contracts.py::test_wrong_type_names_the_field`, which is the argument
+for asserting on paths rather than on exception types: the type was right and the
+message was still useless.
+
+## `sources` is a required key in `cfg.json`
+
+`from_dict` requires `sources`, and an absent flag inside it falls back to the
+dataclass default. The alternative — treating the whole block as optional so a minimal
+document is five keys — was rejected because the built artifact always carries the
+block (`to_dict` writes every flag), and a reader that accepts less than its writer
+produces is a reader with an untested branch.
+
+The first draft of `test_config.py` omitted `sources` and asserted against errors that
+never fired; the fixture now includes `"sources": {}`, which is the smallest document
+that is actually legal.
+
+## Lint policy: fix the tree, not the config
+
+`ruff check .` was red with 38 findings across 22 files. Thirty-eight were fixed and
+none were silenced at file level. Two rules stay off, each for a reason that is about
+this codebase:
+
+- `E501` — long dotted paths, long URLs and long Windows symbol names read worse
+  wrapped, and the line ceiling is already 100.
+- `BLE001` — `except Exception` is load-bearing in four places: the worker, the loader,
+  the progress emitter and the validator. Each one has to turn an unclassified failure
+  into a message instead of a dead thread or a traceback nobody sees.
+
+`SIM113` was the only finding that turned out to be a real design note: two loops
+counted matches by hand to stop at `_MAX_HITS`. They are now
+`itertools.islice(pattern.finditer(blob), _MAX_HITS)`, which is the same bound with no
+counter. `SIM105` became `contextlib.suppress` in the emitter and the theme fallback,
+which reads as the deliberate swallow it is.
+
+Every one of those changes was re-verified: 125 pytest, then all five harnesses, then
+`compileall`.
+
+## `pyproject.toml` carries the entry point and the package data
+
+The console script is `sable = "app.main:main"`. `app/theme/*.qss` is declared as
+package data, because an installed wheel without the stylesheets starts with the
+fallback palette and no error — verified by building a wheel and listing its members,
+not by trusting the `[tool.setuptools.package-data]` block.
+
+`pytest` runs with `pythonpath = ["."]`, so the three packages import from the
+repository root exactly as they do after an editable install, and with
+`--strict-markers --strict-config` so a typo in the ini file fails instead of being
+ignored.
+
+## `README.md` is the front door, and the vocabulary table is in it
+
+The file states what the tool is, the five routes, the six pipeline stages, the
+container layout byte for byte, the six validation rules with their paths, the import
+direction and why the test parses instead of grepping, and the two known limits. It
+does not repeat `DECISIONS.md`; it points at it.
+
+The vocabulary table at the bottom is the one place a reader can find what Source,
+Agent, Relay, Transmit, Self-remove, Ballast, Fused, Forge and Seal mean, because the
+words are used in code, in the UI and in the prose and a reader who arrives at any one
+of those should not have to infer the others.
+
+
 

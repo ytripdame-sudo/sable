@@ -12,7 +12,7 @@ ceiling is a collector that hangs on somebody's photo library.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -45,7 +45,7 @@ def _home() -> Path | None:
 
 def _stamp(seconds: float) -> str | None:
     try:
-        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(seconds, tz=UTC).isoformat()
     except (OverflowError, OSError, ValueError):
         return None
 

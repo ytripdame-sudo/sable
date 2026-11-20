@@ -96,7 +96,7 @@ class ProgressPanel(QWidget):
     def set_fraction(self, fraction: float) -> None:
         """Clamp to 0..100. A callback can arrive out of order after a cancel."""
         clamped = min(max(fraction, 0.0), 1.0)
-        self._bar.setValue(int(round(clamped * 100)))
+        self._bar.setValue(round(clamped * 100))
 
     def set_done(self, message: str) -> None:
         self._pill.set_state(DONE, "done")

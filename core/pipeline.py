@@ -16,11 +16,13 @@ of the first line, because the UI has six fields to paint.
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Final
+from typing import Final
 
 from . import forge, rename, seal
 from .rename import RenameError
@@ -102,10 +104,8 @@ def _ignore(event: Event) -> None:
 
 def _emit(progress: Progress, stage: str, message: str, fraction: float) -> None:
     """Deliver one event. A callback that raises does not take the build with it."""
-    try:
+    with contextlib.suppress(Exception):
         progress(Event(stage=stage, message=message, fraction=fraction))
-    except Exception:
-        pass
 
 
 def _check_cancel(cancel: Cancel | None, stage: str) -> None:
@@ -213,11 +213,6 @@ def run(
 
 
 __all__ = [
-    "Event",
-    "Outcome",
-    "PipelineCancelled",
-    "PipelineError",
-    "Progress",
     "STAGES",
     "STAGE_DONE",
     "STAGE_FORGE",
@@ -225,6 +220,11 @@ __all__ = [
     "STAGE_RENAME",
     "STAGE_SEAL",
     "STAGE_VALIDATE",
+    "Event",
+    "Outcome",
+    "PipelineCancelled",
+    "PipelineError",
+    "Progress",
     "ValidationFailed",
     "run",
 ]
