@@ -897,6 +897,11 @@ def _split_phantom(endpoint: str) -> tuple[str, str, str]:
     owner, name = repo.split("/")
     if not owner or not name:
         raise RelayError("phantom endpoint has an empty owner or name")
+    # The validator rejects these too. Two gates because the URL is built by
+    # formatting: a ``..`` that reaches the format string is path traversal in the
+    # release path, and a config that skipped validation would otherwise carry it.
+    if set(owner) == {"."} or set(name) == {"."}:
+        raise RelayError("phantom endpoint has a dot segment where a name belongs")
     return owner, name, token
 
 

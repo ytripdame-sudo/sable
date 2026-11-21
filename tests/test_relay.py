@@ -1045,6 +1045,9 @@ def test_phantom_endpoint_splits_into_owner_name_and_token() -> None:
         "a/b/c$ghp_" + "a" * 32,
         "/archive$ghp_" + "a" * 32,
         "owner/$ghp_" + "a" * 32,
+        # Dot-only segments pass the character class and build a traversing URL.
+        "../..$ghp_" + "a" * 32,
+        "./.$ghp_" + "a" * 32,
     ],
 )
 def test_phantom_endpoint_rejects_a_malformed_target(endpoint: str) -> None:

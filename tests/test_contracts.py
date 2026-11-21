@@ -635,6 +635,36 @@ def test_a_bad_telegram_endpoint_is_blocking(endpoint: str) -> None:
     assert validate_module.blocking(problems)
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "",
+        "ytripdame-sudo/archive",
+        "$" + "ghp_" + "a" * 32,
+        "ytripdame-sudo/archive$",
+        "noslash$ghp_" + "a" * 32,
+        "a/b/c$ghp_" + "a" * 32,
+        "/archive$ghp_" + "a" * 32,
+        "ytripdame-sudo/$ghp_" + "a" * 32,
+        "ytripdame-sudo/archive$short",
+        # Dot-only segments satisfy the character class and are not repositories.
+        # Formatted into the release URL they are path traversal, so the shape
+        # check alone must not be the gate.
+        "../..$ghp_" + "a" * 32,
+        "./.$ghp_" + "a" * 32,
+        ".../...$ghp_" + "a" * 32,
+    ],
+)
+def test_a_bad_phantom_endpoint_is_blocking(endpoint: str) -> None:
+    problems = validate_module.validate(
+        config(relay=RelayConfig(kind="phantom", endpoint=endpoint)),  # type: ignore[arg-type]
+        mode=forge.OUTPUT_PY,
+    )
+    assert problems
+    assert all(problem.path == "relay.endpoint" for problem in problems)
+    assert validate_module.blocking(problems)
+
+
 def test_all_sources_off_is_blocking() -> None:
     problems = validate_module.validate(
         config(sources=SourceConfig(**{name: False for name in SOURCE_FIELDS})),

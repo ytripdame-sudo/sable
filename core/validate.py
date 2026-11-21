@@ -238,6 +238,12 @@ def _check_phantom(endpoint: str, path: str = "relay.endpoint") -> list[Problem]
         return [_problem(RULE_ENDPOINT, path, "token half is empty")]
     if not _PHANTOM_REPO.match(repo):
         return [_problem(RULE_ENDPOINT, path, "repository is not owner/name")]
+    owner, name = repo.split("/")
+    # ``..`` and ``.`` match the character class and are not repositories. Formatted
+    # into the release URL they become path traversal, so the shape check alone is not
+    # the gate — the segment check is.
+    if set(owner) == {"."} or set(name) == {"."}:
+        return [_problem(RULE_ENDPOINT, path, "repository is not owner/name")]
     if not _PHANTOM_TOKEN.match(token):
         return [_problem(RULE_ENDPOINT, path, "token is not a GitHub token")]
     return []
