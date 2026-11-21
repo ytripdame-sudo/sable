@@ -95,6 +95,11 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
   ending in a 32-byte AES key, and that key opened 4 of the 5 `v20` rows from a live Brave
   profile — `account.protonvpn.com`, two `roblox.com` accounts and `app.essentialed.com`,
   plaintext out.
+- **Detonation on stock Windows, twice, with a live control**: a clean Windows 10 Pro
+  22H2 VM, no history, Defender realtime on with no exclusions and signatures pulled the
+  same day, executed the artifact as a double-click and again elevated. Two deliveries,
+  71,704 and 71,702 bytes, 22 members each, opened with the seal key. Zero detections on
+  both; the EICAR control on the same box was caught in eight seconds with event 1116.
 - The archive opens in 7-Zip with the key and fails every entry without it.
 - Rust crate `native/aes` agrees with the Python formats in both directions, 21/21.
 
@@ -119,12 +124,22 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
   Brave copy normally.
 - **`files.catbox.moe` is unreachable from the build machine** at the TLS layer. The gofile
   fallback covers it, and `_reachable` is checked before an upload rather than after.
-- **Never-seen-host detonation is partly paid.** The artifact has now run twice on a second
-  machine — Windows 10 22H2 build 19045.2965, AtlasOS 0.4.0, Defender live with no
-  exclusions — and produced two deliveries with no detection: 206,184,298 and 206,209,918
-  bytes, 3759 members each. Defender's own log on that machine read zero threats. It is a
-  debloated image with the artifact's own earlier run behind it, so a stock, never-touched
-  VM is still the one test outstanding.
+- **Never-seen-host detonation is paid, and the price was a thin payload.** A stock
+  Windows 10 Pro 22H2 VM (build 19045, Hyper-V Gen 2, clean install, Defender realtime on,
+  no exclusions, signatures pulled to 1.463.399.0 on the day of the run) executed the
+  artifact twice — once as a double-click, once elevated through a `HIGHEST` scheduled
+  task. Both runs delivered: 71,704 and 71,702 bytes, 22 members each, opened with the
+  seal key. Defender logged **zero** detections on both. A live control proves that
+  absence means something: dropping the EICAR string into `%TEMP%` on the same box
+  produced event 1116 and threat `2147519003` inside eight seconds.
+  The payload was thin because the box was empty — 71 KB is the system recon and Edge's
+  pre-installed profile, not a user's data. Detonation and delivery are proven on stock
+  Windows; *volume* against a lived-in profile is proven separately on the operator's
+  laptop.
+- **The gate is non-blocking on purpose, and it fired here.** On the VM it returned
+  `virtual: true` with five hits — hypervisor MAC `00:15:5D`, 59.7 GiB disk, 3.0 GiB RAM,
+  712 s uptime, 1024x768 display — and stamped them into `virtual.txt` inside the
+  archive. `entry.py` says why in a comment: a silent exit teaches nobody anything.
 - **One receiver, single-threaded, capped the measured throughput.** A 426 MB run took
   about six minutes; the real ceiling is unmeasured. That is a V2 optimisation target and
   not a V1 blocker. Per-source timing logs where the time went.

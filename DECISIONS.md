@@ -1469,6 +1469,77 @@ a new import in `agent/` is covered the next time it runs without anybody rememb
 say so.
 
 
+## The clean VM, and what it cost to get one
+
+The test that had been owed since the first delivery was a host that had never seen the
+artifact. The laptop could not be it — AtlasOS is a stripped image, and a factory reset
+would have destroyed the only lived-in profile in the project. So the detonation moved to
+a Hyper-V guest on that same laptop.
+
+Getting there was four separate fights, and each one is worth remembering because each one
+looked like something else.
+
+**Hyper-V was disabled, not absent.** `Get-WindowsOptionalFeature` reported `Disabled`
+rather than `DisabledWithPayloadRemoved`, which is the difference between "enable it" and
+"download an ADK". `Enable-WindowsOptionalFeature` then failed with `Access is denied
+0x5 occurred while reading the console output buffer` — not a permissions error at all,
+but the same headless-console bug that bites `Invoke-WebRequest` and `New-VHD` over SSH.
+`dism.exe /online /enable-feature /all /quiet /norestart` writes no progress bar and went
+straight through.
+
+**`Set-VMFirmware -FirstBootDevice` silently loses the object it is handed.** Called with
+the `VMDvdDrive` that `Add-VMDvdDrive` returns, the firmware order came back Network-first
+and the VM sat on PXE for seven minutes. The fix is to re-read the drive with
+`Get-VMDvdDrive` and assert the resulting `BootOrder[0]` afterwards rather than trusting
+the call.
+
+**`autounattend.xml` on a second hard disk is ignored.** It was formatted, populated and
+attached as a 64 MB VHDX, and Setup booted past it to the language screen every time.
+Windows Setup reads the answer file from removable media; a fixed disk is not that. A
+64 MB ISO built with `pycdlib` and attached as a second DVD was picked up on the first
+try. `IMAPI2FS` was the obvious route and dead-ended — PowerShell cannot drive
+`ImageStream.Read`, because `IStream` is not `IDispatch` and neither a cast nor
+`Marshal.GetTypedObjectForIUnknown` produces a callable object.
+
+**The ISO's baked signatures were from 2019.** A fresh 22H2 install ships engine
+`4.18.1909.6` with signature set `1.303.25.0`, dated `09/24/2019`. Running a detonation
+test against that proves nothing about today's Defender. `Update-MpSignature` pulled
+`1.463.399.0` and engine `1.1.26100.4`, and only then was the box worth testing.
+
+What the run produced, from a snapshoted clean baseline each time:
+
+| | double-click | elevated (`/rl HIGHEST`) |
+|---|---|---|
+| delivered | 71,704 bytes | 71,702 bytes |
+| members | 22 | 22 |
+| wall clock | 6 s | 11 s |
+| detections | 0 | 0 |
+
+Both archives opened with the seal key. Both contained the system recon — `system.json`
+naming the VM's own `SABLE-CLEAN` hostname, `network.json` with the `00:15:5D` MAC — and
+Edge's pre-installed profile, which is all an untouched box has to give.
+
+**The 71 KB is the honest part of the result.** It is not a 206 MB collection; it is a box
+with no user on it. So the claim this run pays for is precisely: *the artifact executes on
+a stock, never-touched Windows 10 host with current Defender signatures and is delivered
+without detection*. It does not re-prove volume, and it should not be quoted as if it did.
+
+**Zero detections only means something because of a control.** Defender's operational log
+held no events during either run — which by itself is ambiguous, because a log with no
+detections looks the same as a scan that never happened. Dropping the EICAR string into
+`%TEMP%` on the same box produced event 1116 and threat `2147519003` within eight seconds.
+The engine was armed, it logs what it catches, and it did not catch this.
+
+**The gate fired and did not stop the run.** `virtual.txt` inside both archives reads
+`virtual: true` with five hits — hypervisor MAC `00:15:5D`, 59.7 GiB disk, 3.0 GiB RAM,
+712 s uptime, 1024x768 display. That is the documented behaviour, not a miss:
+`entry.py` carries the comment "The gate never stops a run. A virtual host produces a
+stamped result and everything else proceeds; a silent exit teaches nobody anything." The
+first read of this looked like a detection hole; it was a design decision written three
+lines above the call.
+
+
+
 
 
 
