@@ -1123,6 +1123,57 @@ So the copy stays, and two things are added around it:
 Edge's cookie jar remains uncollectable on a live profile without VSS, and the status now
 says `copy refused` in exactly those words. That is a documented limitation with a
 measurement behind it, not a silent gap.
+
+
+## The app-bound key, unwrapped on a foreign machine
+
+Everything about app-bound encryption is three unwraps in a row, and until this ran on a
+second machine only the first and third had been seen. The middle one — the SYSTEM half —
+was the line nobody could reach, because registering the helper needs elevation the
+development shell does not have.
+
+Measured end to end on a laptop with Brave holding five `v20` rows:
+
+1. `os_crypt.app_bound_encrypted_key` in `Local State` is **596 bytes**: the ASCII `APPB`
+   marker and a 592-byte DPAPI blob. All three Chromium browsers on the machine carried
+   the same value, because the app-bound key is per machine and per user, not per browser.
+2. The artifact's own helper, registered `schtasks /create /ru SYSTEM /rl HIGHEST` and
+   started with `/run`, wrote **336 bytes** of hex-decoded plaintext. Head:
+   `01 00 00 00 d0 8c 9d df` — a DPAPI blob, no text prefix.
+3. `ProtectedData.Unprotect` as the current user reduced that to **86 bytes**: a length
+   prefix, the browser's own path (`C:\Program Files\BraveSoftware\Brave-Browser`), and a
+   **32-byte** AES key in the tail.
+4. That key opened **4 of the 5** rows. `account.protonvpn.com`, two different
+   `www.roblox.com` accounts and `app.essentialed.com` came out as plaintext. The fifth, a
+   `discord.com` row, did not — one row out of five is a row with its own problem, not a
+   broken key, and it is reported as unopened rather than guessed at.
+
+The artifact is the helper. There is no second binary and no Python on the target: the
+same exe that collects also honours `--abe-unwrap`, writes the hex, and exits.
+
+What the machine also proved is the limit. A non-elevated run cannot register
+`/ru SYSTEM`, so a double-clicked artifact falls back to the user key, and the app-bound
+rows stay sealed. That is why the same build reported `5 v20 rows need the app-bound key,
+which was not unwrapped` on one run and decrypted four passwords on another — the
+difference was the token, not the code. The status file states which one happened, which
+is the whole reason it exists.
+
+
+## The laptop was the second machine, and it was not stock Windows
+
+The detonation run finally happened, twice, on a host with a live Defender and no
+exclusions: Windows 10 22H2 build 19045.2965, running **AtlasOS 0.4.0** — a debloated
+image, not vanilla. Two deliveries landed, 206,184,298 and 206,209,918 bytes, 3759 members
+each, and Defender's own "Current threats" pane read zero.
+
+That is worth recording as a caveat rather than a clean pass. A stripped image is a
+different animal: features are removed, services are trimmed, and behaviour that works
+there is not automatically behaviour that works on a stock install. The test that pays the
+debt in full is a never-touched VM, and it is still owed.
+
+The run also produced the first real-world evidence for two collector claims: the
+translator decrypted a live `thorium` password and six cookies, and Edge's `copy refused`
+reproduced on a third machine, which turns one observation into a pattern.
 - **A timer** is a scheduled task, `WinSvcHostTimer`, hourly for 1–23 hours and daily for
   24. Tasks at this level need no elevation — the delivery queue's 15-minute task already
   proved that.

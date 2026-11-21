@@ -90,6 +90,11 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
 - **App-bound unwrap**, `_harness/abe_check.py`: a real artifact built, its mutex held from
   outside, the task registered as the current user, the artifact re-execing with
   `--abe-unwrap`, the hex key written, reduced to 32 bytes, and the task deleted.
+- **App-bound, on a foreign machine, all three links**: the SYSTEM helper registered
+  `/ru SYSTEM` wrote a 336-byte SYSTEM plaintext, the user's DPAPI unwrapped it to 86 bytes
+  ending in a 32-byte AES key, and that key opened 4 of the 5 `v20` rows from a live Brave
+  profile — `account.protonvpn.com`, two `roblox.com` accounts and `app.essentialed.com`,
+  plaintext out.
 - The archive opens in 7-Zip with the key and fails every entry without it.
 - Rust crate `native/aes` agrees with the Python formats in both directions, 21/21.
 
@@ -100,9 +105,13 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
   and the app, not the user. The artifact re-execs itself once under a registered task to
   unwrap it. Where that unwrap does not happen the rows stay sealed, and `_status.json`
   says so in those words. Recorded in `DECISIONS.md`.
-- **The SYSTEM half of the unwrap is unproven.** Registering the helper as `SYSTEM` needs
-  elevation, and the development shell does not have it. Everything this codebase writes
-  is tested; the gap is Windows' own token boundary, not this code.
+- **The SYSTEM half of the unwrap is proven, and it needs elevation.** Measured on a
+  second machine: the artifact's helper, registered `/ru SYSTEM`, wrote a 336-byte SYSTEM
+  plaintext; the current user's DPAPI unwrapped that to 86 bytes ending in a 32-byte
+  AES key; that key opened 4 of 5 `v20` password rows. What it does *not* do is run
+  unelevated — `schtasks /ru SYSTEM` is refused without admin, so an artifact launched
+  from Explorer falls back to the user key and reports the app-bound rows as unopened.
+  The status file says exactly that, which is the point of the status file.
 - **Edge will not share its cookie jar.** Its live `Network\Cookies` is opened with no
   share mode at all: 0 successful opens in 120 attempts over 6 s, at every share mode
   including exclusive. No reader recovers that without a volume snapshot, so Edge cookies
@@ -110,10 +119,12 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
   Brave copy normally.
 - **`files.catbox.moe` is unreachable from the build machine** at the TLS layer. The gofile
   fallback covers it, and `_reachable` is checked before an upload rather than after.
-- **Never-seen-host detonation is owed.** Defender passed on the operator's machine, which
-  had history, and the artifact has since passed a second run there. A clean VM with no
-  history is the test that has not happened, and it is owed against this tag rather than
-  before it.
+- **Never-seen-host detonation is partly paid.** The artifact has now run twice on a second
+  machine — Windows 10 22H2 build 19045.2965, AtlasOS 0.4.0, Defender live with no
+  exclusions — and produced two deliveries with no detection: 206,184,298 and 206,209,918
+  bytes, 3759 members each. Defender's own log on that machine read zero threats. It is a
+  debloated image with the artifact's own earlier run behind it, so a stock, never-touched
+  VM is still the one test outstanding.
 - **One receiver, single-threaded, capped the measured throughput.** A 426 MB run took
   about six minutes; the real ceiling is unmeasured. That is a V2 optimisation target and
   not a V1 blocker. Per-source timing logs where the time went.
