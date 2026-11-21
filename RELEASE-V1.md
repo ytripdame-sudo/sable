@@ -1,6 +1,7 @@
 # SABLE V1
 
-Frozen 2026-11-21. Tag `v1.0`, commit `a67bb73`.
+Frozen 2026-11-21. Tag `v1.0`. This file ships inside the tag, so it names the tag and
+not a hash that would move under it.
 
 This is the version that works. Everything below is either proven by a test that ran or
 listed under limits. Nothing is planned work disguised as a feature.
@@ -135,6 +136,9 @@ The frozen launcher is built once and reused by every artifact:
 ```
 
 Output: `tools/dist/sable-launcher.exe`, 37/37 on `_harness/sable_launcher.py`.
+
+A fresh `git archive` of the tag runs 350 passed and 2 skipped: the two frozen-launcher
+cases skip because `tools/dist` is a build output and is not checked in.
 
 The native crate is separate and not required to build an artifact:
 

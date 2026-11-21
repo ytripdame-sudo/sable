@@ -377,8 +377,9 @@ members through a `link` relay; the archive was pulled back from the host and op
 
 V1 is tagged, archived and pushed: `github.com/ytripdame-sudo/sable`, branch `main` at
 `a67bb73`, tag `v1.0`. The repository is private. `SABLE-v1.0-source.zip` in the parent
-folder is `git archive` of the tag, and the extracted copy runs **352 passed** and a clean
-`ruff` on its own.
+folder is `git archive` of the tag: 86 entries, and the extracted copy runs **350 passed,
+2 skipped** and a clean `ruff` on its own. The two skips are the frozen-launcher cases,
+which skip because `tools/dist` is a build output and is not in the archive.
 
 The tag was first cut at `b0c4245`, the tree the GUI pass finished on. It was moved to
 `a67bb73` when the binder, the disguise work and the credential translator landed, because
