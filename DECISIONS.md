@@ -1014,6 +1014,115 @@ Two mechanisms, because the obvious one does not work without rights nobody has:
   tried first and answered **Access is denied** on an ordinary account; the Run key is
   user-writable, needs no elevation, and is the mechanism the setting was always going to
   end up using.
+
+
+## The single-instance guard was eating the key it was protecting
+
+App-bound encryption needs the payload to run once as SYSTEM, unwrap the key with that
+token, and hand the plaintext back to the ordinary-user run. The mechanism is a re-exec:
+the artifact launches itself with `--abe-unwrap` under a registered task, the helper
+DPAPI-decrypts the app-bound blob, writes it hex to a file, and exits.
+
+It never ran. `loader.boot()` acquired the single-instance mutex **before** `entry.main`
+ever looked at `argv`, so the helper woke up, found the mutex held by the parent that had
+just spawned it, was judged a duplicate instance, and exited cleanly having done nothing.
+The failure was silent by construction: a duplicate exit is a success code, the parent
+waited on a file that was never written, and the caller saw an ordinary "app-bound key not
+available" — indistinguishable from a machine that never had one.
+
+The fix is one predicate, not a reordering. Reordering boot would have let the helper run
+before the guard, which is worse: two full collections racing. Instead the guard takes
+`argv` and exempts exactly one flag:
+
+- `HELPER_FLAG` is a module constant, used by both the parser and the exemption, so the
+  two cannot drift.
+- `_guarded(argv)` returns False when the flag is present, and `boot()` only acquires when
+  it returns True. The helper is a different process doing a different job; it is not a
+  second instance.
+- The helper is still bounded — it writes one file and exits, so an exemption is a few
+  hundred milliseconds of DPAPI, not a second run.
+
+The frozen launcher ships `loader.py` as well as the payload, so this fix required a
+rebuild, not just a re-bind: PyInstaller 6.22.3, `tools/dist/sable-launcher.exe`,
+10,200,401 bytes. Proven by `_harness/abe_check.py`, which builds a real artifact, holds
+the artifact's mutex from the test process, registers the task as the current user,
+confirms the artifact re-execs with the flag, reads the hex, reduces the key to 32 bytes
+and deletes the task.
+
+Unproven and named as such: the SYSTEM half of `abe.unwrap`. Registering `/ru SYSTEM`
+needs elevation and the development shell does not have it. Everything this codebase
+writes is proven; the remaining line is Windows' own token boundary.
+
+
+## A zero with no reason is not a result
+
+The credential translator could report nothing and say nothing, and the two are different
+problems. A profile with no saved passwords, a profile whose key never unwrapped, and a
+profile whose copy was refused all produced the same output: an empty list. Diagnosing
+that from a report required re-running the collector on the machine by hand, which is not
+available on a one-shot artifact.
+
+Every profile now writes `_status.json` beside its artifacts:
+
+- `keys`: `user` and `app_bound`, each true/false/null — null means not attempted, which
+  is a distinct state from "attempted and failed".
+- `artifacts`: per artifact, `rows`, `attempted`, `opened`, `written`, and a `reason`
+  string that is empty on success.
+
+The counters are load-bearing, not decoration. `rows` is what the database held;
+`attempted` is rows that carried ciphertext; `opened` is rows that decrypted. Edge on this
+machine reads **6 rows, 2 attempted, 0 opened** and the reason names the app-bound key —
+which is a true statement about a machine that genuinely has two `v20` rows and no
+unwrapped key. Brave reads **8 rows, 0 attempted** and the reason says "rows present, no
+stored password" — those eight rows are saved usernames with an empty `password_value`,
+and they were previously counted as failures, which is why an earlier run reported "every
+tag check failed" on a profile that had nothing to decrypt at all.
+
+The rule the file encodes: `attempted` only increments on a non-empty ciphertext, and an
+empty blob is skipped before the decrypt attempt rather than after. A zero now arrives with
+the reason attached, and the reason is written by the code that knows it.
+
+
+## Edge will not share its cookie jar, and no share mode changes that
+
+Chromium's cookie database is copied, never opened in place, because a running browser
+holds it. That copy failed on Edge with `WinError 32` — *the process cannot access the
+file because it is being used by another process* — while the same call on Brave
+succeeded and returned all 310 cookies.
+
+The first hypothesis was Python's share mode. `shutil.copy2` opens with
+`FILE_SHARE_READ` only, and a writer holding the file can refuse a reader that does not
+grant write. So `winapi.copy_shared` was written: `CreateFileW` with `GENERIC_READ` while
+granting `FILE_SHARE_READ | WRITE | DELETE` — the access a backup tool takes, and the
+widest grant Windows offers.
+
+It does not help. Measured directly, outside the payload:
+
+| share mode granted | result |
+|---|---|
+| `0x7` read/write/delete | `ERROR_SHARING_VIOLATION` (32) |
+| `0x3` read/write | `ERROR_SHARING_VIOLATION` (32) |
+| `0x1` read | `ERROR_SHARING_VIOLATION` (32) |
+| `0x0` exclusive | `ERROR_SHARING_VIOLATION` (32) |
+
+120 attempts across 6 seconds with `msedge.exe` running: **0 successful opens**. A sharing
+violation on the *narrowest possible request* means the holder opened the file with no
+share mode at all. Nothing an opener grants recovers that — sharing is negotiated against
+what the existing handle already allows, and it allowed nothing. Only a volume snapshot
+reads a file whose owner granted no sharing.
+
+So the copy stays, and two things are added around it:
+
+- `copy_with_sidecars` retries twice at 100 ms. A browser opens and closes its databases
+  for short write transactions, so a refusal is not always permanent, and 200 ms is cheap.
+- `_copy_file` tries `shutil.copy2` first and `copy_shared` second. Brave's cookies were
+  already collected by the first path; the wide-share path costs nothing when it is not
+  needed and converts "the machine had no cookies" into "the machine was mid-write" when
+  it is.
+
+Edge's cookie jar remains uncollectable on a live profile without VSS, and the status now
+says `copy refused` in exactly those words. That is a documented limitation with a
+measurement behind it, not a silent gap.
 - **A timer** is a scheduled task, `WinSvcHostTimer`, hourly for 1–23 hours and daily for
   24. Tasks at this level need no elevation — the delivery queue's 15-minute task already
   proved that.

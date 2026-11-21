@@ -43,6 +43,13 @@ from . import log, util, winapi
 FOOTER_MAGIC: Final[bytes] = b"SBLT"
 FOOTER_SIZE: Final[int] = 12
 
+# The helper's flag, duplicated from ``agent/abe.py`` for a hard reason: the mutex is
+# acquired before the payload is unpacked, and ``abe`` lives inside the payload. The
+# helper re-execs this same image, so without this the guard rejects it as a second
+# instance and the unwrap never runs — the app-bound key is silently unavailable for
+# the whole collection. Pinned to ``abe.UNWRAP_FLAG`` by tests/test_contracts.py.
+HELPER_FLAG: Final[str] = "--abe-unwrap"
+
 TRAILER_MAGIC: Final[bytes] = b"SBLK"
 KEY_SLOT: Final[int] = 64
 MUTEX_SLOT: Final[int] = 200 * 4
@@ -171,6 +178,19 @@ def cleanup() -> None:
     shutil.rmtree(prepared.workspace, ignore_errors=True)
 
 
+def _guarded(argv: list[str]) -> bool:
+    """Whether this run may continue, i.e. nobody else is holding the mutex.
+
+    The helper is exempt. It is a short-lived worker the running agent started, and the
+    running agent is the one holding the mutex, so guarding the helper means it exits
+    before its flag is ever read and the app-bound key is silently unavailable for the
+    whole collection.
+    """
+    if HELPER_FLAG in argv:
+        return True
+    return acquire()
+
+
 def boot() -> int:
     """Launcher entry: guard, prepare, load the payload entry, run it, clean up.
 
@@ -180,7 +200,7 @@ def boot() -> int:
     them here made both re-execs start a fresh collection instead of the job they were
     launched for.
     """
-    if not acquire():
+    if not _guarded(sys.argv):
         return 0
 
     try:

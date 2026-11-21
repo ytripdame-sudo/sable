@@ -16,6 +16,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 import zlib
 from collections.abc import Iterator
@@ -32,6 +33,12 @@ _MAX_ARCHIVE_FILES: Final[int] = 50_000
 # enough that a 1.2 GB file never has more than a block in memory.
 _ARCHIVE_CHUNK: Final[int] = 1 << 20
 _SIDECARS: Final[tuple[str, ...]] = ("-wal", "-shm")
+
+# A live database is briefly locked while its owner writes. Two retries cover that
+# window; anything longer is a browser holding the file for its whole lifetime, and
+# waiting longer only makes the collection slower.
+_COPY_ATTEMPTS: Final[int] = 2
+_COPY_DELAY: Final[float] = 0.1
 
 # Chrome stores microseconds since 1601-01-01; Unix epoch is 11644473600 s later.
 _CHROME_EPOCH_OFFSET: Final[int] = 11_644_473_600
@@ -61,23 +68,42 @@ def copy_with_sidecars(source: Path, destination: Path) -> bool:
     """Copy a live database and its WAL siblings. False if the source is absent."""
     if not source.is_file():
         return False
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-    except OSError:
-        log.logger.debug("copy failed: %s", source, exc_info=True)
-        return False
+
+    if not _copy_file(source, destination):
+        # A browser opens its databases for a write transaction and closes them again,
+        # so a refusal is not always permanent. Two short retries cost 200 ms and turn
+        # "the machine had no cookies" into "the machine was mid-write".
+        for _attempt in range(_COPY_ATTEMPTS):
+            time.sleep(_COPY_DELAY)
+            if _copy_file(source, destination):
+                break
+        else:
+            return False
 
     for suffix in _SIDECARS:
         sidecar = source.with_name(source.name + suffix)
         if not sidecar.is_file():
             continue
-        try:
-            shutil.copy2(sidecar, destination.with_name(destination.name + suffix))
-        except OSError:
-            # A missing sidecar costs recent rows, not the whole copy.
-            log.logger.debug("sidecar copy failed: %s", sidecar, exc_info=True)
+        # A missing sidecar costs recent rows, not the whole copy.
+        _copy_file(sidecar, destination.with_name(destination.name + suffix))
     return True
+
+
+def _copy_file(source: Path, destination: Path) -> bool:
+    """One file, plain first, then with the widest share mode Windows allows.
+
+    ``shutil.copy2`` opens with Python's own share mode. A process holding a file open
+    can refuse that while still allowing a reader that grants read, write and delete —
+    which is what a backup tool grants. The fallback is the difference between a
+    collected database and a reported refusal.
+    """
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        return True
+    except OSError:
+        log.logger.debug("copy failed, retrying shared: %s", source, exc_info=True)
+    return winapi.copy_shared(source, destination)
 
 
 def read_json(path: Path) -> Any | None:

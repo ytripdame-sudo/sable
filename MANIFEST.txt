@@ -5,6 +5,7 @@ agent/winapi.py
 agent/log.py
 agent/util.py
 agent/abe.py
+agent/decoy.py
 agent/patch.py
 agent/gate.py
 agent/relay.py

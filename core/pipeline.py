@@ -26,7 +26,7 @@ from typing import Final
 
 from . import forge, rename, seal
 from .rename import RenameError
-from .schema import RunConfig
+from .schema import RunConfig, VersionConfig
 from .validate import Problem, blocking, describe, validate
 
 STAGE_VALIDATE: Final[str] = "validate"
@@ -137,6 +137,26 @@ def _target_name(name: str, mode: str) -> str:
     return cleaned
 
 
+def _artifact_name(name: str | None, fuse: Path | None, mode: str) -> str | None:
+    """The name the finished build ships under, or None to generate one.
+
+    An explicit name always wins. Failing that, a build carrying a bound file is named
+    after that file: the operator picked a program by name, and the artifact that
+    delivers it should not arrive under a different one. Only a build with nothing to
+    take a name from invents one.
+    """
+    if name is not None:
+        return _target_name(name, mode)
+    if fuse is None:
+        return None
+    try:
+        return rename.derive(fuse.name, _EXTENSIONS[mode])
+    except RenameError:
+        # A bound file that cannot lend its name is not a failed build. It falls back
+        # to a generated one rather than stopping a run that is otherwise complete.
+        return None
+
+
 def run(
     cfg: RunConfig,
     *,
@@ -147,6 +167,7 @@ def run(
     stub: Path | None = None,
     icon: Path | None = None,
     fuse: Path | None = None,
+    version: VersionConfig | None = None,
     progress: Progress | None = None,
     cancel: Cancel | None = None,
 ) -> Outcome:
@@ -202,7 +223,9 @@ def run(
     _check_cancel(cancel, STAGE_FORGE)
     emit(STAGE_FORGE, f"writing {mode} container", 0.55)
     try:
-        built = forge.build(cfg, sealed, working, mode=mode, stub=stub, icon=icon)
+        built = forge.build(
+            cfg, sealed, working, mode=mode, stub=stub, icon=icon, version=version
+        )
     except forge.ForgeError as exc:
         raise PipelineError(STAGE_FORGE, str(exc)) from exc
 
@@ -226,7 +249,7 @@ def run(
     try:
         artifact = rename.rename(
             built,
-            name=None if name is None else _target_name(name, mode),
+            name=_artifact_name(name, fuse, mode),
             directory=out_dir,
         )
     except RenameError as exc:

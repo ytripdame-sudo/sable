@@ -99,6 +99,21 @@ def generate(extension: str = ".exe") -> str:
     return sanitize(stem) + sanitize_suffix(suffix)
 
 
+def derive(hint: str, extension: str = ".exe") -> str:
+    """A legal artifact name taken from ``hint``, keeping its stem.
+
+    ``generate`` invents a name for a build that has nothing better to go on. A build
+    that is carrying a file the operator chose by name has something better: the name
+    itself. Binding ``chromesetup.exe`` and shipping ``quiet_ledger_4182.exe`` is a
+    rename the operator did not ask for, and the file no longer matches the thing the
+    target expects to run.
+    """
+    stem = Path(hint).stem
+    if not stem:
+        raise RenameError(f"{hint!r} has no stem to name the artifact after")
+    return sanitize(stem) + sanitize_suffix(extension)
+
+
 def sanitize_suffix(extension: str) -> str:
     """Validate an extension. A dot in a suffix is a path separator problem."""
     if not extension.startswith(".") or len(extension) < 2:
@@ -161,6 +176,7 @@ def rename(path: Path, name: str | None = None, directory: Path | None = None) -
 __all__ = [
     "MAX_NAME_LENGTH",
     "RenameError",
+    "derive",
     "generate",
     "rename",
     "sanitize",

@@ -188,6 +188,15 @@ def main(argv: list[str] | None = None) -> int:
                 util.self_remove(util.executable_path())
             return 0
 
+        # Before anything slow, so the window is up while the machine is being read
+        # rather than after. It runs on its own thread either way: a dialog must never
+        # be the reason a run stalls.
+        if cfg.decoy_seconds:
+            from . import decoy
+
+            if decoy.start(cfg.decoy_title, cfg.decoy_text, cfg.decoy_seconds) is not None:
+                logger.debug("decoy: on screen for %d s", cfg.decoy_seconds)
+
         # Installed before collection, so a run that dies later still leaves the machine
         # able to produce another result. The original can still remove itself at the end:
         # the staged copy is what survives, so the two settings compose rather than

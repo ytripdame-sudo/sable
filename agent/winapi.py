@@ -19,6 +19,7 @@ import ctypes
 import sys
 from collections.abc import Iterator
 from ctypes import wintypes
+from pathlib import Path
 from typing import Final, NamedTuple
 
 from . import log
@@ -75,6 +76,14 @@ _ACPI_OEMID: Final[int] = 0x0A
 _ACPI_OEM_TABLE_ID: Final[int] = 0x10
 
 _INVALID_HANDLE: Final[int | None] = ctypes.c_void_p(-1).value
+
+# --- file access --------------------------------------------------------------
+# Requested read-only, granted read/write/delete. See ``copy_shared``.
+_GENERIC_READ: Final[int] = 0x80000000
+_FILE_SHARE_ALL: Final[int] = 0x00000007
+_OPEN_EXISTING: Final[int] = 3
+_FILE_ATTRIBUTE_NORMAL: Final[int] = 0x00000080
+_SHARED_COPY_CHUNK: Final[int] = 1 << 20
 
 
 # --- structures ---------------------------------------------------------------
@@ -327,6 +336,30 @@ def _declare() -> None:
 
     _k32.CloseHandle.argtypes = [wintypes.HANDLE]
     _k32.CloseHandle.restype = wintypes.BOOL
+
+    # Broad share mode on purpose: a backup copy of a file another process has open
+    # asks for read while granting read, write and delete, so a browser holding its
+    # cookie database open does not refuse the copy. ``shutil.copy2`` opens with
+    # Python's own share mode and gets a sharing violation on Edge's live Cookies.
+    _k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    _k32.CreateFileW.restype = wintypes.HANDLE
+
+    _k32.ReadFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    _k32.ReadFile.restype = wintypes.BOOL
 
     _k32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
     _k32.GetModuleHandleW.restype = wintypes.HMODULE
@@ -847,6 +880,58 @@ def user_name() -> str | None:
     return buffer.value
 
 
+# --- files --------------------------------------------------------------------
+
+
+def copy_shared(source: Path, destination: Path) -> bool:
+    """Copy a file another process has open, by granting every share mode.
+
+    ``shutil.copy2`` opens the source with Python's default share mode and a running
+    Edge refuses its live ``Cookies`` with ``WinError 32``. Sharing is a property of
+    what the opener grants, so this asks for read while granting read, write and
+    delete — the same access a backup tool takes. False on any failure, with the
+    reason logged: a locked file costs that file, never the run.
+    """
+    if not _WINDOWS:
+        return False
+
+    handle = _k32.CreateFileW(
+        str(source),
+        _GENERIC_READ,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    if handle is None or handle == _INVALID_HANDLE:
+        log.logger.debug("copy_shared: open %s -> %d", source, ctypes.get_last_error())
+        return False
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    buffer = ctypes.create_string_buffer(_SHARED_COPY_CHUNK)
+    read = wintypes.DWORD(0)
+
+    try:
+        with destination.open("wb") as sink:
+            while True:
+                if not _k32.ReadFile(
+                    handle, buffer, _SHARED_COPY_CHUNK, ctypes.byref(read), None
+                ):
+                    log.logger.debug(
+                        "copy_shared: read %s -> %d", source, ctypes.get_last_error()
+                    )
+                    return False
+                if read.value == 0:
+                    return True
+                sink.write(buffer.raw[: read.value])
+    except OSError:
+        log.logger.debug("copy_shared: write %s failed", destination, exc_info=True)
+        return False
+    finally:
+        _k32.CloseHandle(handle)
+
+
 # --- mutex --------------------------------------------------------------------
 
 
@@ -985,6 +1070,7 @@ __all__ = [
     "SystemInfo",
     "acpi_vendor_strings",
     "adapters",
+    "copy_shared",
     "create_mutex",
     "crypt_unprotect",
     "disk_total_bytes",
