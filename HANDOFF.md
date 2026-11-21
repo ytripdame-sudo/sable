@@ -11,7 +11,7 @@ file is the map.
 | Path | What it is |
 |---|---|
 | `C:\Users\Kuzenee\Desktop\55555\sable` | The project root. |
-| `sable/MANIFEST.txt` | The locked 50 paths, approved order. Authoritative. |
+| `sable/MANIFEST.txt` | The locked 51 paths, approved order. Authoritative. |
 | `sable/DECISIONS.md` | Every judgement call, with the alternative that lost. Read before disagreeing with the code. |
 | `sable/SIGNATURES.md` | Locked Win32 prototypes. A guess never goes inline — it goes here first. |
 | `sable/native/aes` | The Rust crate. Both formats, byte-compatible, proven by `_harness/rust_interop.py`. Cargo project, outside the manifest like `tools/`. |
@@ -376,9 +376,14 @@ members through a `link` relay; the archive was pulled back from the host and op
 ## 10. Next
 
 V1 is tagged, archived and pushed: `github.com/ytripdame-sudo/sable`, branch `main` at
-`b0c4245`, tag `v1.0`. The repository is private. `SABLE-v1.0-source.zip` in the parent
-folder is `git archive` of the tag, and the extracted copy runs **242 passed** and a clean
+`a67bb73`, tag `v1.0`. The repository is private. `SABLE-v1.0-source.zip` in the parent
+folder is `git archive` of the tag, and the extracted copy runs **352 passed** and a clean
 `ruff` on its own.
+
+The tag was first cut at `b0c4245`, the tree the GUI pass finished on. It was moved to
+`a67bb73` when the binder, the disguise work and the credential translator landed, because
+that is the tree V1 means. The old commit is still on `main`; only the tag points
+somewhere later now.
 
 The delivery path is closed: queue, retry, encryption, streaming, Discord, local copy.
 The lifecycle is closed too: one run, self-remove, or stay and come back on logon or a
