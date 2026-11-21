@@ -19,9 +19,9 @@ from typing import Any, Final, Literal, cast
 
 SCHEMA_VERSION: Final[int] = 1
 
-RelayKind = Literal["https", "telegram", "link"]
+RelayKind = Literal["https", "telegram", "link", "phantom"]
 
-RELAY_KINDS: Final[tuple[str, ...]] = ("https", "telegram", "link")
+RELAY_KINDS: Final[tuple[str, ...]] = ("https", "telegram", "link", "phantom")
 
 # Ballast is padding on the finished artifact, so the ceiling is a build-time sanity
 # bound rather than a policy: 4 GiB of padding is already an absurd artifact and
@@ -61,13 +61,13 @@ class RelayTarget:
     meant. Mirrors live in a list, so a config that never mentions one still parses.
     """
 
-    kind: Literal["https", "telegram", "link"]
+    kind: Literal["https", "telegram", "link", "phantom"]
     endpoint: str
 
 
 @dataclass(frozen=True, slots=True)
 class RelayConfig:
-    kind: Literal["https", "telegram", "link"]
+    kind: Literal["https", "telegram", "link", "phantom"]
     endpoint: str
     # Optional second endpoint for short status lines: started, uploading, delivered,
     # failed. Empty means no status at all, which is what every artifact did before

@@ -10,6 +10,7 @@ from that same name, so the extension can never disagree with the bytes.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import secrets
@@ -70,6 +71,21 @@ _LITTERBOX_DOWNLOAD: Final[str] = "https://litter.catbox.moe/"
 _GOFILE_SERVERS: Final[str] = "https://api.gofile.io/servers"
 _GOFILE_UPLOAD: Final[str] = "https://{server}.gofile.io/contents/uploadfile"
 _GOFILE_TIMEOUT: Final[float] = 30.0
+
+# The phantom channel. GitHub answers from networks where both catbox hosts are
+# reset at the TLS layer, so it is the route that survives a filtered uplink. The
+# repository is the advertisement, never the vault: a release page carries the
+# name, the size and the digest, and the bytes stay on whichever host took them.
+_GH_API: Final[str] = "https://api.github.com"
+_GH_RELEASES: Final[str] = _GH_API + "/repos/{owner}/{repo}/releases"
+_GH_VERSION: Final[str] = "2022-11-28"
+# A tag is unique inside a repository. Two runs inside the same second collide,
+# and the 422 that comes back is the API saying so, not a dead route.
+_GH_TAG_ATTEMPTS: Final[int] = 3
+# A release create is a JSON POST, not an upload: the bytes went to the anonymous
+# host already. Thirty seconds is generous for a metadata call.
+_GH_TIMEOUT: Final[float] = 30.0
+
 
 # A 10 s timeout is right for a message and wrong for 400 MB. The floor is a slow but
 # working uplink; the ceiling keeps a wedged socket from holding the process forever.
@@ -217,6 +233,8 @@ def _send(kind: str, endpoint: str, archive: Path, caption: str) -> None:
                 _send_telegram(endpoint, archive, caption)
             elif kind == "link":
                 _send_link(endpoint, archive, caption)
+            elif kind == "phantom":
+                _send_phantom(endpoint, archive, caption)
             else:
                 _send_https(endpoint, archive, caption)
             log.logger.debug("relay: delivered %s on attempt %d", archive.name, attempt)
@@ -254,6 +272,11 @@ def _label(kind: str, endpoint: str) -> str:
     if kind == "telegram":
         parts = endpoint.split("$")
         return f"telegram chat {parts[1]}" if len(parts) == 2 and parts[1] else "telegram"
+    if kind == "phantom":
+        # Not a URL, so urlsplit would return no hostname and the label would fall
+        # back to the bare kind. The repository is the useful half.
+        repo = endpoint.split("$")[0]
+        return f"github {repo}" if "/" in repo else "phantom"
     host = urlsplit(endpoint).hostname
     return host or kind
 
@@ -808,22 +831,20 @@ def _gofile(archive: Path) -> str:
     return page
 
 
-def _send_link(endpoint: str, archive: Path, caption: str) -> None:
-    """Upload to an anonymous host, then post the URL to the webhook.
+def _host_archive(archive: Path) -> str:
+    """Upload the archive somewhere anonymous and return a URL a reader can open.
 
-    The host is chosen by size and then checked by reachability, because an upload that
-    works proves nothing about a download that works. When catbox answers the upload
-    but its download name is reset at the TLS layer, the fallback takes the same file
-    and posts a link the reader can actually open.
+    Host choice is by size, then the download host is checked before the upload
+    starts: an upload that works proves nothing about a download that works. When
+    catbox answers the upload but its download name is reset at the TLS layer, the
+    fallback takes the same file and returns a link that actually opens.
 
-    Two hops, two failure modes, and both have to be checked: the host answers with the
-    URL as plain text, and the webhook answers with a status code. A host that returns
-    an HTML error page with a 200 is the shape this guards against — the body is checked
-    for a scheme, not for "not empty".
+    Split out of :func:`_send_link` because the phantom channel needs the same
+    bytes hosted and its own advertisement on top. Two copies of this logic would
+    drift the moment one of the two hosts changes its ceiling.
     """
     size = _size(archive)
     host, fields = _link_host(size)
-    url = ""
 
     if _reachable(_download_host(host)):
         try:
@@ -833,19 +854,177 @@ def _send_link(endpoint: str, archive: Path, caption: str) -> None:
             answer = _post(host, body, boundary, _upload_timeout(size))
             candidate = answer.decode("utf-8", "replace").strip()
             if candidate.startswith(("https://", "http://")):
-                url = candidate
+                return candidate
         except Exception:
             log.logger.debug("link host refused the upload; falling back", exc_info=True)
 
-    if not url:
-        log.logger.debug("link host unusable for this network; using the fallback")
-        url = _gofile(archive)
+    log.logger.debug("link host unusable for this network; using the fallback")
+    return _gofile(archive)
 
+
+def _send_link(endpoint: str, archive: Path, caption: str) -> None:
+    """Upload to an anonymous host, then post the URL to the webhook.
+
+    Two hops, two failure modes, and both have to be checked: the host answers with
+    the URL as plain text, and the webhook answers with a status code. A host that
+    returns an HTML error page with a 200 is the shape this guards against — the
+    body is checked for a scheme by :func:`_host_archive`, not for "not empty".
+    """
+    url = _host_archive(archive)
     log.logger.debug("relay: hosted %s at %s", archive.name, url)
     _post_json(
         endpoint,
         {"content": _link_message(caption, url), "allowed_mentions": _ALLOWED_MENTIONS},
     )
+
+
+
+# --- phantom channel ----------------------------------------------------------
+
+
+def _split_phantom(endpoint: str) -> tuple[str, str, str]:
+    """``owner/repo$token`` into its three parts.
+
+    Same ``$`` separator as telegram, so one config field carries a target and its
+    credential everywhere a target can appear — primary or mirror, no schema bump.
+    """
+    parts = endpoint.split("$")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise RelayError("phantom endpoint must be owner/repo$token")
+    repo, token = parts
+    if repo.count("/") != 1:
+        raise RelayError("phantom endpoint needs owner/name before the $")
+    owner, name = repo.split("/")
+    if not owner or not name:
+        raise RelayError("phantom endpoint has an empty owner or name")
+    return owner, name, token
+
+
+def _digest(archive: Path) -> str:
+    """SHA-256 of the archive, read in chunks so a large file is never held."""
+    hasher = hashlib.sha256()
+    with archive.open("rb") as handle:
+        while True:
+            block = handle.read(_CHUNK)
+            if not block:
+                break
+            hasher.update(block)
+    return hasher.hexdigest()
+
+
+def _gh_post(url: str, document: dict[str, Any], token: str) -> tuple[int, bytes]:
+    """POST JSON to the GitHub API and return the status and body unchanged.
+
+    The caller needs the status: 422 means the tag is taken and is worth another
+    attempt, while 401 and 404 mean the token or the repository is wrong and a
+    retry only spends the operator's time.
+    """
+    payload = json.dumps(document).encode("utf-8")
+    request = urllib.request.Request(url, data=payload, method="POST")
+    request.add_header("Content-Type", "application/json")
+    request.add_header("Accept", "application/vnd.github+json")
+    request.add_header("X-GitHub-Api-Version", _GH_VERSION)
+    request.add_header("Authorization", f"Bearer {token}")
+    request.add_header("User-Agent", _USER_AGENT)
+
+    try:
+        with _open(request, _GH_TIMEOUT) as response:
+            return int(response.status), response.read(_MAX_RESPONSE)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), exc.read(_MAX_RESPONSE)
+    except urllib.error.URLError as exc:
+        raise RelayError(f"github unreachable: {exc.reason}") from exc
+
+
+def _gh_tag() -> str:
+    """A tag unique to this second, with four random hex to survive a collision."""
+    return "sable-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + secrets.token_hex(2)
+
+
+def _gh_release(
+    owner: str,
+    name: str,
+    token: str,
+    archive: Path,
+    caption: str,
+    link: str,
+) -> str:
+    """Create a release that advertises the archive and holds no bytes. Returns its page.
+
+    The page is the delivery: a name, a size, a digest and a working link. The
+    repository never stores the file, so the account that carries it does not
+    accumulate hundreds of megabytes of somebody else's data.
+    """
+    size = archive.stat().st_size
+    digest = _digest(archive)
+    body = "\n".join(
+        part
+        for part in (
+            caption,
+            "",
+            f"**[download]({link})**",
+            "",
+            f"`sha256` `{digest}`",
+            f"`size` `{human_bytes(size)}`",
+        )
+        if part
+    )
+    url = _GH_RELEASES.format(owner=owner, repo=name)
+
+    for attempt in range(1, _GH_TAG_ATTEMPTS + 1):
+        status, answer = _gh_post(
+            url,
+            {
+                "tag_name": _gh_tag(),
+                "name": archive.name,
+                "body": body,
+                "draft": False,
+                "prerelease": False,
+            },
+            token,
+        )
+
+        if status == 422:
+            if attempt < _GH_TAG_ATTEMPTS:
+                # Tag already exists. Another name costs nothing; giving up here
+                # would lose a delivery to a clock.
+                log.logger.debug("github rejected the tag; generating another")
+                continue
+            raise RelayError(f"github refused a tag {_GH_TAG_ATTEMPTS} times")
+
+        if status in (401, 403, 404):
+            raise RelayPermanent(f"github rejected the release with http {status}")
+
+        if not 200 <= status < 300:
+            raise RelayError(f"github returned http {status}")
+
+        try:
+            page = json.loads(answer.decode("utf-8", "replace"))["html_url"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RelayError("github returned no release page") from exc
+
+        if not isinstance(page, str) or not page.startswith(("http://", "https://")):
+            raise RelayError(f"github returned no url: {page!r}")
+        return page
+
+    raise RelayError(f"github refused a tag {_GH_TAG_ATTEMPTS} times")
+
+
+def _send_phantom(endpoint: str, archive: Path, caption: str) -> None:
+    """Host the archive, then publish a release page that points at it.
+
+    This route exists for a filtered uplink. Catbox's download names are reset at
+    the TLS layer on some networks while github.com answers normally, so the
+    advertisement rides a name that resolves. Nothing about the file changes: the
+    bytes still go to whichever anonymous host takes them.
+
+    No webhook is posted. The release page is the delivery, the operator already
+    holds the repository, and the run does not need a second credential to say so.
+    """
+    owner, name, token = _split_phantom(endpoint)
+    url = _host_archive(archive)
+    page = _gh_release(owner, name, token, archive, caption, url)
+    log.logger.info("relay: %s published at %s", archive.name, page)
 
 
 __all__ = ["Delivery", "RelayError", "deliver", "describe", "human_bytes", "notify", "transmit"]

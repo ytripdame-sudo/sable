@@ -61,6 +61,9 @@ needs_crypto = pytest.mark.skipif(not CRYPTO, reason="pycryptodome is not instal
 MUTEX = "Global\\SABLE_CONTRACT_MUTEX_9f2c"
 SEAL_KEY = "k-3f9a-contract-key"
 TELEGRAM = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw$42"
+# Owner/name before the $, token after. The token shape is checked, never its
+# validity: a validator that insists on a live token cannot run offline.
+PHANTOM = "ytripdame-sudo/archive$ghp_" + "a" * 32
 
 
 def config(**overrides: object) -> RunConfig:
@@ -589,7 +592,10 @@ def test_a_telegram_mirror_is_checked_by_the_telegram_rule() -> None:
 
 @pytest.mark.parametrize("kind", RELAY_KINDS)
 def test_each_declared_kind_can_pass(kind: str) -> None:
-    endpoint = TELEGRAM if kind == "telegram" else "https://example.invalid/relay"
+    endpoint = {
+        "telegram": TELEGRAM,
+        "phantom": PHANTOM,
+    }.get(kind, "https://example.invalid/relay")
     problems = validate_module.validate(
         config(relay=RelayConfig(kind=kind, endpoint=endpoint)),  # type: ignore[arg-type]
         mode=forge.OUTPUT_PY,

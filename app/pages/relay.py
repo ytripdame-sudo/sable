@@ -45,6 +45,7 @@ _PLACEHOLDERS: Final[dict[str, str]] = {
     "https": "https://discord.com/api/webhooks/...",
     "telegram": "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw$42",
     "link": "https://discord.com/api/webhooks/...",
+    "phantom": "ytripdame-sudo/sable-archive$ghp_...",
 }
 
 _HINTS: Final[dict[str, tuple[str, str]]] = {
@@ -62,6 +63,13 @@ _HINTS: Final[dict[str, tuple[str, str]]] = {
         "The artifact is hosted first and only the link is posted, so the host's file "
         "ceiling does not apply. Small archives go to catbox and stay; large ones go "
         "to litterbox and expire in 72 hours.",
+    ),
+    "phantom": (
+        _PLACEHOLDERS["phantom"],
+        "Repository, a $, then a token with repo scope. The artifact is hosted on an "
+        "anonymous host and a release page is published that points at it — the "
+        "repository itself never stores the file. Worth a fallback where the file "
+        "hosts are blocked and github answers.",
     ),
 }
 

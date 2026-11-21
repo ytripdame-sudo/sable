@@ -516,7 +516,12 @@ def test_every_relay_kind_reaches_a_sender(
     archive = tmp_path / "sable.zip"
     archive.write_bytes(b"PK\x03\x04")
 
-    expected = {"https": "_send_https", "telegram": "_send_telegram", "link": "_send_link"}
+    expected = {
+        "https": "_send_https",
+        "telegram": "_send_telegram",
+        "link": "_send_link",
+        "phantom": "_send_phantom",
+    }
     assert set(expected) == set(RELAY_KINDS)
 
     for kind, name in expected.items():
@@ -1016,3 +1021,158 @@ def test_describe_without_counts_prints_no_items_line() -> None:
 def test_items_are_ordered_by_what_produced_most() -> None:
     text = relay.describe({"counts": {"documents": 2, "browsers": 900, "system": 30}})
     assert text.index("browsers") < text.index("system") < text.index("documents")
+
+
+# --- phantom channel ----------------------------------------------------------
+
+PHANTOM = "ytripdame-sudo/archive$ghp_" + "a" * 32
+
+
+def test_phantom_endpoint_splits_into_owner_name_and_token() -> None:
+    assert relay._split_phantom(PHANTOM) == (
+        "ytripdame-sudo",
+        "archive",
+        "ghp_" + "a" * 32,
+    )
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "ytripdame-sudo/archive",
+        "ytripdame-sudo$ghp_" + "a" * 32,
+        "noslash$ghp_" + "a" * 32,
+        "a/b/c$ghp_" + "a" * 32,
+        "/archive$ghp_" + "a" * 32,
+        "owner/$ghp_" + "a" * 32,
+    ],
+)
+def test_phantom_endpoint_rejects_a_malformed_target(endpoint: str) -> None:
+    with pytest.raises(relay.RelayError):
+        relay._split_phantom(endpoint)
+
+
+def test_phantom_release_advertises_the_link_and_never_holds_the_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04sable")
+    seen: list[dict[str, object]] = []
+
+    def fake_post(url: str, document: dict[str, object], token: str) -> tuple[int, bytes]:
+        seen.append({"url": url, "document": document, "token": token})
+        return 201, json.dumps({"html_url": "https://github.com/o/r/releases/tag/x"}).encode()
+
+    monkeypatch.setattr(relay, "_gh_post", fake_post)
+
+    page = relay._gh_release(
+        "o", "r", "ghp_x", archive, "**sniped** BOX", "https://files.catbox.moe/abc.zip"
+    )
+
+    assert page == "https://github.com/o/r/releases/tag/x"
+    assert len(seen) == 1
+    assert seen[0]["url"] == "https://api.github.com/repos/o/r/releases"
+    assert seen[0]["token"] == "ghp_x"
+
+    document = seen[0]["document"]
+    assert isinstance(document, dict)
+    assert document["name"] == "sable.zip"
+    body = str(document["body"])
+    # The link is what the page is for; the digest is what proves the link still
+    # points at the collected bytes rather than whatever the host re-used the name for.
+    assert "https://files.catbox.moe/abc.zip" in body
+    assert relay._digest(archive) in body
+    assert "assets" not in document
+
+
+def test_phantom_release_retries_a_taken_tag_and_does_not_give_up_on_the_clock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+    statuses = iter([422, 422, 201])
+    calls: list[int] = []
+
+    def fake_post(url: str, document: dict[str, object], token: str) -> tuple[int, bytes]:
+        calls.append(1)
+        status = next(statuses)
+        if status != 201:
+            return status, b"{}"
+        return 201, json.dumps({"html_url": "https://github.com/o/r/releases/tag/y"}).encode()
+
+    monkeypatch.setattr(relay, "_gh_post", fake_post)
+
+    page = relay._gh_release("o", "r", "ghp_x", archive, "caption", "https://host/a.zip")
+
+    assert page.endswith("/tag/y")
+    assert len(calls) == 3
+
+
+def test_phantom_release_stops_after_the_last_tag_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+    monkeypatch.setattr(relay, "_gh_post", lambda *a, **k: (422, b"{}"))
+
+    with pytest.raises(relay.RelayError) as caught:
+        relay._gh_release("o", "r", "ghp_x", archive, "caption", "https://host/a.zip")
+
+    assert "tag" in str(caught.value)
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_phantom_release_treats_a_rejected_token_or_repository_as_permanent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+    monkeypatch.setattr(relay, "_gh_post", lambda *a, **k: (status, b"{}"))
+
+    with pytest.raises(relay.RelayPermanent):
+        relay._gh_release("o", "r", "ghp_x", archive, "caption", "https://host/a.zip")
+
+
+def test_phantom_send_hosts_first_then_publishes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+    order: list[str] = []
+
+    monkeypatch.setattr(
+        relay, "_host_archive", lambda a: order.append("host") or "https://host/a.zip"
+    )
+    monkeypatch.setattr(
+        relay,
+        "_gh_release",
+        lambda *a, **k: order.append("release") or "https://github.com/o/r/releases/tag/z",
+    )
+
+    relay._send_phantom(PHANTOM, archive, "caption")
+
+    assert order == ["host", "release"]
+
+
+def test_phantom_send_does_not_reach_for_a_webhook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The repository is the destination. A second credential here would mean the
+    # fallback needs the primary to be configured before it can speak.
+    archive = tmp_path / "sable.zip"
+    archive.write_bytes(b"PK\x03\x04")
+    monkeypatch.setattr(relay, "_host_archive", lambda a: "https://host/a.zip")
+    monkeypatch.setattr(relay, "_gh_release", lambda *a, **k: "https://github.com/o/r/x")
+
+    def refuse(*_: object, **__: object) -> None:
+        raise AssertionError("phantom must not post to a webhook")
+
+    monkeypatch.setattr(relay, "_post_json", refuse)
+
+    relay._send_phantom(PHANTOM, archive, "caption")
+
+
+def test_phantom_is_labelled_by_its_repository_not_its_token() -> None:
+    label = relay._label("phantom", PHANTOM)
+    assert label == "github ytripdame-sudo/archive"
+    assert "ghp_" not in label
