@@ -20,12 +20,22 @@ on a script build, which ``forge`` ignores by design.
 from __future__ import annotations
 
 import re
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
 
-from .forge import KEY_SLOT, MUTEX_SLOT, OUTPUT_EXE, OUTPUT_MODES, OUTPUT_PY
+from .forge import (
+    BOUND_SUFFIXES,
+    KEY_SLOT,
+    MAX_FUSE_BYTES,
+    MAX_ICON_BYTES,
+    MUTEX_SLOT,
+    OUTPUT_EXE,
+    OUTPUT_MODES,
+    OUTPUT_PY,
+)
 from .rename import MAX_NAME_LENGTH, RenameError, sanitize, sanitize_suffix
 from .schema import MAX_BALLAST_MB, RELAY_KINDS, SOURCE_FIELDS, RunConfig
 
@@ -333,12 +343,108 @@ def _check_stub(stub: Path | None, mode: str) -> list[Problem]:
     return []
 
 
+def _check_icon(icon: Path | None, mode: str) -> list[Problem]:
+    """The ``.ico`` patched into the launcher's resources.
+
+    Reported under the output rule with its own path, the same way the status webhook is
+    reported under the endpoint rule: it is the same question about the same kind of
+    value, and a rule list that grows once per optional field stops being a list of the
+    ways a build can be wrong.
+
+    Only the six-byte header is read here. Enough to tell a single-icon library from a
+    renamed PNG and to know the directory fits; the full parse lives in ``forge``, where
+    a malformed entry is a failed build rather than a complaint on a field the reader
+    cannot fix.
+    """
+    if icon is None:
+        return []
+    if not icon.is_file():
+        return [_problem(RULE_OUTPUT, "output.icon", f"{icon}: not a file")]
+    if icon.suffix.lower() != ".ico":
+        return [_problem(RULE_OUTPUT, "output.icon", f"{icon.name}: needs to be a .ico")]
+
+    try:
+        size = icon.stat().st_size
+    except OSError as exc:
+        return [_problem(RULE_OUTPUT, "output.icon", f"{icon}: cannot stat ({exc.strerror})")]
+    if size <= 0:
+        return [_problem(RULE_OUTPUT, "output.icon", f"{icon.name}: is empty")]
+    if size > MAX_ICON_BYTES:
+        return [
+            _problem(
+                RULE_OUTPUT,
+                "output.icon",
+                f"{size} bytes, the ceiling is {MAX_ICON_BYTES}",
+            )
+        ]
+
+    try:
+        with icon.open("rb") as handle:
+            head = handle.read(6)
+    except OSError as exc:
+        return [_problem(RULE_OUTPUT, "output.icon", f"{icon}: cannot read ({exc.strerror})")]
+
+    if len(head) < 6:
+        return [_problem(RULE_OUTPUT, "output.icon", f"{icon.name}: shorter than a header")]
+    reserved, kind, count = struct.unpack("<HHH", head)
+    if reserved != 0 or kind != 1:
+        return [_problem(RULE_OUTPUT, "output.icon", f"{icon.name}: not a .ico")]
+    if count == 0:
+        return [_problem(RULE_OUTPUT, "output.icon", f"{icon.name}: carries no images")]
+    if 6 + count * 16 > size:
+        return [_problem(RULE_OUTPUT, "output.icon", f"{icon.name}: directory runs past it")]
+
+    if mode != OUTPUT_EXE:
+        return [_note(RULE_OUTPUT, "output.icon", "ignored: a script has no icon slot")]
+    return []
+
+
+def _check_fuse(fuse: Path | None) -> list[Problem]:
+    """The one file welded into the payload archive and started by the agent.
+
+    Both output modes carry it: the archive is the same archive either way, so only the
+    icon is format-dependent. A file that cannot be started is still carried and still
+    extracted — a bound ``.dll`` beside a bound ``.exe`` is exactly why that matters.
+    """
+    if fuse is None:
+        return []
+    if not fuse.is_file():
+        return [_problem(RULE_OUTPUT, "output.fuse", f"{fuse}: not a file")]
+
+    try:
+        size = fuse.stat().st_size
+    except OSError as exc:
+        return [_problem(RULE_OUTPUT, "output.fuse", f"{fuse}: cannot stat ({exc.strerror})")]
+    if size <= 0:
+        return [_problem(RULE_OUTPUT, "output.fuse", f"{fuse.name}: is empty")]
+    if size > MAX_FUSE_BYTES:
+        return [
+            _problem(
+                RULE_OUTPUT,
+                "output.fuse",
+                f"{size} bytes, the ceiling is {MAX_FUSE_BYTES}",
+            )
+        ]
+
+    if fuse.suffix.lower() not in BOUND_SUFFIXES:
+        return [
+            _note(
+                RULE_OUTPUT,
+                "output.fuse",
+                f"{fuse.suffix or 'no extension'}: carried and extracted, not started",
+            )
+        ]
+    return []
+
+
 def validate(
     cfg: RunConfig,
     *,
     mode: str,
     name: str | None = None,
     stub: Path | None = None,
+    icon: Path | None = None,
+    fuse: Path | None = None,
 ) -> list[Problem]:
     """Every rule, every failure, in rule order. Never raises.
 
@@ -368,6 +474,8 @@ def validate(
             if name is not None:
                 problems += _check_name(name, mode)
             problems += _check_stub(stub, mode)
+            problems += _check_icon(icon, mode)
+            problems += _check_fuse(fuse)
 
         return problems
     except Exception as exc:

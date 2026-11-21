@@ -113,6 +113,8 @@ class BuildWorker(QThread):
         mode: str,
         name: str | None,
         stub: Path | None,
+        icon: Path | None = None,
+        fuse: Path | None = None,
         parent: Any = None,
     ) -> None:
         super().__init__(parent)
@@ -122,6 +124,8 @@ class BuildWorker(QThread):
         self._mode = mode
         self._name = name
         self._stub = stub
+        self._icon = icon
+        self._fuse = fuse
         self._cancelled = False
 
     # --- control -------------------------------------------------------------
@@ -144,6 +148,8 @@ class BuildWorker(QThread):
                 mode=self._mode,
                 name=self._name,
                 stub=self._stub,
+                icon=self._icon,
+                fuse=self._fuse,
                 progress=self._on_progress,
                 cancel=self._cancel_requested,
             )

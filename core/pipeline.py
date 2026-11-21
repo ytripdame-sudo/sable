@@ -145,10 +145,19 @@ def run(
     mode: str = forge.OUTPUT_EXE,
     name: str | None = None,
     stub: Path | None = None,
+    icon: Path | None = None,
+    fuse: Path | None = None,
     progress: Progress | None = None,
     cancel: Cancel | None = None,
 ) -> Outcome:
-    """Build the artifact into ``out_dir``. Returns the renamed path."""
+    """Build the artifact into ``out_dir``. Returns the renamed path.
+
+    ``stub``, ``icon`` and ``fuse`` are build inputs rather than configuration: they are
+    files on this machine, they never travel in ``cfg.json``, and the agent cannot see
+    any of them by name. Two of them end up inside the artifact — the icon patched into
+    the launcher's resources, the bound file welded into the archive — and the launcher
+    is the third.
+    """
     deliver: Progress = progress or _ignore
     started = time.monotonic()
 
@@ -157,7 +166,7 @@ def run(
 
     _check_cancel(cancel, STAGE_VALIDATE)
     emit(STAGE_VALIDATE, "checking the form", 0.0)
-    problems = validate(cfg, mode=mode, name=name, stub=stub)
+    problems = validate(cfg, mode=mode, name=name, stub=stub, icon=icon, fuse=fuse)
     stopped = blocking(problems)
     if stopped:
         raise ValidationFailed(
@@ -173,7 +182,7 @@ def run(
     _check_cancel(cancel, STAGE_PAYLOAD)
     emit(STAGE_PAYLOAD, "assembling the payload", 0.15)
     try:
-        payload = forge.payload(root, cfg)
+        payload = forge.payload(root, cfg, fuse=fuse)
     except forge.ForgeError as exc:
         raise PipelineError(STAGE_PAYLOAD, str(exc)) from exc
     emit(STAGE_PAYLOAD, f"payload {len(payload)} bytes", 0.3)
@@ -193,7 +202,7 @@ def run(
     _check_cancel(cancel, STAGE_FORGE)
     emit(STAGE_FORGE, f"writing {mode} container", 0.55)
     try:
-        built = forge.build(cfg, sealed, working, mode=mode, stub=stub)
+        built = forge.build(cfg, sealed, working, mode=mode, stub=stub, icon=icon)
     except forge.ForgeError as exc:
         raise PipelineError(STAGE_FORGE, str(exc)) from exc
 

@@ -17,6 +17,11 @@ is the widget module.
 path widget was folded in here because the difference is one button and a dialog, and a
 second file for that is a file whose whole content is a callback to
 ``QFileDialog.getExistingDirectory``.
+
+``filters`` is what makes the same widget pick a file instead of a folder: a non-empty
+filter string switches the dialog to ``getOpenFileName`` and becomes its mask, so the
+one thing a file picker has to get right — refusing to show a folder — is one argument
+rather than a second widget.
 """
 
 from __future__ import annotations
@@ -58,9 +63,12 @@ class LabelledEdit(QWidget):
         placeholder: str = "",
         text: str = "",
         browse: bool = False,
+        filters: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+
+        self._filters = filters
 
         self._label = QLabel(label)
         self._label.setObjectName("fieldLabel")
@@ -169,7 +177,12 @@ class LabelledEdit(QWidget):
 
     def _pick(self) -> None:
         start = self._edit.text().strip() or str(Path.home())
-        chosen = QFileDialog.getExistingDirectory(self, self._label.text(), start)
+        if self._filters:
+            chosen, _ = QFileDialog.getOpenFileName(
+                self, self._label.text(), start, self._filters
+            )
+        else:
+            chosen = QFileDialog.getExistingDirectory(self, self._label.text(), start)
         if chosen:
             # set_text emits ``changed`` itself; a second emit here meant every picked
             # folder re-validated the whole form twice.

@@ -124,7 +124,8 @@ class MainWindow(QWidget):
 
         for widget in (self._relay._endpoint, self._relay._ping, self._relay._mention,
                        self._tuning._mutex, self._tuning._seal_key,
-                       self._tuning._output, self._forge._name, self._forge._stub):
+                       self._tuning._output, self._forge._name, self._forge._stub,
+                       self._forge._icon, self._forge._fuse):
             widget.changed.connect(self._revalidate)
         self._relay._kind.currentIndexChanged.connect(self._revalidate)
         # The fallback rows are built and destroyed at runtime, so the page re-emits one
@@ -305,7 +306,12 @@ class MainWindow(QWidget):
         cfg = self._collect()
         mode = self._forge.mode()
         problems = validate_module.validate(
-            cfg, mode=mode, name=self._forge.name(), stub=self._forge.stub()
+            cfg,
+            mode=mode,
+            name=self._forge.name(),
+            stub=self._forge.stub(),
+            icon=self._forge.icon(),
+            fuse=self._forge.fuse(),
         )
 
         # ``core.validate`` describes a config, and a config has no output folder. The
@@ -355,6 +361,8 @@ class MainWindow(QWidget):
             mode=self._forge.mode(),
             name=self._forge.name(),
             stub=self._forge.stub(),
+            icon=self._forge.icon(),
+            fuse=self._forge.fuse(),
             parent=self,
         )
         worker.progress.connect(self._run.on_progress)
