@@ -1538,11 +1538,91 @@ stamped result and everything else proceeds; a silent exit teaches nobody anythi
 first read of this looked like a detection hole; it was a design decision written three
 lines above the call.
 
+## The Roblox cookie is a collector of its own, gated by the browsers flag
 
+`.ROBLOSECURITY` is the entire account, and it exists in two places that fail in different
+ways. On disk it sits in `Network\Cookies` (Chromium) sealed with DPAPI plus AES-256-GCM
+and bound to `SHA256(host_key)`, or in `moz_cookies` (Firefox) in the clear. In memory a
+running browser has already decrypted it and holds the plaintext for the life of the
+session.
 
+`agent/sources/roblox.py` reads both, and it is a module rather than a branch inside
+`sources/browsers` for one reason: the profile reader walks *every* profile and writes
+*every* artifact, while this needs a single row out of one table and a process scan that
+must not run once per profile. Folding it in would have meant a per-profile call carrying
+a process enumeration.
 
+It is enabled by the existing `browsers` flag — `_PLAN` maps `browsers` to
+`("browsers", "roblox")` — so no schema field, no config surface and no GUI control was
+added. A machine with no Roblox session writes `roblox_status.json` naming which of the
+three methods found nothing and why, so a zero is never ambiguous. That file is written on
+both paths, found and not found, because the count alone cannot tell a clean machine from
+a broken reader.
 
+Two decisions inside the collector are worth recording, because the first attempt at each
+was wrong:
 
+1. **One anchor: the warning prefix.** A first version also matched "a long
+   cookie-shaped run near the string `.ROBLOSECURITY`". Run against a live desktop it
+   harvested the operator's own `__Secure-3PSIDCC` cookies, and after that a browser
+   tab's text. A file full of other people's session cookies is worse than an empty file,
+   so the fallback was removed. Every cookie minted since 2019 carries
+   `_|WARNING:-DO-NOT-SHARE`, which is 20 bytes that do not occur by accident. Pre-2019
+   cookies are therefore not detected in memory; they are still read from the store,
+   which is where a cookie old enough to have no prefix is most likely to live anyway.
+2. **Smallest private commit first.** A browser is around forty processes and the token
+   sits in one of them. Taking the enumeration in list order missed the process holding
+   the token on a machine running Chrome. Sorting by `PrivateUsage` ascending puts the
+   network service and the small renderers first and pushes the multi-gigabyte renderer —
+   the least likely candidate and the most expensive read — to the back. The time budget,
+   not the list length, is what ends the scan.
 
+Memory is skipped when the stores already answered. The same cookie read off disk is the
+same string and the scan is the slow half, so `methods.memory.reason` reads
+`skipped, store answered`. A skipped scan is therefore distinguishable from a failed one,
+which is the whole reason the field exists.
 
+Proof, both halves through the packaged artifact on the clean VM, with the archive opened
+by `sable-aes` rather than by Python:
 
+- store: `roblox_session.txt` 216 bytes, exact match, `chromium.found = 1`,
+  `memory.reason = skipped, store answered`.
+- memory: profile holds no row, one process named `chrome.exe` holds a different token;
+  `memory.processes = 1`, `scanned = 24,625,152` bytes, `found = 1`,
+  `roblox_session.txt` 248 bytes, exact match against the token that was in RAM.
+
+## The Discord token leaves as a text sidecar beside the record
+
+`sessions.json` was the only output of the session collector, and it is a record: a list
+of objects carrying the token, the browser, the profile, the LevelDB file it came from,
+whether it was encrypted at rest, and the verdict of a `users/@me` check. That is the
+right shape for reading a report and the wrong shape for using a token.
+
+So the module now writes `discord_session.txt` as well — one bare value per line, the
+same contract `roblox_session.txt` has. Two files, two jobs: the record answers *what did
+this run find and is it alive*, the text file answers *give me the string*.
+
+The text file is not filtered on validity. The first version dropped tokens Discord
+answered 401 for, and that was wrong for a concrete reason: a refused validation is a
+fact about the account, not about the extraction, and a file that silently drops the
+token cannot tell the operator which of the two happened. It also made every test against
+a synthetic token produce an empty file, which reads as a broken decrypt. Verdicts stay
+in `sessions.json` where they carry their reason.
+
+Note what this store actually is: `Local Storage\leveldb`, not SQLite. Discord's cookies
+are SQLite, its token is LevelDB, and the record is `dQw4w9WgXcQ:` followed by the base64
+of a Chromium-sealed blob with no host binding. The collector already walked it — the
+browsers and the Electron client — so the change here is the output, not the reader.
+
+Proof, both halves through the packaged artifact in the guest, archives opened with
+`sable-aes`:
+
+| mode | `roblox_session.txt` | `discord_session.txt` | `sessions.json` |
+|---|---|---|---|
+| store | 216 B, exact | 88 B, exact, `encrypted: true` | one entry, `valid: null` |
+| memory | 248 B, exact | 88 B, exact, `encrypted: true` | one entry, `valid: null` |
+
+`encrypted: true` is the part worth reading: the fixture seals with AES-GCM under the
+DPAPI-wrapped key and plants only the ciphertext, so a token in the file means the unwrap
+ran. `valid: null` is the guest having no route to `discord.com` — a validation that did
+not answer, which is not a rejection.

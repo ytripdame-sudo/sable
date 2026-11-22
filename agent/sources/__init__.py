@@ -20,7 +20,7 @@ from .. import log
 # flag on SourceConfig -> module names, in the order they run
 _PLAN: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
     ("system", ("system", "network", "displays")),
-    ("browsers", ("browsers",)),
+    ("browsers", ("browsers", "roblox")),
     ("sessions", ("sessions",)),
     ("wallets", ("wallets",)),
     ("autofill", ("autofill",)),

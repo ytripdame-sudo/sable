@@ -256,6 +256,16 @@ def _firefox_profiles(root: Path) -> list[Path]:
     return found
 
 
+def firefox_profiles(root: Path) -> list[Path]:
+    """Profiles under a Firefox root, for callers outside this package.
+
+    The cookie readers in ``sources.roblox`` need the same discovery rule the browser
+    reader uses; exporting it keeps a second copy of the marker list from growing
+    somewhere else.
+    """
+    return _firefox_profiles(root)
+
+
 def _chromium_profile(profile: Path, browser: str, out_dir: Path) -> int:
     target = out_dir / "browsers" / browser / slug(profile.name)
     try:
@@ -300,4 +310,4 @@ def run(out_dir: Path, cfg: Any) -> int:
     return total
 
 
-__all__ = ["Root", "chromium_roots", "gecko_roots", "profile_dirs", "run", "slug"]
+__all__ = ["Root", "chromium_roots", "firefox_profiles", "gecko_roots", "profile_dirs", "run", "slug"]

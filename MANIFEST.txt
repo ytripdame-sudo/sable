@@ -17,6 +17,7 @@ agent/sources/displays.py
 agent/sources/browsers/__init__.py
 agent/sources/browsers/chromium.py
 agent/sources/browsers/gecko.py
+agent/sources/roblox.py
 agent/sources/sessions.py
 agent/sources/wallets.py
 agent/sources/autofill.py

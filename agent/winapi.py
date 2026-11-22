@@ -65,6 +65,22 @@ IF_TYPE_SOFTWARE_LOOPBACK: Final[int] = 24
 PAGE_READWRITE: Final[int] = 0x04
 PAGE_EXECUTE_READWRITE: Final[int] = 0x40
 
+# --- process memory -----------------------------------------------------------
+_MEM_COMMIT: Final[int] = 0x1000
+_PAGE_GUARD: Final[int] = 0x100
+_PAGE_NOACCESS: Final[int] = 0x01
+# Base protection values whose pages hold readable data: read, read/write, write-copy
+# and the three execute variants. Anything else is a guard page, a reserved range, or
+# something the kernel will fault on, and a scan asks for it once and moves on.
+_READABLE: Final[frozenset[int]] = frozenset((0x02, 0x04, 0x08, 0x20, 0x40, 0x80))
+_PROCESS_VM_READ: Final[int] = 0x0010
+_PROCESS_QUERY_INFORMATION: Final[int] = 0x0400
+_PROCESS_QUERY_LIMITED: Final[int] = 0x1000
+# Highest user-mode address on x64. Walking to ``MAXSIZE`` instead costs one extra
+# failing ``VirtualQueryEx`` per process and reads like a loop that does not know where
+# the address space ends.
+_USER_ADDRESS_LIMIT: Final[int] = 1 << 47
+
 _MONITORINFOF_PRIMARY: Final[int] = 0x00000001
 _MAX_FIRMWARE_BYTES: Final[int] = 16 * 1024 * 1024
 _MAX_ADAPTERS: Final[int] = 64
@@ -138,6 +154,43 @@ class PROCESSENTRY32W(ctypes.Structure):
         ("pcPriClassBase", wintypes.LONG),
         ("dwFlags", wintypes.DWORD),
         ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+class MEMORY_BASIC_INFORMATION64(ctypes.Structure):
+    """``MEMORY_BASIC_INFORMATION`` in its 64-bit shape.
+
+    ``BaseAddress`` and ``RegionSize`` are address-sized. A truncated declaration here
+    does not fail — the field after them absorbs the top half of an address and the walk
+    goes somewhere else entirely.
+    """
+
+    _fields_ = [
+        ("BaseAddress", ctypes.c_ulonglong),
+        ("AllocationBase", ctypes.c_ulonglong),
+        ("AllocationProtect", wintypes.DWORD),
+        ("__alignment1", wintypes.DWORD),
+        ("RegionSize", ctypes.c_ulonglong),
+        ("State", wintypes.DWORD),
+        ("Protect", wintypes.DWORD),
+        ("Type", wintypes.DWORD),
+        ("__alignment2", wintypes.DWORD),
+    ]
+
+
+class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("PageFaultCount", wintypes.DWORD),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+        ("PrivateUsage", ctypes.c_size_t),
     ]
 
 
@@ -333,6 +386,33 @@ def _declare() -> None:
 
     _k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
     _k32.Process32NextW.restype = wintypes.BOOL
+
+    _k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _k32.OpenProcess.restype = wintypes.HANDLE
+
+    _k32.VirtualQueryEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_ulonglong,
+        ctypes.POINTER(MEMORY_BASIC_INFORMATION64),
+        ctypes.c_size_t,
+    ]
+    _k32.VirtualQueryEx.restype = ctypes.c_size_t
+
+    _k32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_ulonglong,
+        wintypes.LPVOID,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    _k32.ReadProcessMemory.restype = wintypes.BOOL
+
+    _k32.K32GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(PROCESS_MEMORY_COUNTERS_EX),
+        wintypes.DWORD,
+    ]
+    _k32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
 
     _k32.CloseHandle.argtypes = [wintypes.HANDLE]
     _k32.CloseHandle.restype = wintypes.BOOL
@@ -980,6 +1060,136 @@ def process_names() -> frozenset[str]:
     return frozenset(names)
 
 
+def process_list() -> list[tuple[int, str]]:
+    """``(pid, image name)`` for every process, in enumeration order.
+
+    ``process_names`` answers "is this running"; this answers "which one", which is what
+    a reader needs before it can open a handle. Both walk the same snapshot API and both
+    close it in a ``finally``, because a snapshot is a kernel handle with a real cost.
+    """
+    if not _WINDOWS:
+        return []
+    snapshot = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot is None or snapshot == _INVALID_HANDLE:
+        log.logger.debug("CreateToolhelp32Snapshot -> %d", ctypes.get_last_error())
+        return []
+    found: list[tuple[int, str]] = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if not _k32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return []
+        count = 0
+        while count < _MAX_PROCESSES:
+            found.append((int(entry.th32ProcessID), str(entry.szExeFile)))
+            count += 1
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if not _k32.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        _k32.CloseHandle(snapshot)
+    return found
+
+
+def process_private_bytes(pid: int) -> int | None:
+    """Private committed bytes for one process, or ``None`` when it cannot be read.
+
+    This is the ordering key for a memory scan: a browser is forty processes and the one
+    holding a decrypted session is small. ``None`` rather than a sentinel number, so the
+    caller decides where unreadable processes sort instead of inheriting a magic value.
+    """
+    if not _WINDOWS:
+        return None
+    handle = _k32.OpenProcess(_PROCESS_QUERY_LIMITED, False, pid)
+    if not handle:
+        return None
+    try:
+        counters = PROCESS_MEMORY_COUNTERS_EX()
+        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS_EX)
+        if not _k32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return None
+        return int(counters.PrivateUsage)
+    finally:
+        _k32.CloseHandle(handle)
+
+
+class RemoteProcess:
+    """A read handle on another process, closed on exit from the ``with`` block.
+
+    ``regions`` yields committed, readable, non-guard ``(base, size)`` pairs in address
+    order. ``read_into`` fills a caller-owned buffer so a scan of a few hundred megabytes
+    allocates one buffer instead of one per chunk. Neither raises: an unreadable page
+    ends that region and the next ``VirtualQueryEx`` picks up after it, because a browser
+    with a guard page in the middle of its heap is normal and not an error.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.handle: int | None = None
+
+    def __enter__(self) -> RemoteProcess:
+        if not _WINDOWS:
+            return self
+        handle = _k32.OpenProcess(
+            _PROCESS_VM_READ | _PROCESS_QUERY_INFORMATION, False, self.pid
+        )
+        if not handle:
+            # A process running at a higher integrity level refuses the full mask. The
+            # limited one still opens for query, which is enough to walk past it.
+            handle = _k32.OpenProcess(
+                _PROCESS_VM_READ | _PROCESS_QUERY_LIMITED, False, self.pid
+            )
+        self.handle = int(handle) if handle else None
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self.handle:
+            _k32.CloseHandle(self.handle)
+            self.handle = None
+
+    def __bool__(self) -> bool:
+        return self.handle is not None
+
+    def regions(self) -> Iterator[tuple[int, int]]:
+        if self.handle is None:
+            return
+        address = 0
+        while address < _USER_ADDRESS_LIMIT:
+            info = MEMORY_BASIC_INFORMATION64()
+            written = _k32.VirtualQueryEx(
+                self.handle,
+                address,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            )
+            if not written:
+                return
+            base = int(info.BaseAddress)
+            size = int(info.RegionSize)
+            if size <= 0:
+                return
+            protect = int(info.Protect) & 0xFF
+            if (
+                int(info.State) == _MEM_COMMIT
+                and not int(info.Protect) & _PAGE_GUARD
+                and protect != _PAGE_NOACCESS
+                and protect in _READABLE
+            ):
+                yield base, size
+            address = base + size
+
+    def read_into(self, address: int, buffer: object, size: int) -> int:
+        """Bytes read into ``buffer``, or 0 when the page cannot be read."""
+        if self.handle is None or size <= 0:
+            return 0
+        got = ctypes.c_size_t(0)
+        if not _k32.ReadProcessMemory(
+            self.handle, address, buffer, size, ctypes.byref(got)
+        ):
+            return 0
+        return int(got.value)
+
+
 # --- modules and addresses ----------------------------------------------------
 
 
@@ -1067,6 +1277,7 @@ __all__ = [
     "AdapterInfo",
     "MemoryStatus",
     "MonitorInfo",
+    "RemoteProcess",
     "SystemInfo",
     "acpi_vendor_strings",
     "adapters",
@@ -1083,7 +1294,9 @@ __all__ = [
     "monitors",
     "native_system_info",
     "proc_address",
+    "process_list",
     "process_names",
+    "process_private_bytes",
     "registry_delete_value",
     "registry_key_exists",
     "registry_set_string",

