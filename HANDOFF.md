@@ -387,10 +387,11 @@ members through a `link` relay; the archive was pulled back from the host and op
 ## 10. Next
 
 V1 is tagged and pushed: `github.com/ytripdame-sudo/sable`, branch `main`, tag `v1.0`.
-The repository is private. The tag was re-pointed for this pass and pushed with `--force`
-together with `main`, because the Roblox collector, the Discord sidecar and the relay fix
-landed in a commit on top of the tree the first tag named. Nothing else was rewritten:
-the old commit is still reachable through the tag's first position in the reflog.
+The repository is private. The Roblox collector, the Discord sidecar and the relay fix
+landed in one commit on top of the tree the first tag named, so the tag had to move to it.
+`main` went out as a fast-forward — the commit was parented on the remote tip rather than
+on the local amend — and only the tag was rewritten, deleted and re-pushed, because a tag
+cannot move forward.
 
 The delivery path is closed and has now been exercised on every channel it offers: an
 `https` webhook, a `telegram` bot, `link` through a file host, and `phantom` through a
