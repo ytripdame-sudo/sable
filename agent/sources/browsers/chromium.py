@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import shutil
 import sqlite3
 from collections.abc import Iterator
@@ -52,6 +53,13 @@ _MAX_HISTORY: Final[int] = 2000
 _MAX_DOWNLOADS: Final[int] = 1000
 _MAX_BOOKMARKS: Final[int] = 2000
 _MAX_BOOKMARK_DEPTH: Final[int] = 8
+
+# Column names inside a caller's WHERE clause. Used only to check them against the
+# store's real columns before the statement runs; values never travel this way.
+_IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SQL_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"AND", "OR", "NOT", "LIKE", "GLOB", "IN", "IS", "NULL", "BETWEEN", "ESCAPE", "COLLATE"}
+)
 
 # A Chromium profile is multi-gigabyte only because of its caches. Measured on a real
 # machine: Edge's Default is 2.2 GB and 2.0 GB of that is the directories below;
@@ -309,6 +317,20 @@ def copy_database(source: Path, scratch: Path) -> Path | None:
     return target
 
 
+def wal_bytes(source: Path) -> int:
+    """Bytes waiting in the ``-wal`` sidecar, or 0.
+
+    A running browser keeps its newest writes in the write-ahead log, so "the row was
+    not in the file" and "the row was in a sidecar that did not copy" look identical
+    from a reader's chair. Recording the size is what tells the two apart after the
+    fact, when the live store is long gone.
+    """
+    try:
+        return (source.parent / (source.name + "-wal")).stat().st_size
+    except OSError:
+        return 0
+
+
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     try:
         rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -324,12 +346,21 @@ def read_table(
     wanted: tuple[str, ...],
     limit: int,
     order: str = "",
+    *,
+    where: str = "",
+    params: tuple[Any, ...] = (),
 ) -> list[dict[str, Any]]:
     """Rows as dicts, with absent columns projected as NULL.
 
     Every wanted name is present in every returned row, so callers index directly.
     Chrome adds and removes columns between releases, and a missing one must cost
     that field, not the whole table.
+
+    ``where`` is for a caller that knows what it is looking for. A recency-ordered
+    read with a row cap answers "the newest N rows of the store", which is not the
+    same question as "rows for this domain" on a store holding thousands: the row
+    can be old enough, or unvisited long enough, to sit past the cap while still
+    being present. The clause is bound through ``params`` and never formatted.
     """
     try:
         connection = sqlite3.connect(str(path))
@@ -346,6 +377,25 @@ def read_table(
             name if name in available else f"NULL AS {name}" for name in wanted
         )
         statement = f"SELECT {projection} FROM {table}"
+        if where:
+            # A clause naming a column this store does not have fails the whole
+            # query, and returning nothing would be indistinguishable from a store
+            # that has no matching row. Drop the clause and let the caller's own
+            # field filter decide; its limit is still bounded.
+            referenced = {
+                token
+                for token in _IDENTIFIER.findall(where)
+                if token.upper() not in _SQL_KEYWORDS
+            }
+            if referenced <= available:
+                statement += f" WHERE {where}"
+            else:
+                log.logger.debug(
+                    "chromium: %s lacks %s, where dropped for %s",
+                    table,
+                    sorted(referenced - available),
+                    path,
+                )
         if order:
             # Ordering on a column that does not exist fails the whole query, and
             # the projection above cannot rescue it. Order only when it is real.
@@ -354,7 +404,7 @@ def read_table(
                 statement += f" ORDER BY {order}"
         statement += f" LIMIT {int(limit)}"
 
-        cursor = connection.execute(statement)
+        cursor = connection.execute(statement, params)
         names = [str(column[0]) for column in cursor.description or ()]
 
         rows: list[dict[str, Any]] = []

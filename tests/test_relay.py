@@ -558,9 +558,9 @@ def test_describe_reads_like_a_result() -> None:
     text = relay.describe(_SUMMARY)
     assert "**sniped** DESKTOP-ABC" in text
     assert "**user** killywilly" in text
-    assert "**ip** 203.0.113.7 · Ashburn, Virginia, United States · Example ISP" in text
+    assert "**ip** 203.0.113.7 | Ashburn, Virginia, United States | Example ISP" in text
     assert "**cpu** AMD Ryzen 7 5800X" in text
-    assert "**box** 32 GB ram · x86_64 · up 3d 4h" in text
+    assert "**box** 32 GB ram | x86_64 | up 3d 4h" in text
     assert "**gate** clean" in text
     assert "unknown" not in text.lower()
 
@@ -578,7 +578,7 @@ def test_a_caption_carries_the_machine_and_the_archive(tmp_path: Path) -> None:
     cfg = Config("https", "https://example.invalid/hook", mention="@everyone")
     text = relay._caption(cfg, archive, _SUMMARY)
     assert text.startswith("@everyone **sniped** DESKTOP-ABC")
-    assert "**archive** payload.zip · 2.0 KB" in text
+    assert "**archive** payload.zip | 2.0 KB" in text
 
 
 def test_a_caption_without_a_summary_still_names_the_file(tmp_path: Path) -> None:
@@ -1009,7 +1009,7 @@ def test_describe_names_what_each_source_produced() -> None:
     text = relay.describe(
         {"hostname": "BOX", "counts": {"browsers": 41, "wallets": 3, "sessions": 0}}
     )
-    assert "**items** 44 · browsers 41 · wallets 3" in text
+    assert "**items** 44 | browsers 41 | wallets 3" in text
     assert "sessions" not in text
 
 

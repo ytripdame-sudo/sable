@@ -1,4 +1,4 @@
-# SABLE V1
+# SABLE - the current build
 
 Frozen 2026-11-21. Tag `v1.0`. This file ships inside the tag, so it names the tag and
 not a hash that would move under it.
@@ -154,8 +154,8 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
   712 s uptime, 1024x768 display — and stamped them into `virtual.txt` inside the
   archive. `entry.py` says why in a comment: a silent exit teaches nobody anything.
 - **One receiver, single-threaded, capped the measured throughput.** A 426 MB run took
-  about six minutes; the real ceiling is unmeasured. That is a V2 optimisation target and
-  not a V1 blocker. Per-source timing logs where the time went.
+  about six minutes; the real ceiling is unmeasured. That is a next-features optimisation target and
+  not a blocker for the current build. Per-source timing logs where the time went.
 - **Zip64 is refused, not read.** 65535 members and 4 GiB per member are past anything a
   run produces.
 
@@ -185,7 +185,7 @@ The native crate is separate and not required to build an artifact:
 cd native/aes && cargo build --release && cargo test --release
 ```
 
-## Deferred to V2
+## Deferred to the next features
 
 - **The native launcher decision.** The crate proves the formats; whether the frozen stub
   becomes a Rust binary is a product decision, still open. See `HANDOFF.md` §10.

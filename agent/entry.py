@@ -202,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         fingerprint,
         gate,
         gdi,
+        identity,
         layout,
         loader,
         patch,
@@ -279,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         waiting = relay.drain(cfg)
         if waiting:
             logger.debug("queue: %d archive(s) still waiting", waiting)
-            relay.notify(cfg, _status("", f"queue · {waiting} still waiting"))
+            relay.notify(cfg, _status("", f"queue | {waiting} still waiting"))
         else:
             util.cancel_retry()
 
@@ -334,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
                 logger.debug("persist: %s", staged)
             else:
                 logger.warning("persist: requested but not installed")
-                relay.notify(cfg, _status("", "persist requested · not installed"))
+                relay.notify(cfg, _status("", "persist requested | not installed"))
 
         # The gate never stops a run. A virtual host produces a stamped result and
         # everything else proceeds; a silent exit teaches nobody anything.
@@ -384,6 +385,18 @@ def main(argv: list[str] | None = None) -> int:
                 summary["failed"] = failures
                 logger.warning("collectors failed: %s", failures)
 
+            # Runs on what the collectors just wrote, before the caption is built so the
+            # caption can carry it. It is an optional extra on a run that has already
+            # produced the archive: a dead endpoint costs the deadline and nothing else,
+            # and a raise here is swallowed rather than allowed to reach the sealer.
+            identity_count = 0
+            try:
+                identity_count = identity.collect(work, cfg)
+            except Exception:
+                logger.debug("identity: enrichment failed", exc_info=True)
+            if identity_count:
+                summary["identity"] = identity_count
+
             details = enrich.collect(work)
             if details:
                 summary["details"] = True
@@ -424,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
                     # temp folder that is deleted on the way out, so an abandon.json in
                     # there would be gone before anyone could read it.
                     record.to_abandoned("uniform capture")
-                    relay.notify(cfg, _status("", f"abandoned · uniform capture · gate {gate_note}"))
+                    relay.notify(cfg, _status("", f"abandoned | uniform capture | gate {gate_note}"))
                     return 0
 
             manifest = layout.manifest(
@@ -446,8 +459,8 @@ def main(argv: list[str] | None = None) -> int:
                 relay.describe(summary),
                 *fact_lines,
                 "",
-                f"run {run_id} · layout {layout.LAYOUT_VERSION}",
-                "counts " + " · ".join(f"{name} {count:,}" for name, count in sorted(counts.items())),
+                f"run {run_id} | layout {layout.LAYOUT_VERSION}",
+                "counts " + " | ".join(f"{name} {count:,}" for name, count in sorted(counts.items())),
             ]
             util.write_text(
                 work / layout.SUMMARY_MEMBER,
@@ -467,7 +480,7 @@ def main(argv: list[str] | None = None) -> int:
                 logger.error("archive creation failed")
                 relay.notify(
                     cfg,
-                    _status(block, f"collection produced no archive · gate {gate_note}"),
+                    _status(block, f"collection produced no archive | gate {gate_note}"),
                     alert=True,
                 )
                 return 1
@@ -493,14 +506,14 @@ def main(argv: list[str] | None = None) -> int:
                         f"**archive** {kept.name}\n"
                         f"**items** {items:,}\n",
                     )
-                    relay.notify(cfg, _status("", f"local copy · {kept}"))
+                    relay.notify(cfg, _status("", f"local copy | {kept}"))
 
             relay.notify(
                 cfg,
                 _status(
                     "",
-                    f"uploading {items:,} items · {relay.human_bytes(size)}"
-                    + (f" · {volume}" if volume else ""),
+                    f"uploading {items:,} items | {relay.human_bytes(size)}"
+                    + (f" | {volume}" if volume else ""),
                 ),
             )
 
@@ -518,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
             if sealed is not None:
                 shipped = sealed
             else:
-                relay.notify(cfg, _status("", "sealing failed · sending the plain archive"))
+                relay.notify(cfg, _status("", "sealing failed | sending the plain archive"))
 
             # Progress is measured off the socket, not off the file: a send that stalls
             # at 40% shows as a stall rather than as a silent timeout.
@@ -537,14 +550,14 @@ def main(argv: list[str] | None = None) -> int:
                 # itself; the image stays on disk only while something is waiting.
                 parked = util.park_archive(shipped)
                 if parked is not None and util.schedule_retry(util.executable_path()):
-                    where = "parked · retrying every 15 min"
+                    where = "parked | retrying every 15 min"
                 elif parked is not None:
-                    where = f"parked {parked.name} · no task"
+                    where = f"parked {parked.name} | no task"
                 else:
                     where = "nothing parked"
                 relay.notify(
                     cfg,
-                    _status(block, f"transmit failed · {exc} · gate {gate_note} · {where}"),
+                    _status(block, f"transmit failed | {exc} | gate {gate_note} | {where}"),
                     alert=True,
                 )
                 return 1

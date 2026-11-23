@@ -193,11 +193,17 @@ def read_json(path: Path) -> Any | None:
 
 
 def write_json(path: Path, payload: Any) -> bool:
-    """Write UTF-8 JSON with parents created. False on any failure."""
+    """Write ASCII-safe JSON with parents created. False on any failure.
+
+    ``ensure_ascii`` is on: a Discord display name or a Roblox display name can carry
+    any codepoint the vendor allows, and every byte an archive ships is meant to be
+    readable by a plain text tool. Escaping keeps the value lossless and the file
+    pure ASCII at the same time.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, ensure_ascii=False, default=str)
+            json.dump(payload, handle, indent=2, ensure_ascii=True, default=str)
     except (OSError, TypeError, ValueError):
         log.logger.debug("json write failed: %s", path, exc_info=True)
         return False

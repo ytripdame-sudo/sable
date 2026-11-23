@@ -69,7 +69,7 @@ def test_the_platform_table_sums_by_platform_and_keeps_zeroes() -> None:
     assert by_key["browser"]["items"] == 680
     assert by_key["discord"]["items"] == 0
     assert by_key["host"]["modules"] == ["system", "network"]
-    assert platforms.line({"system": 1, "browsers": 680}) == "Host 1 · Browser profiles 680"
+    assert platforms.line({"system": 1, "browsers": 680}) == "Host 1 | Browser profiles 680"
 
 
 # --- anti-analysis -----------------------------------------------------------

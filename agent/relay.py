@@ -422,8 +422,8 @@ def _items_line(summary: dict[str, Any]) -> str:
 
     pairs.sort(key=lambda pair: (-pair[1], pair[0]))
     total = sum(value for _, value in pairs)
-    detail = " · ".join(f"{name} {value:,}" for name, value in pairs)
-    return _fit(f"**items** {total:,} · {detail}", 300)
+    detail = " | ".join(f"{name} {value:,}" for name, value in pairs)
+    return _fit(f"**items** {total:,} | {detail}", 300)
 
 
 def describe(summary: dict[str, Any] | None) -> str:
@@ -451,7 +451,7 @@ def describe(summary: dict[str, Any] | None) -> str:
         if part
     ]
     if identity:
-        lines.append(" · ".join(identity))
+        lines.append(" | ".join(identity))
 
     public = summary.get("public_ip")
     if public:
@@ -465,8 +465,8 @@ def describe(summary: dict[str, Any] | None) -> str:
             if part
         )
         isp = summary.get("isp")
-        tail = " · ".join(part for part in (place, str(isp or "")) if part)
-        lines.append(f"**ip** {public}" + (f" · {tail}" if tail else ""))
+        tail = " | ".join(part for part in (place, str(isp or "")) if part)
+        lines.append(f"**ip** {public}" + (f" | {tail}" if tail else ""))
 
     lan = summary.get("lan_ip")
     if lan:
@@ -491,7 +491,7 @@ def describe(summary: dict[str, Any] | None) -> str:
     if uptime:
         hardware.append(f"up {uptime}")
     if hardware:
-        lines.append("**box** " + " · ".join(hardware))
+        lines.append("**box** " + " | ".join(hardware))
 
     items = _items_line(summary)
     if items:
@@ -508,7 +508,7 @@ def describe(summary: dict[str, Any] | None) -> str:
     if isinstance(failed, dict) and failed:
         # Named rather than counted: "sessions: DPAPIError" tells the reader whether the
         # gap is a machine with no tokens or a store that refused to be read.
-        detail = " · ".join(f"{name} ({reason})" for name, reason in sorted(failed.items()))
+        detail = " | ".join(f"{name} ({reason})" for name, reason in sorted(failed.items()))
         lines.append(f"**failed** {_fit(detail, 300)}")
 
     return "\n".join(lines)
@@ -530,7 +530,7 @@ def _caption(cfg: Any, archive: Path, summary: dict[str, Any] | None) -> str:
     """
     block = describe(summary)
     size = archive.stat().st_size
-    tail = f"**archive** {archive.name} · {human_bytes(size)}"
+    tail = f"**archive** {archive.name} | {human_bytes(size)}"
     text = f"{block}\n{tail}" if block else f"sable {archive.name} {size} bytes"
     return _with_mention(cfg, text, alert=True)
 

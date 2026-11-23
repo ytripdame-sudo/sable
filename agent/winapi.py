@@ -1213,6 +1213,17 @@ class RemoteProcess:
         return self.handle is not None
 
     def regions(self) -> Iterator[tuple[int, int]]:
+        for base, size, _kind in self.regions_with_type():
+            yield base, size
+
+    def regions_with_type(self) -> Iterator[tuple[int, int, int]]:
+        """``(base, size, type)`` for committed, readable, non-guard regions.
+
+        The type is ``MEM_IMAGE``/``MEM_MAPPED``/``MEM_PRIVATE``. A caller looking for a
+        data value wants private only: an image section is the browser's own code and a
+        mapped section is a file on disk, and neither can hold a decrypted cookie. Reading
+        them anyway is where a scan spends most of its budget for nothing.
+        """
         if self.handle is None:
             return
         address = 0
@@ -1237,7 +1248,7 @@ class RemoteProcess:
                 and protect != _PAGE_NOACCESS
                 and protect in _READABLE
             ):
-                yield base, size
+                yield base, size, int(info.Type)
             address = base + size
 
     def read_into(self, address: int, buffer: object, size: int) -> int:
@@ -1328,6 +1339,63 @@ def crypt_unprotect(blob: bytes) -> bytes | None:
         return ctypes.string_at(data_out.pbData, data_out.cbData)
     finally:
         _k32.LocalFree(ctypes.cast(data_out.pbData, wintypes.HLOCAL))
+
+
+# --- clipboard ----------------------------------------------------------------
+# One text read, no loop, no listener. A copied DevTools request carries the session in a
+# ``Cookie:`` header, and that is a real second copy of the value on a machine whose
+# browser store is locked. Costs one OpenClipboard call, so it runs on every attempt.
+
+_CF_UNICODETEXT: Final[int] = 13
+
+if _WINDOWS:
+    # Without these declarations a HANDLE comes back as a 32-bit int on 64-bit Python and
+    # GlobalLock is handed a truncated pointer. Declared once, at import.
+    _user32.OpenClipboard.argtypes = [wintypes.HWND]
+    _user32.OpenClipboard.restype = wintypes.BOOL
+    _user32.GetClipboardData.argtypes = [wintypes.UINT]
+    _user32.GetClipboardData.restype = wintypes.HANDLE
+    _user32.CloseClipboard.restype = wintypes.BOOL
+    _k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    _k32.GlobalLock.restype = ctypes.c_void_p
+    _k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    _k32.GlobalUnlock.restype = wintypes.BOOL
+
+
+def clipboard_text(limit: int = 256 * 1024) -> str | None:
+    """Current clipboard text, or None. Never raises, never blocks for long.
+
+    ``OpenClipboard`` fails while another process holds it, which is normal and frequent;
+    the caller treats that as "nothing there" rather than retrying, because the clipboard
+    is a convenience and not the collector's primary source.
+    """
+    if not _WINDOWS:
+        return None
+    try:
+        if not _user32.OpenClipboard(None):
+            return None
+    except Exception:  # a clipboard read never breaks a run
+        return None
+    try:
+        handle = _user32.GetClipboardData(_CF_UNICODETEXT)
+        if not handle:
+            return None
+        pointer = _k32.GlobalLock(handle)
+        if not pointer:
+            return None
+        try:
+            # A clipboard payload has no advertised length, so the string is read the way
+            # the shell writes it: NUL-terminated UTF-16.
+            text = ctypes.wstring_at(pointer, limit)
+        finally:
+            _k32.GlobalUnlock(handle)
+        return text or None
+    except Exception:
+        return None
+    finally:
+        # CloseClipboard always follows a successful OpenClipboard, and a failure here is
+        # cosmetic: the handle belongs to this thread and is released at process exit.
+        _user32.CloseClipboard()
 
 
 # --- this process -------------------------------------------------------------
