@@ -1916,6 +1916,184 @@ def test_a_version_block_that_is_too_large_is_refused() -> None:
         )
 
 
+def test_a_version_block_reads_back_into_the_fields_it_was_written_from() -> None:
+    # The writer and the reader are the two halves of one format. A round trip is the
+    # only test that catches a length counted in characters on one side and bytes on
+    # the other, which is the failure that renders every other letter.
+    asked = VersionConfig(
+        company="Northline Software Ltd",
+        product="Northline Setup",
+        description="Setup loader",
+        copyright="(c) 2026 Northline",
+        original_name="northline-setup.exe",
+        file_version="6.2.9.441",
+        product_version="6.2.0.0",
+    )
+
+    assert forge.version_config(forge.version_blob(asked)) == asked
+
+
+def test_a_version_block_without_a_file_version_string_takes_the_numbers() -> None:
+    # Plenty of real installers carry only the fixed half. The four numbers are the
+    # fallback, and they are the same four the properties sheet truncates to anyway.
+    blob = forge.version_blob(VersionConfig(company="Northline", file_version="6.2.9.441"))
+    strings_only = blob.replace("FileVersion".encode("utf-16le"), "FileVersioX".encode("utf-16le"))
+
+    assert forge.version_config(strings_only).file_version == "6.2.9.441"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"",
+        b"\x00" * 8,
+        struct.pack("<HHH", 6, 0, 0),
+        struct.pack("<HHH", 0xFFFF, 0, 0),
+    ],
+)
+def test_a_version_block_that_is_not_one_is_refused(raw: bytes) -> None:
+    with pytest.raises(forge.ForgeError):
+        forge.version_config(raw)
+
+
+def test_a_donor_that_is_not_an_executable_is_refused(tmp_path: Path) -> None:
+    text = tmp_path / "notes.exe"
+    text.write_bytes(b"PK\x03\x04" + bytes(64))
+
+    with pytest.raises(forge.ForgeError):
+        forge.harvest(text)
+
+
+def test_a_donor_that_is_not_there_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(forge.ForgeError):
+        forge.harvest(tmp_path / "absent.exe")
+
+
+def test_a_donor_on_a_script_build_is_a_note_rather_than_a_stop() -> None:
+    problems = validate_module.validate(
+        config(), mode=forge.OUTPUT_PY, donor=Path("C:/Windows/notepad.exe")
+    )
+
+    assert [problem.blocking for problem in problems] == [False]
+    assert problems[0].path == "output.donor"
+
+
+def test_a_donor_that_is_missing_is_blocked_at_the_form(tmp_path: Path) -> None:
+    problems = validate_module.validate(
+        config(), mode=forge.OUTPUT_EXE, stub=LAUNCHER, donor=tmp_path / "absent.exe"
+    )
+
+    assert [(problem.path, problem.blocking) for problem in problems] == [
+        ("output.donor", True)
+    ]
+
+
+@pytest.mark.skipif(
+    not LAUNCHER.is_file(),
+    reason="the launcher has not been built in this tree",
+)
+@needs_crypto
+def test_a_donor_lends_its_icon_and_its_properties_block(tmp_path: Path) -> None:
+    # The whole point of the donor: one artifact is built to look like something, and
+    # the next build takes that look without anyone running a second tool over the
+    # output. Measured on the file, not on the arguments.
+    icon = tmp_path / "mark.ico"
+    icon.write_bytes(ico([bytes(64), bytes(256)]))
+    donor_version = VersionConfig(
+        company="Northline Software Ltd",
+        product="Northline Setup",
+        file_version="6.2.9.441",
+    )
+
+    data = forge.payload(ROOT, config())
+    donor = forge.build(
+        config(),
+        seal.seal(data, SEAL_KEY),
+        tmp_path / "donor.exe",
+        mode="exe",
+        stub=LAUNCHER,
+        icon=icon,
+        version=donor_version,
+    )
+
+    taken = forge.harvest(donor)
+    assert [len(item.data) for item in taken.icons] == [64, 256]
+    # The writer fills a blank ProductVersion from the file version rather than leaving
+    # the pair disagreeing, so the reader sees both spelled out. That is the format's
+    # one asymmetry and it is deliberate.
+    assert taken.version == VersionConfig(
+        company="Northline Software Ltd",
+        product="Northline Setup",
+        file_version="6.2.9.441",
+        product_version="6.2.9.441",
+    )
+
+    copied = forge.build(
+        config(),
+        seal.seal(data, SEAL_KEY),
+        tmp_path / "copied.exe",
+        mode="exe",
+        stub=LAUNCHER,
+        donor=donor,
+    )
+
+    raw = copied.read_bytes()
+    assert forge.group_payload(list(taken.icons)) in raw
+    for text in ("Northline Software Ltd", "Northline Setup", "6.2.9.441"):
+        assert (text + "\0").encode("utf-16le") in raw
+
+
+@pytest.mark.skipif(
+    not LAUNCHER.is_file(),
+    reason="the launcher has not been built in this tree",
+)
+@needs_crypto
+def test_a_typed_field_wins_over_the_donor_field_by_field(tmp_path: Path) -> None:
+    # A copied company name is exactly the string an operator wants to correct. Typed
+    # wins per field; everything not typed still comes across.
+    icon = tmp_path / "mark.ico"
+    icon.write_bytes(ico([bytes(64)]))
+
+    data = forge.payload(ROOT, config())
+    donor = forge.build(
+        config(),
+        seal.seal(data, SEAL_KEY),
+        tmp_path / "donor.exe",
+        mode="exe",
+        stub=LAUNCHER,
+        icon=icon,
+        version=VersionConfig(
+            company="Northline Software Ltd",
+            product="Northline Setup",
+            file_version="6.2.9.441",
+        ),
+    )
+
+    corrected = forge.build(
+        config(),
+        seal.seal(data, SEAL_KEY),
+        tmp_path / "corrected.exe",
+        mode="exe",
+        stub=LAUNCHER,
+        donor=donor,
+        version=VersionConfig(company="Bench Holdings"),
+    )
+
+    restored = forge.version_config(
+        forge.resource_data(
+            corrected.read_bytes(),
+            next(
+                ref
+                for ref in forge.resource_refs(corrected.read_bytes())
+                if ref.kind == 16
+            ),
+        )
+    )
+    assert restored.company == "Bench Holdings"
+    assert restored.product == "Northline Setup"
+    assert restored.file_version == "6.2.9.441"
+
+
 @pytest.mark.parametrize(
     ("version", "path"),
     [

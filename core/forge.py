@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
-from .schema import MAX_BALLAST_MB, RunConfig, VersionConfig, to_dict
+from .schema import MAX_BALLAST_MB, VERSION_FIELDS, RunConfig, VersionConfig, to_dict
 from .seal import MIN_SEALED_BYTES
 
 OutputMode = Literal["exe", "py"]
@@ -292,34 +292,78 @@ def _rva_offset(sections: tuple[tuple[int, int, int], ...], rva: int) -> int:
     raise ForgeError(f"resource rva {rva:#x} is in no section")
 
 
+# A resource directory is a three-level tree of (type, id, language) and every level is
+# a count followed by that many eight-byte entries. The counts are read from the file, so
+# a corrupt or hostile one is a refused read rather than a loop that runs to the end of
+# memory. Forty thousand rows is far past anything a launcher carries.
+_RESOURCE_MAX_ROWS: Final[int] = 4096
+
+
+def _resource_rows(raw: bytes, root: int, offset: int) -> list[tuple[int, int]]:
+    """The ``(name, target)`` pairs of one directory. ``-1`` marks a named entry."""
+    header = root + offset
+    if header + 16 > len(raw):
+        raise ForgeError("resource directory runs past the file")
+    named = int.from_bytes(raw[header + 12:header + 14], "little")
+    ident = int.from_bytes(raw[header + 14:header + 16], "little")
+    total = named + ident
+    if total > _RESOURCE_MAX_ROWS:
+        raise ForgeError(f"resource directory claims {total} entries")
+    out: list[tuple[int, int]] = []
+    for index in range(total):
+        entry = header + 16 + index * 8
+        if entry + 8 > len(raw):
+            raise ForgeError("resource directory runs past the file")
+        name = int.from_bytes(raw[entry:entry + 4], "little")
+        target = int.from_bytes(raw[entry + 4:entry + 8], "little")
+        out.append((-1 if name & 0x80000000 else name, target))
+    return out
+
+
+def _resource_walk(raw: bytes) -> Iterator[tuple[ResourceRef, int, int]]:
+    """Every leaf row with the file offset and size of the bytes it points at."""
+    sections, resource_rva = _pe_sections(raw)
+    if resource_rva == 0:
+        return
+    root = _rva_offset(sections, resource_rva)
+
+    for kind, kind_target in _resource_rows(raw, root, 0):
+        if kind < 0 or not kind_target & 0x80000000:
+            continue
+        for identifier, id_target in _resource_rows(raw, root, kind_target & 0x7FFFFFFF):
+            if identifier < 0 or not id_target & 0x80000000:
+                continue
+            for language, leaf in _resource_rows(raw, root, id_target & 0x7FFFFFFF):
+                # A language entry that points at another directory is malformed; the
+                # fourth level does not exist in this format.
+                if leaf & 0x80000000:
+                    continue
+                entry = root + leaf
+                if entry + 8 > len(raw):
+                    raise ForgeError("resource data entry runs past the file")
+                data_rva = int.from_bytes(raw[entry:entry + 4], "little")
+                size = int.from_bytes(raw[entry + 4:entry + 8], "little")
+                offset = _rva_offset(sections, data_rva)
+                if offset + size > len(raw):
+                    raise ForgeError("resource data runs past the file")
+                yield ResourceRef(kind, identifier, language), offset, size
+
+
 def resource_refs(raw: bytes) -> tuple[ResourceRef, ...]:
     """Every ``(type, id, language)`` row in the stub's resource table.
 
     A named resource has no integer id and is reported with ``identifier = -1``: the
     update path only ever touches integer rows, and a name is not one of them.
     """
-    sections, resource_rva = _pe_sections(raw)
-    if resource_rva == 0:
-        return ()
-    root = _rva_offset(sections, resource_rva)
+    return tuple(ref for ref, _offset, _size in _resource_walk(raw))
 
-    def rows(offset: int) -> list[tuple[int, int]]:
-        named = int.from_bytes(raw[root + offset + 12:root + offset + 14], "little")
-        ident = int.from_bytes(raw[root + offset + 14:root + offset + 16], "little")
-        out: list[tuple[int, int]] = []
-        for index in range(named + ident):
-            entry = root + offset + 16 + index * 8
-            name = int.from_bytes(raw[entry:entry + 4], "little")
-            target = int.from_bytes(raw[entry + 4:entry + 8], "little")
-            out.append((-1 if name & 0x80000000 else name, target))
-        return out
 
-    refs: list[ResourceRef] = []
-    for kind, kind_target in rows(0):
-        for identifier, id_target in rows(kind_target & 0x7FFFFFFF):
-            for language, _ in rows(id_target & 0x7FFFFFFF):
-                refs.append(ResourceRef(kind, identifier, language))
-    return tuple(refs)
+def resource_data(raw: bytes, ref: ResourceRef) -> bytes:
+    """The bytes one resource row holds, or ``ForgeError`` if the row is not there."""
+    for row, offset, size in _resource_walk(raw):
+        if row == ref:
+            return raw[offset:offset + size]
+    raise ForgeError(f"resource {ref.kind}/{ref.identifier}/{ref.language:#06x} is absent")
 
 
 def _icon_entries(raw: bytes) -> list[IconEntry]:
@@ -527,6 +571,249 @@ def version_blob(info: VersionConfig) -> bytes:
     return blob
 
 
+# --- reading a donor ----------------------------------------------------------
+
+# The other direction of everything above: a launcher that already looks like something
+# is the best description of what this build should look like. One read of its icon
+# group and its version tree, and the form fills itself. Nothing runs, nothing is
+# unpacked; the file is parsed as data the same way the update path parses the stub.
+#
+# A donor is a convenience, never a dependency. No icon, no version, or a version tree
+# that does not parse leaves that half of the disguise empty rather than failing the
+# build: a file with a locked `.rsrc` should still be usable for the half it does carry.
+
+_DONOR_MAX_BYTES: Final[int] = 512 * 1024 * 1024
+# The group resource is 14 bytes per image and the images themselves are data. Sixteen
+# megabytes covers every real icon set and refuses a resource row that claims the file.
+_DONOR_ICON_CEILING: Final[int] = 16 * 1024 * 1024
+_VERSION_MAX_DEPTH: Final[int] = 6
+
+_VERSION_TEXT_FIELDS: Final[dict[str, str]] = {
+    "CompanyName": "company",
+    "FileDescription": "description",
+    "ProductName": "product",
+    "LegalCopyright": "copyright",
+    "OriginalFilename": "original_name",
+    "FileVersion": "file_version",
+    "ProductVersion": "product_version",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Donor:
+    """What a built executable says about itself, read back out of its resources."""
+
+    path: Path
+    icons: tuple[IconEntry, ...]
+    version: VersionConfig | None
+
+
+def _align(block_start: int, position: int) -> int:
+    """``position`` rounded up to a four-byte boundary counted from ``block_start``."""
+    return position + _pad4(position - block_start)
+
+
+def _version_block(
+    blob: bytes, start: int, end: int, depth: int
+) -> tuple[str, int, bytes, list]:
+    """One node of a version tree: ``(key, type, value, children)``.
+
+    Every length in this format is counted from the start of the block that holds it,
+    which is the same detail that makes a hand-built blob load or silently not load when
+    it is written. Reading has to honour it in the other direction.
+    """
+    if start + _VERSION_NODE_HEADER > end:
+        raise ForgeError("version block header runs past its parent")
+    length, value_length, value_type = struct.unpack_from("<HHH", blob, start)
+    if length < _VERSION_NODE_HEADER or start + length > end:
+        raise ForgeError("version block overruns its parent")
+
+    stop = start + length
+    cursor = start + _VERSION_NODE_HEADER
+    while cursor + 1 < stop and blob[cursor:cursor + 2] != b"\0\0":
+        cursor += 2
+    key = blob[start + _VERSION_NODE_HEADER:cursor].decode("utf-16le", "replace")
+
+    value_start = _align(start, cursor + 2)
+    # wValueLength counts characters for a text block and bytes for a binary one. The
+    # writer above relies on the same rule; a reader that assumes bytes halves every
+    # string and then reads the tail as children.
+    value_bytes = value_length * 2 if value_type == 1 else value_length
+    if value_start + value_bytes > stop:
+        raise ForgeError(f"{key}: value runs past its block")
+    value = blob[value_start:value_start + value_bytes]
+
+    children: list[tuple[str, int, bytes, list]] = []
+    cursor = _align(start, value_start + value_bytes)
+    while depth < _VERSION_MAX_DEPTH and cursor + _VERSION_NODE_HEADER <= stop:
+        child_length = int.from_bytes(blob[cursor:cursor + 2], "little")
+        # Zero length is the padding at the end of a block, not a node.
+        if child_length < _VERSION_NODE_HEADER:
+            break
+        children.append(_version_block(blob, cursor, stop, depth + 1))
+        cursor = _align(start, cursor + child_length)
+    return key, value_type, value, children
+
+
+def _version_text(value: bytes) -> str:
+    return value.decode("utf-16le", "replace").split("\0", 1)[0].strip()
+
+
+def version_config(blob: bytes) -> VersionConfig:
+    """``VersionConfig`` read back out of an ``RT_VERSION`` body.
+
+    The fixed half is used only for the file version, and only when no ``FileVersion``
+    string is present. Explorer renders the strings; the four numbers exist so a
+    version comparison has something to compare.
+    """
+    if not blob:
+        raise ForgeError("version block is empty")
+    key, _type, fixed, children = _version_block(blob, 0, len(blob), 0)
+    if key != _VERSION_KEY:
+        raise ForgeError(f"version block starts with {key!r}, not {_VERSION_KEY!r}")
+
+    found: dict[str, str] = {}
+    for child_key, _child_type, _value, grandchildren in children:
+        if child_key != "StringFileInfo":
+            continue
+        for _table_key, _table_type, _table_value, strings in grandchildren:
+            for name, string_type, string_value, _ in strings:
+                field = _VERSION_TEXT_FIELDS.get(name)
+                if field is None or string_type != 1:
+                    continue
+                # First table wins: a file with two language tables carries the same
+                # strings twice, and taking the last one would flip on file order.
+                found.setdefault(field, _version_text(string_value))
+
+    if len(fixed) >= 20 and int.from_bytes(fixed[:4], "little") == _FIXED_SIGNATURE:
+        most = int.from_bytes(fixed[8:12], "little")
+        least = int.from_bytes(fixed[12:16], "little")
+        found.setdefault(
+            "file_version",
+            f"{most >> 16}.{most & 0xFFFF}.{least >> 16}.{least & 0xFFFF}",
+        )
+
+    return VersionConfig(**{name: found.get(name, "") for name in VERSION_FIELDS})
+
+
+def _donor_icons(raw: bytes) -> tuple[IconEntry, ...]:
+    """The donor's icon group, paired back up with the images it names."""
+    leaves = {ref: (offset, size) for ref, offset, size in _resource_walk(raw)}
+    groups = sorted(
+        (ref for ref in leaves if ref.kind == _RT_GROUP_ICON and ref.identifier >= 0),
+        key=lambda ref: ref.identifier,
+    )
+    if not groups:
+        return ()
+
+    group = groups[0]
+    offset, size = leaves[group]
+    if size > _DONOR_ICON_CEILING:
+        raise ForgeError(f"{group.identifier}: group resource is {size} bytes")
+    body = raw[offset:offset + size]
+    if len(body) < _ICO_HEADER:
+        raise ForgeError("icon group is shorter than its own header")
+
+    _reserved, kind, count = struct.unpack_from("<HHH", body, 0)
+    if kind != 1 or count == 0:
+        raise ForgeError("icon group is not a single icon library")
+    if count > _ICO_MAX_IMAGES:
+        raise ForgeError(f"icon group carries {count} images, the ceiling is {_ICO_MAX_IMAGES}")
+    if _ICO_HEADER + count * 14 > len(body):
+        raise ForgeError("icon group directory runs past its resource")
+
+    entries: list[IconEntry] = []
+    for index in range(count):
+        base = _ICO_HEADER + index * 14
+        width, height, colors, _, planes, bits, bytes_in_res, image_id = struct.unpack_from(
+            "<BBBBHHIH", body, base
+        )
+        # The group names an id; the image is filed under that id in the same language.
+        # A donor whose language differs between the two is malformed, so one pass over
+        # the file wins over the group's language and nothing else is guessed.
+        image = next(
+            (
+                ref
+                for ref in leaves
+                if ref.kind == _RT_ICON and ref.identifier == image_id
+            ),
+            None,
+        )
+        if image is None:
+            raise ForgeError(f"icon group names image {image_id}, which is not in the file")
+        image_offset, image_size = leaves[image]
+        if image_size != bytes_in_res:
+            raise ForgeError(
+                f"icon image {image_id} is {image_size} bytes, the group says {bytes_in_res}"
+            )
+        entries.append(
+            IconEntry(
+                width=width,
+                height=height,
+                colors=colors,
+                planes=planes,
+                bit_count=bits,
+                data=raw[image_offset:image_offset + image_size],
+            )
+        )
+    return tuple(entries)
+
+
+def _donor_version(raw: bytes) -> VersionConfig | None:
+    versions = sorted(
+        (ref for ref, _o, _s in _resource_walk(raw) if ref.kind == _RT_VERSION),
+        key=lambda ref: (ref.identifier, ref.language),
+    )
+    for ref in versions:
+        try:
+            return version_config(resource_data(raw, ref))
+        except ForgeError:
+            # One unreadable block is not a donor with no version: try the next row
+            # before deciding the file carries nothing worth taking.
+            continue
+    return None
+
+
+def harvest(donor: Path) -> Donor:
+    """Read a built executable's icon and version so a build can copy them."""
+    try:
+        size = donor.stat().st_size
+    except OSError as exc:
+        raise ForgeError(f"{donor}: cannot stat ({exc.strerror})") from exc
+    if size <= 0:
+        raise ForgeError(f"{donor}: is empty")
+    if size > _DONOR_MAX_BYTES:
+        raise ForgeError(f"{donor}: {size} bytes, the ceiling is {_DONOR_MAX_BYTES}")
+    try:
+        raw = donor.read_bytes()
+    except OSError as exc:
+        raise ForgeError(f"{donor}: cannot read ({exc.strerror})") from exc
+    if raw[:2] != b"MZ":
+        raise ForgeError(f"{donor}: not an executable image")
+
+    # Nothing is trimmed before the walk: resource offsets are section RVAs, so every
+    # read is already bounded by the image and a welded archive is never touched.
+    return Donor(
+        path=donor,
+        icons=_donor_icons(raw),
+        version=_donor_version(raw),
+    )
+
+
+def _merged_version(base: VersionConfig | None, override: VersionConfig | None) -> VersionConfig | None:
+    """``override`` field by field over ``base``. A blank field is not an override."""
+    if base is None:
+        return override
+    if override is None:
+        return base
+    return VersionConfig(
+        **{
+            name: getattr(override, name) or getattr(base, name)
+            for name in VERSION_FIELDS
+        }
+    )
+
+
 # --- the update cycle ---------------------------------------------------------
 
 
@@ -701,19 +988,18 @@ def patch_icon(stub: Path, entries: list[IconEntry]) -> bytes:
 def _patched_stub(
     stub: Path,
     *,
-    icon: Path | None = None,
+    icons: list[IconEntry] | None = None,
     version: VersionConfig | None = None,
 ) -> Iterator[Path]:
     """A staging copy of the launcher carrying the build's resources."""
-    entries = icon_entries(icon) if icon is not None else None
-    blob = version_blob(version) if version is not None else None
-    if entries is None and not blob:
+    blob = version_blob(version) if version is not None else b""
+    if icons is None and not blob:
         yield stub
         return
 
     patched = patch_resources(
         stub,
-        icons=entries,
+        icons=icons,
         version=blob or None,
     )
     handle, name = tempfile.mkstemp(prefix="sable-stub-", suffix=".exe")
@@ -1006,8 +1292,16 @@ def build(
     stub: Path | None = None,
     icon: Path | None = None,
     version: VersionConfig | None = None,
+    donor: Path | None = None,
 ) -> Path:
-    """Write the finished artifact. Returns ``destination``."""
+    """Write the finished artifact. Returns ``destination``.
+
+    ``donor`` is a built executable to copy the disguise from. It is a fallback, not an
+    override: an icon path wins over the donor's icon, and a non-blank version field wins
+    over the donor's version field. That order is what makes the donor useful against a
+    form that is half-filled — the operator takes the file apart and then corrects the
+    one string that would give it away.
+    """
     if mode not in OUTPUT_MODES:
         raise ForgeError(f"{mode!r}: expected one of {', '.join(OUTPUT_MODES)}")
     if len(sealed) < MIN_SEALED_BYTES:
@@ -1020,13 +1314,20 @@ def build(
     if mode == OUTPUT_EXE:
         if stub is None:
             raise ForgeError("exe output needs a frozen stub")
+        taken = harvest(donor) if donor is not None else None
+        entries = icon_entries(icon) if icon is not None else None
+        if entries is None and taken is not None and taken.icons:
+            entries = list(taken.icons)
+        settled = _merged_version(
+            taken.version if taken is not None else None, version
+        )
         ballast = _ballast(cfg.ballast_mb)
         # The patch changes the launcher's size, so the offset the footer records has to
         # come from the patched copy. Passing the staged path through means the one
         # place that computes it stays the one place that computes it. Icon and version
         # are one staging pass: two update cycles would re-append the launcher's archive
         # twice, and the second tail is not a tail any loader expects.
-        with _patched_stub(stub, icon=icon, version=version) as patched:
+        with _patched_stub(stub, icons=entries, version=settled) as patched:
             return _write_exe(destination, patched, sealed, ballast, cfg)
 
     # Script output carries no ballast. The pad exists to change the size of a
@@ -1052,6 +1353,7 @@ __all__ = [
     "SCHEMA_MEMBER",
     "TRAILER_MAGIC",
     "TRAILER_SIZE",
+    "Donor",
     "ForgeError",
     "IconEntry",
     "OutputMode",
@@ -1059,14 +1361,17 @@ __all__ = [
     "build",
     "expected_offset",
     "group_payload",
+    "harvest",
     "icon_entries",
     "image_end",
     "patch_icon",
     "patch_resources",
     "payload",
+    "resource_data",
     "resource_refs",
     "script_text",
     "trailer",
     "version_blob",
+    "version_config",
     "version_parts",
 ]

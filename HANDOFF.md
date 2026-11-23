@@ -610,3 +610,33 @@ Test gate at the close of this pass: 443 passed, ruff clean. Fixture probe:
 `_harness/roblox_jar_probe.py`, fourteen shapes, seventeen reader checks plus the real jar
 on this desk.
 
+
+
+## 13. The disguise, and the donor that fills it (closed)
+
+The resource pass was always inside the build: `core/forge.py` writes the icon and the
+`RT_VERSION` block in one `BeginUpdateResourceW` cycle, on a copy of the launcher, with
+the PyInstaller archive measured before the patch and re-appended after it. Nothing about
+it needs a second tool over the finished artifact.
+
+What was missing was the input side. `forge.harvest` now reads a built executable and
+returns what it says about itself - the icon group paired back with the images it names,
+and the version tree walked into a `VersionConfig`. `forge.build(..., donor=Path)` uses
+it as a fallback: a typed field wins field by field, and an explicit `.ico` wins over the
+donor's group. A donor carrying only half a disguise supplies that half.
+
+| Surface | Where |
+|---|---|
+| Reader | `forge.harvest`, `forge.version_config`, `forge.resource_data` |
+| Writer | `forge.patch_resources` (unchanged), `forge.build(donor=...)` |
+| Forwarding | `pipeline.run(donor=...)`, `BuildWorker(donor=...)` |
+| Form | `app/pages/forge.py` - "Copy disguise from", in the Launcher card |
+| Rules | `validate._check_donor` - `output.donor`, blocking for exe, a note for script |
+
+One asymmetry is the format's, not a defect: a blank `ProductVersion` is written as the
+file version, so a donor read back reports it spelled out.
+
+Test gate at the close of this pass: 455 passed, ruff clean, compileall exit 0. Contracts
+188 -> 200. The new proofs are a writer/reader round trip, a donor lending its icon and
+strings to a second build (measured on the finished file), and a typed field winning over
+a donor field while the rest still comes across.

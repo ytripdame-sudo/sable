@@ -168,6 +168,7 @@ def run(
     icon: Path | None = None,
     fuse: Path | None = None,
     version: VersionConfig | None = None,
+    donor: Path | None = None,
     progress: Progress | None = None,
     cancel: Cancel | None = None,
 ) -> Outcome:
@@ -178,6 +179,10 @@ def run(
     any of them by name. Two of them end up inside the artifact — the icon patched into
     the launcher's resources, the bound file welded into the archive — and the launcher
     is the third.
+
+    ``donor`` is also a build input and never travels: it is an executable to copy the
+    icon and the version block from, and it is read on this machine at the moment the
+    container is written.
     """
     deliver: Progress = progress or _ignore
     started = time.monotonic()
@@ -187,7 +192,7 @@ def run(
 
     _check_cancel(cancel, STAGE_VALIDATE)
     emit(STAGE_VALIDATE, "checking the form", 0.0)
-    problems = validate(cfg, mode=mode, name=name, stub=stub, icon=icon, fuse=fuse)
+    problems = validate(cfg, mode=mode, name=name, stub=stub, icon=icon, fuse=fuse, donor=donor)
     stopped = blocking(problems)
     if stopped:
         raise ValidationFailed(
@@ -224,7 +229,7 @@ def run(
     emit(STAGE_FORGE, f"writing {mode} container", 0.55)
     try:
         built = forge.build(
-            cfg, sealed, working, mode=mode, stub=stub, icon=icon, version=version
+            cfg, sealed, working, mode=mode, stub=stub, icon=icon, version=version, donor=donor
         )
     except forge.ForgeError as exc:
         raise PipelineError(STAGE_FORGE, str(exc)) from exc

@@ -124,6 +124,7 @@ class BuildWorker(QThread):
         icon: Path | None = None,
         fuse: Path | None = None,
         version: VersionConfig | None = None,
+        donor: Path | None = None,
         parent: Any = None,
     ) -> None:
         super().__init__(parent)
@@ -136,6 +137,7 @@ class BuildWorker(QThread):
         self._icon = icon
         self._fuse = fuse
         self._version = version
+        self._donor = donor
         self._cancelled = False
 
     # --- control -------------------------------------------------------------
@@ -161,6 +163,7 @@ class BuildWorker(QThread):
                 icon=self._icon,
                 fuse=self._fuse,
                 version=self._version,
+                donor=self._donor,
                 progress=self._on_progress,
                 cancel=self._cancel_requested,
             )

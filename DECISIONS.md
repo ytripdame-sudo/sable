@@ -2042,3 +2042,57 @@ Result on this desk: the probe runs fourteen shapes - seventeen checks on the re
 the real jar on this machine - and all pass. Test gate: 443 passed, ruff clean.
 
 Fixture probe: `_harness/roblox_jar_probe.py`.
+
+
+## The disguise was already native - the donor was the missing half
+
+The question was whether the operator has to run a second tool over a finished artifact
+to make it look like something. The answer is no, and it has been no since the resource
+pass landed: `core/forge.py` writes the icon and the `RT_VERSION` block itself.
+
+Both go through one `BeginUpdateResourceW`/`UpdateResourceW`/`EndUpdateResourceW` cycle
+inside `patch_resources`, on a copy of the launcher, and the PyInstaller archive welded
+to its tail is measured before the patch and re-appended after it. Two cycles would
+re-append that tail twice; that is why icon and version are one pass rather than two.
+The chain was already complete: `app/pages/forge.py` holds the fields, `app/shell.py`
+collects them, `app/worker.py` carries them, `core/pipeline.py` validates and forwards
+them, `core/forge.py` writes them.
+
+What was missing is the other direction. Every field had to be typed, and the icon had
+to be a `.ico` on disk, even when the thing the artifact should look like was sitting
+right there as a built executable. `forge.harvest` reads that executable: its icon group
+paired back up with the images it names, and its version tree walked node by node into a
+`VersionConfig`.
+
+Four rules, and each one is a shape of the format rather than a preference:
+
+- **A donor is a fallback, not an override.** An explicit `.ico` wins over the donor's
+  group, and a non-blank version field wins over the donor's field. Per field, not per
+  block. The company name is the string that gives a build away, so correcting it must
+  not mean retyping six other values.
+- **A donor that carries half a disguise is still a donor.** No icon group, no version
+  block, or a tree that does not parse leaves that half empty. A build against a file
+  with a locked resource section is a build with one less thing taken, not a failed run.
+- **Reading is the writer's inverse, checked by a round trip.** The one place the two
+  can disagree is `wValueLength`: characters for a text block, bytes for a binary one.
+  Counting it the same way in both directions is what makes the test possible and what
+  makes a file load instead of showing every other letter.
+- **The fixed half is a fallback for the file version.** Explorer renders the strings;
+  the four numbers under `VS_FIXEDFILEINFO` are what a version comparison reads. A donor
+  with only the numbers still yields `file_version`, which is more than the overview
+  pane shows.
+
+`version_config` and `version_parts` are mirrors of each other on purpose, and the round
+trip in `tests/test_contracts.py` is the contract between them. A blank `ProductVersion`
+comes back spelled out rather than blank, because the writer fills it from the file
+version: that asymmetry belongs to the format and the reader reports what is in the file.
+
+The walk that finds resources was one nested closure inside `resource_refs` and now
+underlies both directions: `_resource_walk` yields each leaf with the offset and size of
+its bytes, `resource_refs` keeps only the rows, and `resource_data` hands back the body.
+The same three-level table, read once, by the code that writes and the code that steals.
+
+Result on this desk: a donor built from the launcher with a two-image icon and a Northline
+version block lends both to a second build, measured on the finished file - the group
+resource is present byte for byte and the strings are in the block. Test gate: 455
+passed, ruff clean, and the two older paths (icon only, no donor at all) are unchanged.

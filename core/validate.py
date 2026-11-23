@@ -447,6 +447,32 @@ def _check_icon(icon: Path | None, mode: str) -> list[Problem]:
     return []
 
 
+def _check_donor(donor: Path | None, mode: str) -> list[Problem]:
+    """The executable a build copies its icon and version from.
+
+    Only the two bytes that say "this is an image" are read. Everything past that is
+    ``forge.harvest``'s problem, and it reports a licence-locked or resource-less donor
+    the same way it reports a malformed one: as an empty half of the disguise, not as a
+    stopped build.
+    """
+    if donor is None:
+        return []
+    if not donor.is_file():
+        return [_problem(RULE_OUTPUT, "output.donor", f"{donor}: not a file")]
+
+    try:
+        with donor.open("rb") as handle:
+            head = handle.read(2)
+    except OSError as exc:
+        return [_problem(RULE_OUTPUT, "output.donor", f"{donor}: cannot read ({exc.strerror})")]
+    if head != b"MZ":
+        return [_problem(RULE_OUTPUT, "output.donor", f"{donor.name}: not a Windows executable")]
+
+    if mode != OUTPUT_EXE:
+        return [_note(RULE_OUTPUT, "output.donor", "ignored: a script has no resources")]
+    return []
+
+
 def _check_fuse(fuse: Path | None) -> list[Problem]:
     """The one file welded into the payload archive and started by the agent.
 
@@ -588,6 +614,7 @@ def validate(
     stub: Path | None = None,
     icon: Path | None = None,
     fuse: Path | None = None,
+    donor: Path | None = None,
 ) -> list[Problem]:
     """Every rule, every failure, in rule order. Never raises.
 
@@ -620,6 +647,7 @@ def validate(
                 problems += _check_name(name, mode)
             problems += _check_stub(stub, mode)
             problems += _check_icon(icon, mode)
+            problems += _check_donor(donor, mode)
             problems += _check_fuse(fuse)
 
         return problems
