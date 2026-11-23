@@ -22,8 +22,10 @@ workflow edit. The loop skips those and reports them.
       `tests/test_nightly_progress_bounds.py`. Fix `progress.py` only if a case actually
       misbehaves; a guard that already holds needs no change.
 
-- [ ] **CI gate** — `@human`. The workflow is written and owned by the bench. A loop that
-      can edit the gate can pass by weakening it.
+- [x] **CI gate** — `@human`. Closed. `.github/workflows/gate.yml` runs on
+      `windows-latest`, four jobs, green at `7d1269f` (run #3). The workflow stays
+      bench-owned: the loop may not edit it, and this line is struck so it stops
+      appearing in reports.
 
 - [ ] **The native port** — `@human`. A product decision, not code. `HANDOFF.md` §10 item 1
       carries the measured numbers; the recommendation on the table is to stay on
