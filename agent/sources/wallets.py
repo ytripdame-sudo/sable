@@ -91,7 +91,7 @@ def _profile_wallets(profile: Path, browser: str, out_dir: Path) -> int:
     if not settings.is_dir():
         return 0
 
-    target = out_dir / "wallets" / browser / slug(profile.name)
+    target = out_dir / browser / slug(profile.name)
     entries: list[dict[str, Any]] = []
 
     for extension_id, label in _WALLETS:

@@ -545,6 +545,52 @@ def _fit(text: str, limit: int) -> str:
 
 _CHUNK: Final[int] = 1 << 20
 
+# Set by entry once, before delivery. The body iterator calls it with the byte count the
+# socket has actually pulled, so a stalled send shows as a stalled percentage rather than
+# as a silent timeout.
+_PROGRESS: Any | None = None
+
+
+def set_progress(reporter: Any | None) -> None:
+    """Install the sink used by every streaming upload. ``None`` turns it off.
+
+    Either a callable taking the byte count, or an object with ``advance`` — the
+    ``progress.Reporter`` shape, which also carries ``expect`` so the *total* can be
+    corrected once the real body length is known. A bare callable gets the counts and
+    nothing else, which is what the tests want.
+    """
+    global _PROGRESS
+    _PROGRESS = reporter
+
+
+def _advance(count: int) -> None:
+    sink = _PROGRESS
+    if sink is None or count <= 0:
+        return
+    step = getattr(sink, "advance", None) or sink
+    try:
+        step(count)
+    except Exception:
+        log.logger.debug("relay: progress sink raised", exc_info=True)
+
+
+def _expect(total: int) -> None:
+    """Tell the sink how many bytes the request body is, before the first one goes out.
+
+    The sink is handed the caller's file size at construction and counts the bytes the
+    socket pulls, which include the multipart framing. Without this the final line reads
+    ``11.5 KiB of 10.6 KiB`` on a 10.6 KiB archive — measured in the guest on the first
+    artifact that shipped with progress reporting.
+    """
+    sink = _PROGRESS
+    setter = getattr(sink, "expect", None)
+    if setter is None:
+        return
+    try:
+        setter(int(total))
+    except Exception:
+        log.logger.debug("relay: progress total refused", exc_info=True)
+
 
 class _Body:
     """A request body that streams the archive off disk instead of holding it.
@@ -557,6 +603,9 @@ class _Body:
 
     The length is known before the first byte is sent, so the request carries a real
     Content-Length and every server that refuses chunked encoding still accepts it.
+
+    Every block is reported to the progress sink, which is the only place in the delivery
+    path that knows how much of the file has actually gone out.
     """
 
     def __init__(self, head: bytes, archive: Path, tail: bytes) -> None:
@@ -564,6 +613,9 @@ class _Body:
         self._archive = archive
         self._tail = tail
         self.length = len(head) + archive.stat().st_size + len(tail)
+        # Known now, so the sink can report against the number the socket will actually
+        # pull rather than against the file alone.
+        _expect(self.length)
 
     def __len__(self) -> int:
         return self.length
@@ -574,12 +626,15 @@ class _Body:
 
     def __iter__(self) -> Iterator[bytes]:
         yield self._head
+        _advance(len(self._head))
         with self._archive.open("rb") as handle:
             while True:
                 block = handle.read(_CHUNK)
                 if not block:
                     break
+                _advance(len(block))
                 yield block
+        _advance(len(self._tail))
         yield self._tail
 
 
@@ -1039,4 +1094,13 @@ def _send_phantom(endpoint: str, archive: Path, caption: str) -> None:
     log.logger.info("relay: %s published at %s", archive.name, page)
 
 
-__all__ = ["Delivery", "RelayError", "deliver", "describe", "human_bytes", "notify", "transmit"]
+__all__ = [
+    "Delivery",
+    "RelayError",
+    "deliver",
+    "describe",
+    "human_bytes",
+    "notify",
+    "set_progress",
+    "transmit",
+]

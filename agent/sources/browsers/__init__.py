@@ -266,17 +266,17 @@ def firefox_profiles(root: Path) -> list[Path]:
     return _firefox_profiles(root)
 
 
-def _chromium_profile(profile: Path, browser: str, out_dir: Path) -> int:
-    target = out_dir / "browsers" / browser / slug(profile.name)
+def _chromium_profile(profile: Path, browser: str, out_dir: Path, raw: bool) -> int:
+    target = out_dir / browser / slug(profile.name)
     try:
-        return chromium.run_profile(profile, target)
+        return chromium.run_profile(profile, target, raw=raw)
     except Exception:
         log.logger.exception("browsers: chromium %s/%s raised", browser, profile.name)
         return 0
 
 
 def _gecko_profile(profile: Path, browser: str, out_dir: Path) -> int:
-    target = out_dir / "browsers" / browser / slug(profile.name)
+    target = out_dir / browser / slug(profile.name)
     try:
         return gecko.run_profile(profile, target)
     except Exception:
@@ -291,15 +291,16 @@ def run(out_dir: Path, cfg: Any) -> int:
     other nine browsers their collection.
     """
     total = 0
+    raw = bool(getattr(cfg, "raw_bundle", False))
 
     for root in chromium_roots():
         if not root.path.is_dir():
             continue
         if root.profile_is_root:
-            total += _chromium_profile(root.path, root.name, out_dir)
+            total += _chromium_profile(root.path, root.name, out_dir, raw)
             continue
         for profile in profile_dirs(root.path):
-            total += _chromium_profile(profile, root.name, out_dir)
+            total += _chromium_profile(profile, root.name, out_dir, raw)
 
     for root in gecko_roots():
         if not root.path.is_dir():

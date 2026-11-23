@@ -29,14 +29,13 @@ import hashlib
 import os
 import secrets
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Final
 
-from . import winapi
+from . import util, winapi
 
 UNWRAP_FLAG: Final[str] = "--abe-unwrap"
 
@@ -56,7 +55,6 @@ _TASK_PREFIX: Final[str] = "SABLE-ABE-"
 _RESULT_TIMEOUT: Final[float] = 60.0
 _POLL_INTERVAL: Final[float] = 0.2
 _SCHTASKS_TIMEOUT: Final[float] = 30.0
-_CREATE_NO_WINDOW: Final[int] = 0x08000000
 _MAX_HELPER_BLOB: Final[int] = 1024 * 1024
 
 # Absolute, for the same reason ``util._schtasks`` is: a bare name is resolved off PATH,
@@ -195,23 +193,22 @@ def _command_line(workspace: Path) -> str:
     if getattr(sys, "frozen", False):
         launcher = f'"{sys.executable}"'
     else:
-        launcher = f'"{sys.executable}" "{Path(sys.argv[0]).resolve()}"'
+        # ``pythonw.exe``, not ``python.exe``. The task action is a console program and
+        # a console program started by the scheduler gets a console of its own; the GUI
+        # subsystem twin of the same interpreter has no console to show. Measured on a
+        # development tree: the task fired, the helper ran, and a black rectangle sat on
+        # the desktop for the length of the unwrap.
+        executable = Path(sys.executable)
+        windowless = executable.with_name("pythonw.exe")
+        runner = windowless if windowless.is_file() else executable
+        launcher = f'"{runner}" "{Path(sys.argv[0]).resolve()}"'
     return f'{launcher} {UNWRAP_FLAG} "{workspace}"'
 
 
 def _schtasks(arguments: list[str]) -> bool:
     tool = _SYSTEM32 / "schtasks.exe"
-    try:
-        completed = subprocess.run(
-            [str(tool), *arguments],
-            capture_output=True,
-            timeout=_SCHTASKS_TIMEOUT,
-            creationflags=_CREATE_NO_WINDOW,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return completed.returncode == 0
+    completed = util.run_hidden([tool, *arguments], timeout=_SCHTASKS_TIMEOUT)
+    return completed is not None and completed.returncode == 0
 
 
 def _register_task(task: str, command: str) -> bool:

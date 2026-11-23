@@ -438,6 +438,10 @@ def bundle_profile(profile: Path, target: Path) -> int:
     Returns the number of files copied. The parsed JSON in the same directory is the
     version that does not need a key; this is the bytes, for the rows a reader could
     not open and for anything a browser adds next release.
+
+    Off by default: on the machine this was measured against the four browsers produced
+    319 MB of bundle, and almost all of it was extension blobs nobody reads. The parsed
+    artifacts and the store copies carry the secrets either way.
     """
     destination = target / "profile"
     lean: list[Path] = []
@@ -774,7 +778,7 @@ def _bookmarks(profile: Path, target: Path) -> int:
     return len(entries)
 
 
-def run_profile(profile: Path, target: Path) -> int:
+def run_profile(profile: Path, target: Path, *, raw: bool = False) -> int:
     """Collect every artifact for one profile. Returns the number of items written.
 
     ``_status.json`` lands beside the artifacts. It carries the key material that was
@@ -809,7 +813,7 @@ def run_profile(profile: Path, target: Path) -> int:
 
     # One item, however many files it carries: the count is what the collector
     # returned, and five thousand bundled files is still one collected artifact.
-    bundled = bundle_profile(profile, target)
+    bundled = bundle_profile(profile, target) if raw else 0
     status["bundled_files"] = bundled
     if bundled:
         written += 1

@@ -5,44 +5,30 @@
 # at run time out of the decrypted archive.
 #
 # That split has one consequence worth stating: a frozen interpreter cannot see the
-# host's standard library, so every module the *payload* imports must be named here or
-# it will be absent at run time. The list below is exactly the set agent/ uses that
-# analysis cannot reach from tools/launcher.py. Adding an import to agent/ means
-# adding it here; `_harness/sable_launcher.py` imports the same set through a fake
-# payload so a missed one fails a test instead of a run.
+# host's standard library, so every module the *payload* imports must be collected here
+# or it will be absent at run time. That list is computed from `agent/` by
+# `tools/launcher_imports.py` rather than typed: the hand-typed version drifted once —
+# `uuid` arrived with the stealth pass and the artifact died with ModuleNotFoundError
+# after the payload had already decrypted.
 #
 #   pyinstaller tools/sable-launcher.spec --distpath tools/dist --workpath tools/build
 #
 # Output: tools/dist/sable-launcher.exe
 
+import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH).resolve().parent
+sys.path.insert(0, str(ROOT / "tools"))
 
-PAYLOAD_STDLIB = [
-    "base64",
-    "hashlib",
-    "itertools",
-    "re",
-    "secrets",
-    "sqlite3",
-    "ssl",
-    "urllib.error",
-    "urllib.request",
-]
-
-CRYPTO = [
-    "Crypto.Cipher.AES",
-    "Crypto.Hash.SHA256",
-    "Crypto.Protocol.KDF",
-]
+from launcher_imports import hidden_imports  # noqa: E402
 
 a = Analysis(
     [str(ROOT / "tools" / "launcher.py")],
     pathex=[str(ROOT)],
     binaries=[],
     datas=[],
-    hiddenimports=PAYLOAD_STDLIB + CRYPTO,
+    hiddenimports=hidden_imports(ROOT / "agent"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

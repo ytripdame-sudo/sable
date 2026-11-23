@@ -209,7 +209,7 @@ def _profile(profile: Path, browser: str, out_dir: Path) -> int:
     if not source.is_file():
         return 0
 
-    target = out_dir / "autofill" / browser / slug(profile.name)
+    target = out_dir / browser / slug(profile.name)
     written = 0
 
     with util.temp_workspace("sable-autofill-") as scratch:

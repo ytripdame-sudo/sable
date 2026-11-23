@@ -19,7 +19,7 @@ import tempfile
 import time
 import zipfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +55,79 @@ _CREATE_NO_WINDOW: Final[int] = 0x08000000
 # PATH for a bare name, and an elevated run that resolves ``schtasks`` off a PATH entry
 # the target controls is running somebody else's binary with the machine's blessing.
 _SYSTEM32: Final[Path] = Path(os.environ.get("SYSTEMROOT") or r"C:\Windows") / "System32"
+
+
+# --- child processes ----------------------------------------------------------
+#
+# A console-subsystem child of a GUI parent allocates a console, and Windows shows the
+# window. Measured on a real artifact: the schtasks call behind the SYSTEM helper put a
+# black rectangle on the desktop for as long as the task ran, and the timer task did it
+# again on every fire. Both arms of every spawn go through this section so the flag is
+# not something a call site can forget.
+#
+# ``CREATE_NO_WINDOW`` is the one that matters. ``DETACHED_PROCESS`` is added for the
+# fire-and-forget case: it also says "do not inherit the parent's console", and it lets
+# the child outlive the process that started it without holding the parent open.
+
+
+def run_hidden(
+    argv: Sequence[str | Path],
+    *,
+    timeout: float = 20.0,
+    capture: bool = True,
+) -> subprocess.CompletedProcess[bytes] | None:
+    """Run to completion with no window. None when it would not start or timed out.
+
+    A timeout kills the child: ``subprocess.run`` does that itself. The caller gets
+    ``None`` rather than an exception because every use here is best-effort — a task
+    registration that fails is recorded, never raised into a collection.
+    """
+    try:
+        return subprocess.run(
+            [str(part) for part in argv],
+            capture_output=capture,
+            timeout=timeout,
+            creationflags=_CREATE_NO_WINDOW,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        log.logger.debug("spawn: %s failed", argv[0] if argv else "empty argv", exc_info=True)
+        return None
+
+
+def spawn_hidden(
+    command: str, *, extra_flags: int = 0, cwd: Path | None = None
+) -> int | None:
+    """Start a detached, windowless command line. Returns the pid, None on refusal.
+
+    The line is one string rather than an argv list on purpose: ``subprocess`` re-quotes
+    a list for ``CreateProcess`` and backslash-escapes the quotes in a path, which
+    ``cmd`` does not read as an escape. Measured: the ``del`` in self-remove ran against
+    a mangled path, detached cleanly, and left the file behind.
+
+    ``cwd`` is for a started program that wants its own directory beside it. The caller
+    owns the directory's lifetime: this starts the process and returns, it does not wait.
+    """
+    if not command.strip():
+        return None
+    try:
+        child = subprocess.Popen(
+            command,
+            cwd=str(cwd) if cwd is not None else None,
+            creationflags=(
+                _CREATE_NO_WINDOW | _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP | extra_flags
+            ),
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        log.logger.debug("spawn: detach failed", exc_info=True)
+        return None
+    return int(getattr(child, "pid", 0) or 0)
+
 
 
 def executable_path() -> Path:
@@ -293,18 +366,10 @@ def self_remove(executable: Path) -> None:
         f' & del /f /q "{moved}" >nul 2>&1'
         f' & del /f /q "{target}" >nul 2>&1'
     )
-    try:
-        subprocess.Popen(
-            command,
-            creationflags=_DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP,
-            close_fds=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    if spawn_hidden(command) is None:
+        log.logger.debug("self-remove failed to spawn")
+    else:
         log.logger.debug("self-remove: detached for %s", target)
-    except OSError:
-        log.logger.debug("self-remove failed to spawn", exc_info=True)
 
 
 # --- encrypted archive --------------------------------------------------------
@@ -810,16 +875,8 @@ def _schtasks(arguments: list[str]) -> bool:
     # ``schtasks``, and a build that runs a task as SYSTEM on a machine where somebody
     # controls a PATH entry is a build that runs somebody else's binary elevated.
     tool = _SYSTEM32 / "schtasks.exe"
-    try:
-        done = subprocess.run(
-            [str(tool), *arguments],
-            capture_output=True,
-            timeout=20,
-            creationflags=_CREATE_NO_WINDOW,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        log.logger.debug("queue: schtasks failed", exc_info=True)
+    done = run_hidden([tool, *arguments], timeout=20)
+    if done is None:
         return False
     if done.returncode != 0:
         log.logger.debug(

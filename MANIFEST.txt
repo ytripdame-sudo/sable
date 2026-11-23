@@ -10,6 +10,16 @@ agent/patch.py
 agent/gate.py
 agent/relay.py
 agent/loader.py
+agent/layout.py
+agent/state.py
+agent/context.py
+agent/fingerprint.py
+agent/progress.py
+agent/platforms.py
+agent/enrich.py
+agent/defender.py
+agent/gdi.py
+agent/media.py
 agent/sources/__init__.py
 agent/sources/system.py
 agent/sources/network.py
@@ -22,6 +32,8 @@ agent/sources/sessions.py
 agent/sources/wallets.py
 agent/sources/autofill.py
 agent/sources/documents.py
+agent/sources/screen.py
+agent/sources/camera.py
 core/__init__.py
 core/schema.py
 core/seal.py
@@ -46,6 +58,8 @@ app/theme/light.qss
 tests/test_imports.py
 tests/test_contracts.py
 tests/test_config.py
+tests/test_util.py
+tests/test_runtime.py
 pyproject.toml
 config.example.json
 README.md

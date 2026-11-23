@@ -40,6 +40,29 @@ def log_path() -> Path:
     return base / LOG_FILENAME
 
 
+class _SourceSafeFormatter(logging.Formatter):
+    """A traceback that cannot take the record with it.
+
+    In a frozen run the payload's own source lives inside a zip that may already be
+    closed by the time something fails. Rendering a traceback then asks ``linecache`` for
+    a line out of that zip and zipimport raises ``EOFError``. ``logging`` catches the
+    failure, calls ``handleError``, and the record is gone: measured in the guest, the
+    reason a rename was refused never reached the log because the attempt to explain it
+    failed first. Degrading to the exception's own text keeps the line, which is the part
+    that mattered.
+    """
+
+    def formatException(self, ei: object) -> str:  # stdlib name, kept
+        try:
+            return super().formatException(ei)  # type: ignore[arg-type]
+        except Exception:
+            try:
+                kind, value = ei[0], ei[1]  # type: ignore[index]
+                return f"{kind.__name__}: {value}"
+            except Exception:
+                return "unprintable exception"
+
+
 def _file_handler() -> logging.Handler | None:
     path = log_path()
     try:
@@ -55,7 +78,7 @@ def _file_handler() -> logging.Handler | None:
         # A locked or unwritable log must not stop the run; the console still works.
         return None
     handler.setLevel(logging.DEBUG)
-    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    handler.setFormatter(_SourceSafeFormatter(LOG_FORMAT))
     return handler
 
 
@@ -67,7 +90,7 @@ def _console_handler(debug: bool) -> logging.Handler | None:
         return None
     handler = logging.StreamHandler(stream)
     handler.setLevel(logging.DEBUG if debug else logging.WARNING)
-    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    handler.setFormatter(_SourceSafeFormatter(LOG_FORMAT))
     return handler
 
 

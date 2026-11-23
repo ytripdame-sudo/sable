@@ -25,6 +25,7 @@ must still be runnable there.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
@@ -42,7 +43,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent import entry, loader  # noqa: E402
+from agent import entry, loader, util  # noqa: E402
 from core import forge, pipeline, rename, schema, seal  # noqa: E402
 from core import validate as validate_module  # noqa: E402
 from core.schema import (  # noqa: E402
@@ -1455,23 +1456,28 @@ def test_a_bound_file_is_extracted_beside_its_neighbours_and_started(
         archive.writestr("agent/entry.py", b"")
         archive.writestr("cfg.json", b"{}")
 
-    spawned: list[tuple[list[str], dict[str, object]]] = []
+    spawned: list[tuple[str, dict[str, object]]] = []
 
-    def fake_popen(command: list[str], **kwargs: object) -> object:
+    def fake_popen(command: str, **kwargs: object) -> object:
         spawned.append((command, kwargs))
         return object()
 
-    monkeypatch.setattr(entry.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(util.subprocess, "Popen", fake_popen)
 
     with zipfile.ZipFile(archive_path) as archive:
         assert entry._start_bound(archive) == 1
 
     assert len(spawned) == 1, "a .dll is carried, not started"
     command, options = spawned[0]
-    assert command[0].endswith("tool.exe")
-    assert options["creationflags"] == entry._DETACHED_PROCESS
-    assert Path(command[0]).is_file()
-    assert Path(command[0]).with_name("tool.dll").is_file()
+    target = Path(command.strip('"'))
+    assert target.name == "tool.exe"
+    assert target.is_file()
+    assert target.with_name("tool.dll").is_file()
+    # A console child of a windowed parent puts a window on the desktop. Both flags are
+    # required: one hides it, the other stops it inheriting this process's console.
+    flags = int(options["creationflags"])  # type: ignore[arg-type]
+    assert flags & util._CREATE_NO_WINDOW
+    assert flags & util._DETACHED_PROCESS
 
 
 def test_nothing_bound_means_nothing_started(
@@ -1484,7 +1490,7 @@ def test_nothing_bound_means_nothing_started(
     def forbidden(*_: object, **__: object) -> object:
         raise AssertionError("nothing was bound, so nothing should start")
 
-    monkeypatch.setattr(entry.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(util.subprocess, "Popen", forbidden)
 
     with zipfile.ZipFile(archive_path) as archive:
         assert entry._start_bound(archive) == 0
@@ -1498,7 +1504,9 @@ def test_a_bound_file_over_the_ceiling_is_skipped_rather_than_read(
         archive.writestr("fused/huge.exe", b"MZ" + bytes(4096))
 
     spawned: list[object] = []
-    monkeypatch.setattr(entry.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(
+        util.subprocess, "Popen", lambda *a, **k: spawned.append(a)
+    )
     monkeypatch.setattr(entry, "_MAX_BOUND_BYTES", 64)
 
     with zipfile.ZipFile(archive_path) as archive:
@@ -1516,7 +1524,7 @@ def test_a_launcher_that_does_not_start_is_not_a_dead_run(
     def refused(*_: object, **__: object) -> object:
         raise OSError("no such file")
 
-    monkeypatch.setattr(entry.subprocess, "Popen", refused)
+    monkeypatch.setattr(util.subprocess, "Popen", refused)
 
     with zipfile.ZipFile(archive_path) as archive:
         assert entry._start_bound(archive) == 0
@@ -1761,3 +1769,71 @@ def test_patching_nothing_is_refused_rather_than_writing_an_empty_cycle() -> Non
         forge.patch_resources(Path("nowhere.exe"))
     with pytest.raises(forge.ForgeError):
         forge.patch_resources(Path("nowhere.exe"), icons=[])
+
+
+# --- the frozen bundle -------------------------------------------------------
+
+
+def test_the_archive_is_created_under_the_name_it_ships_as() -> None:
+    """A zip written as ``payload.zip`` and renamed afterwards loses its name.
+
+    Measured in the guest: every ``Path.replace`` was refused with ``WinError 32``
+    because Defender's realtime scanner had the freshly written zip open, so the
+    delivered file was ``payload-sealed.zip`` — no host, no run id. The second argument
+    to ``make_archive`` is therefore computed, never a fixed name.
+    """
+    tree = ast.parse((ROOT / "agent" / "entry.py").read_text(encoding="utf-8"))
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "make_archive"
+        and len(node.args) == 2
+    ]
+    assert len(calls) == 1, "one archive, one destination"
+
+    destination = calls[0].args[1]
+    assert not isinstance(destination, ast.Constant), (
+        f"archive destination is a fixed name: {ast.dump(destination)[:80]}"
+    )
+
+
+def _launcher_imports():
+    """``tools/launcher_imports.py``, loaded by path: ``tools/`` is not a package."""
+    path = ROOT / "tools" / "launcher_imports.py"
+    spec = importlib.util.spec_from_file_location("sable_launcher_imports", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_spec_does_not_keep_its_own_copy_of_the_import_list() -> None:
+    """A hand-typed list only ever tests the list. It drifted once: ``uuid``."""
+    text = (ROOT / "tools" / "sable-launcher.spec").read_text(encoding="utf-8")
+
+    assert "launcher_imports" in text
+    assert "PAYLOAD_STDLIB" not in text
+
+
+def test_every_payload_import_reaches_the_frozen_bundle() -> None:
+    """Walk ``agent/`` here rather than trusting the helper to audit itself."""
+    launcher = _launcher_imports()
+    covered = set(launcher.hidden_imports(ROOT / "agent"))
+
+    found: set[str] = set()
+    for path in sorted((ROOT / "agent").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    found.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+                found.add(node.module.split(".")[0])
+
+    missing = {name for name in found if name not in {"agent", "core", "__future__"}} - covered
+    assert missing == set()
+    # The one that was missing in the guest, named so the failure is legible.
+    assert "uuid" in covered

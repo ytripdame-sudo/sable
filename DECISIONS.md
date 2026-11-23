@@ -1626,3 +1626,195 @@ Proof, both halves through the packaged artifact in the guest, archives opened w
 DPAPI-wrapped key and plants only the ciphertext, so a token in the file means the unwrap
 ran. `valid: null` is the guest having no route to `discord.com` — a validation that did
 not answer, which is not a rejection.
+
+## The stealth pass — twelve behaviours, each with the number that justified it
+
+The V1 audit produced twelve defects across stealth, user-visible behaviour, and the shape
+of the payload. Every one of them was a decision before it was a change, and every number
+below was measured rather than assumed.
+
+**A. `CREATE_NO_WINDOW` is a section, not a habit.** A console-subsystem child of a
+windowed parent gets a console allocated, and Windows shows it: the `schtasks` call behind
+the SYSTEM helper put a black rectangle on the desktop for the length of the task, and the
+timer task repeated it every fifteen minutes. Both arms of every spawn now go through
+`util.run_hidden` (to completion) or `util.spawn_hidden` (detached), so no call site can
+forget the flag. `abe.py` lost its own `subprocess` import for the same reason: a second
+spawn helper is a second place to get it wrong.
+
+**B. Collection moved onto four daemon threads, not an `Executor`.** Eight minutes
+serial on the desk this was built against, and the modules touch different files. The pool
+is hand-rolled because a module that hangs must not keep the interpreter alive:
+`ThreadPoolExecutor` joins its workers in `threading._shutdown`, so one stuck GDI or
+SQLite call would turn a finished run into a process nobody can kill. A module past its
+ceiling is abandoned in place and recorded as `deadline`. Whole set: 1.93 s on the desk
+with browsers off, 1.1 s of it the screenshot.
+
+**C. Defender exclusions are attempt-and-record.** Adding an exclusion needs an elevated
+token and needs Tamper Protection to permit it. Both are properties of the machine.
+Measured on an unelevated run: `Add-MpPreference` answers *You don't have enough
+permissions to perform the requested operation*, the record says `blocked` with that
+sentence, and the run continues. The alternative — flipping Tamper Protection off — is a
+machine-wide security change on somebody else's computer and was never on the table. The
+limit worth naming: `Add-MpPreference` has been observed to return success and change
+nothing, so the call is followed by a read of `Get-MpPreference`; an accepted call with an
+unchanged list records `blocked`, not `ok`.
+
+**D. The payload tree is a module, and the test walks it.** Every collector is handed a
+directory from `layout.MODULE_DIRS` and nothing under `agent/` builds a path from the
+workspace root except `entry` for `manifest.json` and `summary.txt`. `captures/` is shared
+by screen and camera on purpose — a screenshot and a webcam frame belong together — so
+ownership is by filename prefix as well as by directory, and a full pipeline run is walked
+against `layout.classify`. Live run on the desk: zero unowned files, four `meta/` files
+written by entry alone.
+
+**E. The screenshot budget is a start rule, not a wish.** A capture cannot be stopped once
+the encoder is in it, so the only enforceable form of "under 400 ms" is refusing to *start*
+a monitor that might not fit. 140 ms is the measured cost of a 2560x1440 panel here, so a
+second monitor starts only when a full panel still fits. Desk, three 1440p panels: primary
+captured in 268 ms, both seconds skipped with `reason: time budget`, pass 355 ms,
+`overrun_millis: 0`. A 1080p laptop primary costs 100-150 ms, so its second monitor is
+still captured. GDI+ startup moved outside the clock — it is process initialisation, not
+capture work, and paying it inside the budget cost a monitor.
+
+**F. `screen.json` says what the image cannot.** Resolution, DPI, orientation, bounds,
+device, primary flag, byte count, elapsed, and whether the frame came back one colour.
+That last field is what makes `abort_on_uniform_capture` possible: a session rendering one
+colour across every monitor is a desktop with nothing in it, and the run abandons before
+sealing rather than spending an upload on it.
+
+**G. Camera: Media Foundation source reader, by symbolic link.** VFW needs a window and a
+message pump; DirectShow needs `qedit.dll`, which is deprecated and absent on some
+installs. The source reader needs no window. Three corrections came out of building it:
+
+- `MFEnumDeviceSources` and `MFCreateDeviceSource` are exported by `mf.dll`, not
+  `mfplat.dll`. Loading them from `mfplat` raises `AttributeError` at import.
+- `MFSetAttributeSize` is inline-only, so `FRAME_SIZE` is packed by hand and written with
+  `SetUINT64` (vtable 22). The pair-style helpers are not exported by any of these DLLs.
+- `MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING` makes
+  `MFCreateSourceReaderFromMediaSource` return `E_INVALIDARG` on this build whichever way
+  its value is written (UINT32 or GUID), against all three devices present. The legacy
+  converter does the same colour conversion and is what ships.
+
+Measured: `USB3 Video`, 1920x1080, JPEG 33 KB, 515 ms cold, 492 ms inside the collector,
+against a 3000 ms ceiling. Virtual cameras are filtered by friendly name — Camo is
+installed here and a frame of somebody's Camo scene is not a picture of the room.
+
+**H. Four camera outcomes stay four outcomes.** `no device`, `blocked`, `busy`, `ok` are
+not collapsed into `error`. No device is a fact about the hardware, blocked is a fact about
+the privacy setting, busy is a fact about another process holding the device — and only the
+middle two say anything about the machine's configuration. A timeout is a fifth: the grab
+runs on a daemon thread and the collector stops waiting at three seconds, deletes any
+half-written frame, and records `timeout` so the report cannot contradict the file.
+
+**I. A failed probe is a no-signal, never a stop.** The fingerprint scores seven signals
+with weights chosen so one decisive signal crosses the hostile line by itself: debugger
+attached 8, accelerated clock 8, analysis process 6, injected module 6, stretched sleep 5,
+cold boot 3, quiet desktop 3. A debugger alone is hostile; a cold boot plus a quiet desktop
+is only suspicious; a stretched sleep is suspicious because a loaded box really does
+stretch a quarter second and the opposite — a sleep that returns in a tenth of its time —
+is hostile. Only `anti_analysis: abort` stops a run, and only on hostile; `warn` and `off`
+record and continue. `evaluate` takes the process set, module set, uptime, debugger flags,
+window count and skew as arguments so the whole table is testable without attaching a
+debugger, which this harness does not permit.
+
+**J. Resume state lives beside the queue, not in the workspace.** A machine that reboots
+with a half-collected workspace is the same case as one with a sealed archive waiting, so
+`state.json` lives in `%LOCALAPPDATA%\DeliveryQueue\` with the queue. `stage: collecting`
+is the only stage that trusts the workspace, `stage: collected` the only one that trusts
+the archive, and anything older than `state_hours` or from a different image starts fresh
+rather than resuming somebody else's run.
+
+**K. Upload progress is measured off the socket.** The reporter is called from inside the
+request body's iterator with the byte count the socket actually pulled, so a send that
+stalls at 40% shows as a stall rather than as a silent timeout. Throttled to one line per
+5%: a 200 MB archive at 1 MiB per block is a hundred and ninety calls, and printing each
+would spend more time in the log than in the upload. A reporter that raises is logged once
+and the upload continues — the upload is the job, the line is a courtesy.
+
+**L. Enrichment reads the reports and writes nothing.** Five collectors already write a
+JSON summary beside their data and nothing read them back, so the caption carried counts
+and nothing about what was in them. The reader takes accounts, host, network and the two
+capture blocks, caps each file at 64 KiB, and turns any failure into a missing line. Live
+run: `**discord** vushida · 1 valid · 3 found`, `**screen** 1/3 monitor(s) 2560x1440 ·
+355 ms`, `**camera** ok 1920x1080`, plus a platform table that sums by what the data is an
+account on rather than by which collector read it.
+
+**M. Platform labels are a separate axis from module names.** `browsers` reads five
+browsers and produces data from Discord, Roblox and a dozen sites; `sessions` reads one
+file and produces a Discord token. Counting per collector answered "how much came back"
+and left "who does this belong to" to whoever opened the archive. The mapping is declared
+once in `platforms.py` and a contract test fails if a module has no label.
+
+**N. `raw_bundle` defaults off.** Whole-profile copies measured 319 MB on the shop
+profile set and were the direct cause of the four-minute run: the curated stores carry the
+same accounts in 3.8 MB for Chrome and 150 MB for the worst Edge profile. The flag stays
+for the case where a full profile is wanted, and defaults to the curated read.
+
+Standing at the end of this pass: 396 tests green, `ruff check` clean, `compileall` clean,
+manifest at 66 paths with both directions pinned.
+
+## The entry pass — what the wiring did when it was finally run
+
+The stealth pass was proven module by module and never through `entry.main`. Running it
+end to end on this desk — real archive, real config through `core.schema`, real
+collectors, real seal, real `sable-aes` open — found two defects that no module test could
+have seen, because both live in the seam between the run state and the temp workspace.
+
+**O. A resumed module is only done if its files are.** `sources.run_all` skips a module
+the state marks done, on the theory that its output is still on disk. It is on disk in the
+workspace the *previous* run recorded, and `entry` hands collection a brand new temp
+directory every time, while `to_collecting` immediately overwrites the recorded path with
+it. The two together meant a resume skipped nine modules and shipped an archive with none
+of their files, while `manifest.json` still carried their counts. Measured: the seeded run
+sealed 15 members against the clean run's 16, and `system/system.json` was simply absent.
+
+`State.bring_forward` copies the recorded workspace into the new one before collection,
+and `_forget_missing` drops any done module whose count is non-zero and whose directory
+came across empty — so the next pass collects it again rather than shipping a number with
+nothing behind it. A module that legitimately wrote nothing is kept: it has a count of
+zero, no files to carry, and re-running it produces the same nothing. Re-measured: 16
+members, `system/system.json` present and holding the earlier run's bytes.
+
+**P. An abandoned run must not stay at `collecting`.** The uniform-capture abort wrote its
+reason to `meta/abandon.json` inside the workspace — which is a temp folder deleted on the
+way out — and left the state document at `collecting` with every module marked done. That
+is the exact shape the next boot treats as resumable, so the run that followed would have
+skipped all nine modules and sealed an empty archive: the abort would have converted one
+wasted upload into a silent empty one. `to_abandoned` records the reason and the timestamp
+in the state document and clears the workspace, and `_resumable` already refused that stage
+by name. Re-measured: `stage abandoned`, no delivery, one status message.
+
+Nothing else moved. The three scenarios — clean, uniform, resume — are the harness at
+`%TEMP%\opencode\entry_proof.py`, each in its own process because the loader caches its
+prepared archive and holds the mutex across the run.
+
+**Q. The archive is created under the name it ships as.** It used to be written as
+`payload.zip` and renamed after hashing, because the name carries the host and the run id
+and neither was known when the archive function was written. In the guest every rename was
+refused: `PermissionError: [WinError 32] ... being used by another process`, three attempts
+over 600 ms, and then the fallback shipped `payload-sealed.zip` with nothing in the name to
+say which machine it came from. The holder is Defender's realtime scanner, which opens a
+file that appeared a moment ago and shares read but not delete; the retry loop was treating
+a scan as a transient. `make_archive` now writes `SABLE-CLEAN-<run_id>.zip` directly and
+there is no move to lose, and `to_collected` records that path, so the state document names
+the file that actually left. Re-measured in the guest: `delivered
+SABLE-CLEAN-6478c1fe368d-sealed.zip on attempt 1`, 27 members, reopened with `sable-aes`.
+
+The same run closed the last unproven piece of the capture path. A PSSession is session 0,
+so `screen wrote 0` there was correct rather than broken. Launching the artifact from a
+scheduled task with an `Interactive` principal put it in the console session, and
+`captures/screen-1.png` came back 1024x768, 89 ms, `flat: false`, `overrun_millis: 0`: the
+guest's own desktop, update dialog and all. `captures/camera.json` stayed `no device`, which
+is that machine's truth.
+
+**R. An exclusion is withdrawn, and only if this run added it.** The workspace is a temp
+directory with a fresh name every run, so an exclusion left behind is a residue that grows
+by one path per run: the guest had five `sable-collect-*` entries from five runs. The obvious
+fix — read back the list after the add and remove what this run asked for — took a
+pre-existing entry with it: a run that re-requested an already-excluded image path reported
+two added, then withdrew the image as well, and the machine ended with *fewer* exclusions
+than it started with. So the script prints the list before the write as well as after, and
+`added` is the difference. Measured in the guest, elevated: six paths before, six after, two
+added and two withdrawn, image untouched. Unelevated the same run records `blocked` and
+withdraws nothing, which is the same rule seen from the other side.
+
