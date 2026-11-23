@@ -678,3 +678,17 @@ the trade for not storing a password in the task.
 
 The first thing that has to happen with it: watch one night. A loop nobody has read a report
 from is a loop nobody knows the failure mode of.
+
+
+First green: run #3 on `7d1269f`, all four jobs. The gate paid for itself before it
+was green. Two defects, neither reachable from this desk:
+
+| Found by | Defect | Fix |
+|---|---|---|
+| the run that never parsed | `print(f'MANIFEST entries: {n}')` in a plain YAML scalar | block scalar, no colon in the message |
+| pytest on a clean runner | `test_a_donor_that_is_missing_is_blocked_at_the_form` passed `LAUNCHER`, which only exists after a freeze, so it saw two problems and failed for a reason it does not name | the test builds its own two-byte stub; no guard needed |
+
+Four contracts skip on CI because they need a frozen launcher in `tools/dist`. The
+launcher job builds one, but it builds it in its own runner, so the python jobs still
+see a tree that has never been frozen. The skip reason names it; that is the whole cost
+of a clean checkout.
