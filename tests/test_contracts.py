@@ -1979,8 +1979,14 @@ def test_a_donor_on_a_script_build_is_a_note_rather_than_a_stop() -> None:
 
 
 def test_a_donor_that_is_missing_is_blocked_at_the_form(tmp_path: Path) -> None:
+    # A stub of its own rather than LAUNCHER: the subject here is the donor, and a tree
+    # that has never run a freeze would otherwise report two problems and fail this
+    # assert for a reason the test does not name.
+    stub = tmp_path / "stub.exe"
+    stub.write_bytes(b"MZ" + bytes(64))
+
     problems = validate_module.validate(
-        config(), mode=forge.OUTPUT_EXE, stub=LAUNCHER, donor=tmp_path / "absent.exe"
+        config(), mode=forge.OUTPUT_EXE, stub=stub, donor=tmp_path / "absent.exe"
     )
 
     assert [(problem.path, problem.blocking) for problem in problems] == [
