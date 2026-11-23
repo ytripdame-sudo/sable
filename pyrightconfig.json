@@ -1,0 +1,19 @@
+{
+  "include": ["agent", "core", "app"],
+  "exclude": ["**/__pycache__", "tools", "tests", "native"],
+
+  // The portable interpreter the gate uses lives outside the repo, so it is named
+  // rather than discovered. Without this, every third-party import reads as missing.
+  "venvPath": "C:/Users/Kuzenee/AppData/Local/Temp/opencode",
+  "venv": "py312",
+
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Windows",
+  "typeCheckingMode": "basic",
+
+  // ``reportOptionalMemberAccess`` is 224 of the 289 findings on this tree. The code
+  // checks for the absent value and returns; pyright cannot see through the guard when
+  // it is a helper call. The signal to noise is not there, so it is off. Everything
+  // else stays on.
+  "reportOptionalMemberAccess": "none"
+}

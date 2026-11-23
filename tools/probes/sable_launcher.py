@@ -29,7 +29,7 @@ import time
 import zipfile
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\Kuzenee\Desktop\55555\sable")
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from agent import loader  # noqa: E402

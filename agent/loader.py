@@ -200,7 +200,18 @@ def boot() -> int:
     them here made both re-execs start a fresh collection instead of the job they were
     launched for.
     """
-    if not _guarded(sys.argv):
+    try:
+        allowed = _guarded(sys.argv)
+    except Exception:
+        # The mutex name lives in the trailer, so a launcher welded to nothing has no
+        # name to guard with. This call sits ahead of the first try block on purpose -
+        # the guard has to run before anything is decrypted - and a windowed build
+        # turns an escaping exception into a modal traceback nobody can close from a
+        # script. Refuse quietly with a non-zero code instead.
+        log.logger.exception("loader: guard failed")
+        return 1
+
+    if not allowed:
         return 0
 
     try:

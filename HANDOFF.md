@@ -646,3 +646,35 @@ Test gate at the close of this pass: 455 passed, ruff clean, compileall exit 0. 
 188 -> 200. The new proofs are a writer/reader round trip, a donor lending its icon and
 strings to a second build (measured on the finished file), and a typed field winning over
 a donor field while the rest still comes across.
+
+## 14. The gate outside the desk, and the overnight loop (open)
+
+`.github/workflows/gate.yml` runs the same three commands this desk runs, on
+`windows-latest`, against Python 3.11 and 3.12, and adds the two proofs the desk cannot make
+honestly: `cargo test --locked` for `native/aes`, and a launcher freeze that builds
+`tools/dist/sable-launcher.exe` from a clean tree and boots three artifacts through it with
+`tools/probes/sable_launcher.py`. The manifest count is asserted too, because a 67 that
+drifts to 68 in a commit that only touched a document is worth failing over.
+
+| Path | What it is |
+|---|---|
+| `.github/workflows/gate.yml` | The gate. Three jobs, one red does not hide the others. |
+| `.opencode/agents/nightly.md` | The unattended agent. Cannot edit tests, `MANIFEST.txt`, or a workflow. |
+| `_nightly/run.ps1` | The loop. Branch, gate, one queue item, report. Never pushes. |
+| `_nightly/QUEUE.md` | One item per night, `@human` marks what the loop must skip. |
+| `_nightly/STOP` | Drop this file and the loop halts at the next round boundary. |
+| `_nightly/REPORT.md` | The morning read. Written by the loop, committed on the branch. |
+| `pyrightconfig.json` | Editor types only. Not in the gate: 455 contracts are the gate. |
+
+Run it by hand before trusting a schedule:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File _nightly\run.ps1 -GateOnly
+```
+
+The schedule is a task named `SableNightly` at 02:00, registered with `-WakeToRun` so a
+sleeping desktop still does the work. It runs only while the account is logged on, which is
+the trade for not storing a password in the task.
+
+The first thing that has to happen with it: watch one night. A loop nobody has read a report
+from is a loop nobody knows the failure mode of.

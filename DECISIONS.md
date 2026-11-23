@@ -2100,3 +2100,60 @@ Result on this desk: a donor built from the launcher with a two-image icon and a
 version block lends both to a second build, measured on the finished file - the group
 resource is present byte for byte and the strings are in the block. Test gate: 455
 passed, ruff clean, and the two older paths (icon only, no donor at all) are unchanged.
+
+## The launcher that hung instead of refusing - a guard ahead of the first try block
+
+`sable-launcher.exe` welds the payload behind the stub, and the mutex name the loader guards
+with lives in the trailer that the weld writes. A stub with no payload therefore has no name
+to guard with, and `boot()` called `_guarded()` before its first `try`: the `ArchiveError`
+escaped, the windowed build turned an unhandled exception into a modal traceback, and the
+process sat on the dialog until something killed it.
+
+The probe that should have caught it ran the bare stub last, after forty-nine passing checks,
+and waited on a pipe. Killing the bootloader parent left the child holding that pipe, so
+`subprocess.run(timeout=...)` blocked in its own cleanup instead of raising. A hang in the
+probe was hiding a refusal that never happened, which is the worse of the two failures: the
+check that was supposed to say "this refuses" never printed at all.
+
+The fix keeps the ordering - the guard still runs before anything is decrypted - and makes
+its failure return 1 instead of escaping. `tests/test_loader_guard.py` holds both halves: a
+stub with no trailer returns 1, and a `_guarded` that raises returns 1 rather than
+propagating. Wrapping only `ArchiveError` was the first shape and it was too narrow:
+`create_mutex` and `executable_path` can produce the same dialog, and the point of the block
+is that nothing in the guard reaches the windowed traceback. The except is broad and logged
+for that reason, not out of laziness.
+
+Measured: the bare stub exits 1 in under a second, and the probe now reports 55/55 including
+`bare launcher refuses rc=1`. Before the fix the same stub was still resident after 240 s.
+
+## The gate outside this desk, and the loop that runs while nobody is watching
+
+Three things were added for v2 and only one of them is shipping source.
+
+`.github/workflows/gate.yml` runs the same three commands this desk runs - `pytest`, `ruff
+check`, `compileall` - on `windows-latest` against Python 3.11 and 3.12, and adds the two
+proofs a desk cannot make honestly: `cargo test --locked` for `native/aes`, and a launcher
+freeze that builds `tools/dist/sable-launcher.exe` from a clean tree and boots three
+artifacts through it. `--locked` is deliberate: a dependency that moved without a lockfile
+update should fail here rather than change what the crate builds against.
+
+`pyrightconfig.json` names the portable interpreter, because every third-party import read as
+missing without it, and turns off `reportOptionalMemberAccess`, which was 224 of 289 findings
+on this tree - the code checks for the absent value and returns, and pyright cannot see
+through the guard when it is a helper call. What is left is 28 findings, 24 of them
+`reportArgumentType`, which is signal. Pyright is for the editor and is not in the gate: the
+455 contracts are the gate, and a type checker that turns red on a tree that passes them
+would only teach everyone to ignore it.
+
+`_nightly/run.ps1` is the unattended loop. It refuses to start on a dirty tree, cuts a branch
+named `auto/nightly-<date>`, runs the gate, and while the gate is red asks the `nightly`
+agent - `.opencode/agents/nightly.md` - to fix exactly one item from `_nightly/QUEUE.md`. The
+loop never pushes, never merges, never touches `main`, and stops after the same failure
+signature twice in a row. The agent cannot edit an existing test, `MANIFEST.txt`, or a
+workflow: a loop that can weaken its own gate has no gate. It may add `tests/test_nightly_*`
+files, because new coverage is not the same act as editing the contract.
+
+The alternative was a cron that ran the agent straight against `main` with no branch and no
+queue. It is less code and it is the version that produces a morning full of unexplained
+diffs, because "make the tests pass" with no written objective is an invitation to widen the
+thing being tested.
