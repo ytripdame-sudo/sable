@@ -57,7 +57,8 @@ jobs:
       # A probe that stops parsing is invisible to ruff, which is excluded from
       # tools/probes on purpose. compileall is the only thing standing there.
       - name: manifest count
-        run: python -c "import pathlib,sys; n=len([l for l in pathlib.Path('MANIFEST.txt').read_text().splitlines() if l.strip() and not l.startswith('#')]); print(f'MANIFEST entries: {n}'); sys.exit(0 if n == 67 else 1)"
+        run: |
+          python -c "import pathlib,sys; n=len([l for l in pathlib.Path('MANIFEST.txt').read_text().splitlines() if l.strip() and not l.startswith('#')]); print('MANIFEST entries:', n); sys.exit(0 if n == 67 else 1)"
 
   rust:
     name: native/aes
