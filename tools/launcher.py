@@ -6,7 +6,7 @@ whichever artifact this executable was welded to. One freeze opens every build, 
 re-freezing is only needed when the loader itself changes.
 
 ``tools/`` is build tooling, not shipping source, so it is outside ``MANIFEST.txt``.
-``_harness/sable_launcher.py`` proves the result against a fake payload.
+``tools/probes/sable_launcher.py`` proves the result against a fake payload.
 """
 
 from __future__ import annotations

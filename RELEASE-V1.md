@@ -82,13 +82,13 @@ fused build puts the payload behind `fused/` under a 64 MiB ceiling.
 - Second machine: artifact delivered, opened, decrypted, payload read. A 145,073,950-byte
   sealed archive crossed the LAN in about a second and every one of its 2885 members
   verified.
-- **Disguise, end to end**, `_harness/disguise_check.py`: name taken from the bound file,
+- **Disguise, end to end**, `tools/probes/disguise_check.py`: name taken from the bound file,
   version visible on the property sheet, icon in the shell, 26 payload members, the bound
   file byte-identical afterwards, and the decoy returning in 1.08 s.
 - **Translator, on live data**: a sealed payload opened with the Rust reader, and
   `browsers/thorium/Default/passwords.json` holding plaintext rows. A per-profile
   `_status.json` names what each artifact did and, when it did nothing, why.
-- **App-bound unwrap**, `_harness/abe_check.py`: a real artifact built, its mutex held from
+- **App-bound unwrap**, `tools/probes/abe_check.py`: a real artifact built, its mutex held from
   outside, the task registered as the current user, the artifact re-execing with
   `--abe-unwrap`, the hex key written, reduced to 32 bytes, and the task deleted.
 - **App-bound, on a foreign machine, all three links**: the SYSTEM helper registered
@@ -174,7 +174,7 @@ The frozen launcher is built once and reused by every artifact:
 & $py -m PyInstaller tools/sable-launcher.spec --distpath tools/dist --workpath tools/build --noconfirm
 ```
 
-Output: `tools/dist/sable-launcher.exe`, 37/37 on `_harness/sable_launcher.py`.
+Output: `tools/dist/sable-launcher.exe`, 37/37 on `tools/probes/sable_launcher.py`.
 
 A fresh `git archive` of the tag runs 357 passed and 2 skipped: the two frozen-launcher
 cases skip because `tools/dist` is a build output and is not checked in.

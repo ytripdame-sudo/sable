@@ -14,8 +14,8 @@ The repository is the state; this file is the map.
 | `sable/MANIFEST.txt` | The locked 66 paths, approved order. Authoritative. |
 | `sable/DECISIONS.md` | Every judgement call, with the alternative that lost. Read before disagreeing with the code. |
 | `sable/SIGNATURES.md` | Locked Win32 prototypes. A guess never goes inline — it goes here first. |
-| `sable/native/aes` | The Rust crate. Both formats, byte-compatible, proven by `_harness/rust_interop.py`. Cargo project, outside the manifest like `tools/`. |
-| `C:\Users\Kuzenee\Desktop\55555\_harness\` | Standalone harnesses. Names listed in §7. Not part of the manifest. |
+| `sable/native/aes` | The Rust crate. Both formats, byte-compatible, proven by `tools/probes/rust_interop.py`. Cargo project, outside the manifest like `tools/`. |
+| `sable/tools/probes/` | Standalone harnesses. Names listed in §7. Not part of the manifest. |
 | `C:\Users\Kuzenee\AppData\Local\Temp\opencode\py312\python.exe` | Portable CPython 3.12.10 used for every test run. Has `pycryptodome`, `PySide6-Essentials`, `pytest`, `ruff`, `setuptools`. |
 | `C:\Users\Kuzenee\AppData\Local\Temp\opencode\elev\invoke.py` | Elevated runner. See §6. |
 
@@ -223,7 +223,7 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
   Task, Run value and folder were all removed afterwards.
 - **Native AES pair, both directions, third-party verified.** `native/aes` writes and reads
   both formats the Python tree owns: the WinZip AES-256 archive and the SABL container.
-  `_harness/rust_interop.py` passes **21/21**: a Rust-sealed archive opens in Rust and
+  `tools/probes/rust_interop.py` passes **21/21**: a Rust-sealed archive opens in Rust and
   in 7-Zip (and fails with the wrong key), a Python-sealed archive opens member for
   member in Rust, a Python container opens in Rust, a Rust blob opens in Python, and a
   real artifact forged by `core/forge.py` decrypts to the exact payload the forge
@@ -339,7 +339,7 @@ registry.
 
 ---
 
-## 7. Test harnesses (in `C:\Users\Kuzenee\Desktop\55555\_harness\`)
+## 7. Test harnesses (in `sable/tools/probes/`)
 
 | File | Covers | Result |
 |---|---|---|
@@ -466,9 +466,15 @@ one run, self-remove, or stay and come back on logon or a timer. What is left, i
 1. The native port. `native/aes` is done and agrees in both directions — see §5. What comes
    next is a decision, not code: whether the frozen launcher becomes a Rust binary that
    reads the container and hands the payload to Python, or whether the Rust crate stays a
-   proven reference and the launcher stays PyInstaller. The first removes ~8 MB of runtime
-   from every artifact and makes the reader immune to `pyinstxtractor`; the second keeps one
-   build pipeline. Everything else is ported only after that choice.
+   proven reference and the launcher stays PyInstaller. The measured split is
+   `python312.dll` at 6.62 MB inside a 9.77 MiB launcher, so a Rust launcher that still
+   hands the payload to CPython keeps that interpreter and saves roughly 3-4 MB after
+   one-file compression, not the ~8 MB this
+   item used to claim. Nor does it make the reader unpackable: the payload is sealed by
+   AES-GCM either way, and the seal key sits in the artifact's trailer in plaintext
+   whichever compiler wrote the launcher. The real argument for Rust is detection surface,
+   the PyInstaller bootloader being a known shape that also drops a second `%TEMP%` tree,
+   and that is cheaper to fix directly. Everything else is ported only after that choice.
 2. Smaller items, none blocking: the 426 MB run took 6 minutes against a single-threaded
    local receiver, so the real ceiling is unmeasured; per-source timing is logged but the
    ceiling is not.
@@ -607,7 +613,7 @@ reader does not recognise is still a read. New reasons `wrapper_unknown`, `trunc
 `tracker_only`, and a `harvest` counter per record.
 
 Test gate at the close of this pass: 443 passed, ruff clean. Fixture probe:
-`_harness/roblox_jar_probe.py`, fourteen shapes, seventeen reader checks plus the real jar
+`tools/probes/roblox_jar_probe.py`, fourteen shapes, seventeen reader checks plus the real jar
 on this desk.
 
 

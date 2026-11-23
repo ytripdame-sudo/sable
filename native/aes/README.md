@@ -102,7 +102,7 @@ needed. `flate2` runs on `miniz_oxide`, so the build is pure Rust apart from the
 
 ## Proof
 
-`_harness/rust_interop.py` builds a fixture tree, seals it with both implementations,
+`tools/probes/rust_interop.py` builds a fixture tree, seals it with both implementations,
 opens it with both, tests the result with 7-Zip under the right and wrong keys, and then
 forges a real artifact with `core/forge.py` and reads it back through `sable-aes image`.
 

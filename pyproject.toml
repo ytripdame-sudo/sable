@@ -49,6 +49,10 @@ filterwarnings = ["error::DeprecationWarning:agent.*", "error::DeprecationWarnin
 line-length = 100
 target-version = "py311"
 src = ["."]
+# The probes are evidence, not source. They were written against a live desk and are kept
+# exactly as they ran, so style findings there would only invite rewriting the record.
+# compileall still covers the folder, so a probe that stops parsing is still caught.
+extend-exclude = ["tools/probes"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

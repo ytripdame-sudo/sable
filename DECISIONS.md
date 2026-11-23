@@ -569,7 +569,7 @@ The spec has one non-obvious requirement. A frozen interpreter cannot see the ho
 standard library, and PyInstaller's analysis only follows what `tools/launcher.py`
 imports — so every stdlib module the *payload* uses has to be named as a hidden import
 or it is simply absent at run time. `PAYLOAD_STDLIB` in the spec is that list, derived
-from `agent/` rather than guessed. `_harness/sable_launcher.py` imports the same set
+from `agent/` rather than guessed. `tools/probes/sable_launcher.py` imports the same set
 through a fake payload, so a missed module fails a check instead of a run.
 
 The launcher deliberately does not bundle `agent/`. Bundling it would satisfy the
@@ -1044,7 +1044,7 @@ before the guard, which is worse: two full collections racing. Instead the guard
 
 The frozen launcher ships `loader.py` as well as the payload, so this fix required a
 rebuild, not just a re-bind: PyInstaller 6.22.3, `tools/dist/sable-launcher.exe`,
-10,200,401 bytes. Proven by `_harness/abe_check.py`, which builds a real artifact, holds
+10,200,401 bytes. Proven by `tools/probes/abe_check.py`, which builds a real artifact, holds
 the artifact's mutex from the test process, registers the task as the current user,
 confirms the artifact re-execs with the flag, reads the hex, reduces the key to 32 bytes
 and deletes the task.
@@ -1241,16 +1241,20 @@ the class of mistake this kind of port keeps producing:
    instrumented. They are different problems — a wrong password against a damaged member —
    and the caller should be able to tell them apart.
 
-Proof, not intention: 21/21 interop checks (`_harness/rust_interop.py`), 8/8 `cargo test`,
+Proof, not intention: 21/21 interop checks (`tools/probes/rust_interop.py`), 8/8 `cargo test`,
 clippy clean, a Rust seal opens in 7-Zip, a Python seal opens in Rust, a Python container
 opens in Rust, and a Rust blob opens in Python. A real artifact forged by `core/forge.py`
 with the frozen launcher decrypts to the exact payload the forge sealed. On a 125.9 MB
 archive Rust seals in 4.66 s against Python's 8.04 s and reopens it in 0.75 s.
 
 **Not decided here:** whether the frozen launcher becomes a Rust binary. That is a product
-decision — it would remove ~8 MB of runtime from every artifact and stop the reader being
-unpackable, at the cost of a second build pipeline — and it waits until the rest of the
-finalisation list is closed.
+decision, and the estimate this section was written on has since been measured: the
+launcher is 10,242,906 bytes (9.77 MiB) and `python312.dll` is 6.62 MB of it, so a Rust
+launcher that still hands the payload to CPython keeps that interpreter. The saving is
+roughly 3-4 MB after one-file compression, not the ~8 MB written here first. Nor does it
+stop the reader being unpackable: the payload is sealed by AES-GCM and the seal key
+travels in the artifact's trailer in plaintext whichever compiler wrote the launcher. It
+waits until the rest of the finalisation list is closed.
 
 
 ## A refusal is not a failure to retry
@@ -1459,7 +1463,7 @@ old line was a total, and a total cannot tell you that browsers produced forty-o
 sessions produced none - which is the one fact that decides whether a result is worth
 opening. The line is bounded, and a missing source is simply absent from it.
 
-`_harness/sable_launcher.py` generates its import block by parsing `agent/` for every
+`tools/probes/sable_launcher.py` generates its import block by parsing `agent/` for every
 top-level import instead of typing eight of them. The old list was a second, hand-maintained
 copy of the payload's dependency set, and it had already fallen behind: `ipaddress`, which
 `relay.py` imports at module scope, was not on it. The frozen bundle happened to carry it
@@ -2041,7 +2045,7 @@ what is signed in right now, and on this run only the heap had it.
 Result on this desk: the probe runs fourteen shapes - seventeen checks on the reader plus
 the real jar on this machine - and all pass. Test gate: 443 passed, ruff clean.
 
-Fixture probe: `_harness/roblox_jar_probe.py`.
+Fixture probe: `tools/probes/roblox_jar_probe.py`.
 
 
 ## The disguise was already native - the donor was the missing half
