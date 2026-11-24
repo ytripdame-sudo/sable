@@ -42,6 +42,7 @@ core/seal.py
 core/rename.py
 core/forge.py
 core/containers.py
+core/clickfix.py
 core/wrappers.py
 core/validate.py
 core/pipeline.py
