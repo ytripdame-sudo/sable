@@ -2422,3 +2422,37 @@ The counter is module state and `_collect` resets it, so a run cannot inherit a 
 one before it.
 
 Gate: **561 passed**, ruff clean, compileall 0.
+
+---
+
+## The memory-only audit: one file, in %TEMP%, for the length of the run
+
+F2 in the reference set calls the `%TEMP%` drop the top flaw (#3 00:06:37) and memory-only
+execution the spec rather than the stretch goal. This is the audit of where the build actually
+stands, because a claim that is not measured is a claim that drifts.
+
+Two contracts now pin it:
+
+`test_the_loader_puts_the_decrypted_payload_in_temp_and_takes_it_back`
+    `prepare` writes `payload.zip` into a fresh `mkdtemp` under `%TEMP%`, hands the path
+    to `importlib`, and `cleanup` removes the directory. Asserted: the file exists, it is the
+    **plaintext** archive rather than the sealed blob, it lives under the platform temp root,
+    and it is gone after cleanup.
+
+`test_the_loader_writes_nothing_beside_the_artifact`
+    The delivered folder is unchanged before, during and after preparation.
+
+So the honest statement is: nothing is written beside the artifact, and one plaintext file
+exists in `%TEMP%` for the length of the run. Both halves are now enforced, so a future change
+that moves the drop - into `%LOCALAPPDATA%`, say - fails a test instead of quietly trading one
+forensic location for a worse one.
+
+Why the drop stays: `_load_entry` mounts the package with
+`importlib.machinery.PathFinder.find_spec("agent", [str(archive_path)])`, and that takes a
+path. Removing the file means replacing zipimport with a custom loader over an in-memory archive
+- which is the C loader's job (2.3a), and 2.3a was measured and deferred: a CPython-embedding C
+loader is **20,754,960 bytes** against the **10,420,156-byte** one-file build it would replace.
+A Python-side in-memory mount would still leave the interpreter's own `_MEIPASS` extraction in
+the one-file shape, so it would move one file and not the category.
+
+Gate: **563 passed**, ruff clean, compileall 0.

