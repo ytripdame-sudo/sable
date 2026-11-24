@@ -1,0 +1,29 @@
+; The export table, in the one syntax both linkers read.
+;
+; `Name = Module.Function` is a true forwarder: the toolchain writes the string into the export
+; directory and emits no code, so a caller reaches Microsoft's function directly. GNU ld splits
+; this line on `:`, which is why the target here is a bare module name in the shape every real
+; proxy uses — the portable answer to "resolve out of System32" lives in src/lib.rs instead, and
+; build.rs documents the choice.
+;
+; Exporting `DllMain` would be a one-line difference from the real `version.dll`, which does not
+; export it. It stays out.
+LIBRARY version.dll
+EXPORTS
+    GetFileVersionInfoA
+    GetFileVersionInfoW
+    GetFileVersionInfoByHandle
+    GetFileVersionInfoExA
+    GetFileVersionInfoExW
+    GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeW
+    GetFileVersionInfoSizeExA
+    GetFileVersionInfoSizeExW
+    VerFindFileA
+    VerFindFileW
+    VerInstallFileA
+    VerInstallFileW
+    VerLanguageNameA
+    VerLanguageNameW
+    VerQueryValueA
+    VerQueryValueW

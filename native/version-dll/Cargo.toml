@@ -1,0 +1,22 @@
+[package]
+name = "sable-version"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "A version.dll proxy: every export forwarded to the system copy, and a launcher started on attach"
+publish = false
+
+# No dependencies on purpose. This crate links against kernel32 and nothing else, because a
+# DLL that is loaded into somebody else's process should not drag a runtime in with it.
+
+[lib]
+name = "version"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

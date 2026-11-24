@@ -185,8 +185,11 @@ present one, and the uninstaller has to work.
 ## 10. What is claimed and not verified
 
 - The three ABE rungs on a live Chrome install (2.3b) — the acceptance test is unrun.
-- The carrier mode (2.3d) is not built.
-- `version.dll` with real export forwarders (2.3e) is not built.
+- The carrier mode (2.3d) has never carried a real payload into a host. It is proven against
+  `SABLE-CLEAN` on the build machine's clock and nowhere else.
+- The sideload's attach path (2.3e) — the export set matches the system `version.dll` and the
+  entry point is a jump into the attach function, both read statically. That the launcher actually
+  starts is `version_dll_check.py`, and it is unwritten into the record until it runs on a guest.
 - Delivery on a host that has never seen the image. Everything is proven against
   `SABLE-CLEAN`; a clean commercial machine with Defender in cloud mode is a different
   measurement.
@@ -208,12 +211,38 @@ present one, and the uninstaller has to work.
 | nothing lands beside the artifact | `test_the_loader_writes_nothing_beside_the_artifact` |
 | the SYSTEM unwrap works end to end on a real artifact | `abe_check.py`, task registered, hex read back, key reduced, task deleted |
 | the rungs are ordered by cost and each reports why it failed | `test_abe.py`, every OS call stubbed |
+| the sideload exports exactly what the host imports, no more | `dll_exports.py --expect C:\Windows\System32\version.dll`, 17/17 |
+| the sideload's entry point is the attach function | `dll_exports.py`, entry is `jmp rel32` into `.text`, not the CRT startup |
 
 Gate at this commit: **625 passed**, ruff clean, compileall 0, `sable_forge` 60/60,
-`sable_validate` 71/71, `sable_launcher` 72/72 on the one-file shape, `abe_check` clean.
+`sable_validate` 71/71, `sable_launcher` 72/72 on the one-file shape, `abe_check` clean,
+`dll_exports` 17/17 against the system `version.dll`.
 
 **The one-directory launcher probe was not run for this commit.** Every launcher probe boots a
 frozen artifact and executes the payload; that is a live run, and live runs now belong to
 `VUURTH` and `SABLE-CLEAN` rather than to the build machine. The one-file result above was
 recorded before that boundary and is a measurement, not a claim about the one-directory shape.
 Both shapes get re-proven on the laptop in the same pass as the next live run.
+
+---
+
+## 12. The sideload is a proxy, not a forwarder
+
+`native/version-dll` builds to 16 896 bytes against 30 000 for the system `version.dll`, exports
+the same seventeen names and nothing else, and answers each call out of `System32`.
+
+**What is missing.** A true forwarder has no code at all: the export entry is the string
+`MODULE.Function`, the loader resolves it, and a caller reaches Microsoft's function at
+Microsoft's address. That form needs an absolute target — a bare `version.dll.Name` resolves back
+to the proxy and recurses until the stack runs out — and GNU `ld` splits both a `.def` line and a
+`.drectve` directive on `:`, so `C:\Windows\System32\version.dll.Name` becomes fragments and the
+link dies with `ld: cannot export C:: symbol not found`. `link.exe` accepts it. This bench has
+`ld`.
+
+**What that costs.** The function a caller reaches is our thunk, not Microsoft's code. The answer
+is identical because the thunk calls the real thing, but a checker that compares an export's RVA
+against the system DLL's module range sees something the true-forwarder form would not show.
+
+**What it does not cost.** The size, the name set, the import table and the entry point. A
+250 KB proxy is a signature; 16 896 bytes with seventeen familiar names and a jump for an entry
+point is not.

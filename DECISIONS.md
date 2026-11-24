@@ -2598,3 +2598,98 @@ the key and the rung so the report cannot disagree with the run that produced it
 
 Gate: **625 passed**, ruff clean, compileall 0, `sable_forge` 60/60, `sable_validate` 71/71,
 `sable_launcher` 72/72 on both shapes, `abe_check` clean.
+
+## 2.3e - the sideload is a proxy, and the toolchain decided that
+
+The plan asks for `version.dll` with **real export forwarders**, explicitly not a stub that
+returns success. It gets a proxy: seventeen exports, each one calling Microsoft's implementation
+out of `System32`, and a `DllMain` that starts the launcher beside it.
+
+### Forwarders are not reachable from this toolchain
+
+A forwarder is the cleanest proxy there is. The export entry is a string, `MODULE.Function`; the
+loader resolves it; no code exists. The function a caller reaches *is* the system function, at the
+system function's address, so nothing downstream can tell the difference.
+
+Two things have to be true for it, and only one of them is.
+
+The target has to be absolute. `version.dll.Name` resolves through the same search order that got
+the proxy loaded, which is the proxy, so every call forwards to itself until the stack runs out.
+`C:\Windows\System32\version.dll.Name` is the form that terminates.
+
+And the toolchain has to accept a `:` inside an export definition. `link.exe` does. GNU `ld`
+splits the line — the `.def` parser and the `.drectve` parser both — and the link dies with
+`ld: cannot export C:: symbol not found`, because the fragment before the first colon is now a
+symbol named `C`. Both forms were tried; both fail identically. This bench has `ld` and no MSVC,
+so forwarders are out and the honest artifact is a proxy.
+
+### The proxy that ships
+
+One thunk per name: resolve through `LoadLibraryExW("version.dll", LOAD_LIBRARY_SEARCH_SYSTEM32)`,
+cache the module in a `static`, resolve the function with `GetProcAddress`, call it through
+`extern "system" fn(u64 × 8) -> u64`. x64 has one integer calling convention — four arguments in
+registers, the rest on the stack, integer return in `RAX` — and every one of these seventeen takes
+integers and pointers and returns an integer, so the cast passes arguments and returns
+byte-exactly.
+
+Seventeen prototypes would have been seventeen chances to be wrong, and one wrong prototype is a
+host process crashing inside a function nobody calls. `GetFileVersionInfoByHandle` is not in the
+public SDK at all, so its prototype would have been a guess dressed as documentation.
+
+`version.def` stays in the crate, in true-forwarder shape, for a toolchain that will take it. It is
+documented and not consumed.
+
+### `no_std`, because size is the signature
+
+The first working build with `std` was **252 416 bytes**. The file it is impersonating is
+**30 000**. A proxy dropped beside a host is compared against the DLL it claims to be, and 8× the
+size is the comparison's whole result.
+
+`core` plus raw `kernel32` declarations, `opt-level="z"`, `lto`, `codegen-units=1`,
+`panic="abort"`, `strip`: **16 896 bytes**. What is lost is `format!` and `Path`, which this file
+never needed — a command line is two literals, a directory and a filename, and the directory is
+the last backslash in a buffer Windows already filled.
+
+The panic handler parks the thread instead of aborting. A panic in a DLL has no `main` to return
+to, and `abort` terminates the host process — a crash report with a filename in it, which is the
+one outcome a sideload cannot survive. Nothing here can panic in practice; every slice index is
+bounded by a length read from the same buffer.
+
+### `DllMain` is assembly, and the entry point is named
+
+`windows-gnu` Rust builds the export table from the crate's `#[no_mangle]` items. A `#[no_mangle]
+pub DllMain` therefore becomes an **eighteenth export**, and the real `version.dll` has seventeen.
+An export table one name longer than Microsoft's is a one-line signature.
+
+`--exclude-symbols=DllMain` does not help: it suppresses only symbols the linker *auto*-exports,
+and this one is listed explicitly. Making the function private does not help either — the list is
+built from `#[no_mangle]`, visibility aside.
+
+So `DllMain` is defined in `global_asm!`, after that list exists, and jumps to a private Rust
+function. `ld` sees the symbol, `dllcrt2.o`'s `_DllMainCRTStartup` resolves it, the export
+directory never learns it exists.
+
+That leaves the entry point. By default `ld` picks `_DllMainCRTStartup`, which reaches `DllMain`
+through a **weak** reference — delete `DllMain` entirely and the DLL still links, with the attach
+callback silently never running. That failure mode is invisible until a host loads the file and
+nothing happens, so `build.rs` passes `--entry=DllMain` and the loader lands on the trampoline
+directly. Skipping the CRT startup skips TLS callbacks, `atexit` lists and CRT initialisers; this
+crate is `no_std` with no statics that need either.
+
+`dll_exports.py` reads the entry point out of the image and reports it as
+`entry point rva 0x1360: jmp 0x184F` — a single `jmp rel32` whose target opens with
+`sub rsp, 0x38` and `cmp edx, 1`, which is the attach branch. That is a static read, not an
+assumption.
+
+### Proven, and not
+
+- **Proven**, statically: 17 named exports, name-for-name identical to
+  `C:\Windows\System32\version.dll`, no extras; entry point is a jump into the attach function;
+  artifact 16 896 bytes.
+- **Not proven**: that the launcher starts, that the command line is right, and that the carrier
+  flag reaches it. All three need the DLL loaded into a live process. `version_dll_check.py` and
+  `guest/recorder.rs` are that check — it compiles a launcher that writes down its own argv,
+  loads the DLL, and looks for it. It runs on `VUURTH` or `SABLE-CLEAN`, never here.
+
+Gate: **625 passed**, ruff clean, compileall 0, `sable_forge` 60/60, `sable_validate` 71/71,
+`dll_exports` 17/17 against the system DLL.

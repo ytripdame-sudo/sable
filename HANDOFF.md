@@ -122,6 +122,19 @@ carries the fact that explains it. Proven end to end on this bench: `tools/probe
 registers the task, re-executes the artifact with the flag, reads the hex back, reduces the key
 to 32 bytes and deletes the task.
 
+2.3e ships a `version.dll` that is a proxy, not a forwarder, and the toolchain made that choice:
+GNU `ld` splits both a `.def` line and a `.drectve` directive on `:`, so an absolute forwarder
+target — the only form that terminates, since a bare `version.dll.Name` resolves back to the
+proxy — fails to link. Seventeen thunks call Microsoft's code out of `System32` instead. The
+artifact is 16 896 bytes against 30 000 for the file it impersonates; the `std` build of the same
+code measured 252 416, which is why the crate is `no_std` and reaches `kernel32` directly.
+`DllMain` is `global_asm!` rather than a `#[no_mangle]` item, because the latter becomes an
+eighteenth export, and `--entry=DllMain` is passed explicitly because the CRT startup reaches
+`DllMain` through a weak symbol and would skip it silently. `dll_exports.py --expect` reads the
+export table and the entry point statically: 17/17 names, entry a `jmp rel32` into the attach
+function. The live half — launcher starts, `--carrier` reaches it — is
+`tools/probes/version_dll_check.py` on a guest.
+
 ---
 
 ## 5. What is verified, and how
