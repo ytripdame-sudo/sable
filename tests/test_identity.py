@@ -425,3 +425,104 @@ def test_roblox_enrichment_rides_the_browsers_flag(
     assert identity._enabled(cfg, "roblox") is True
     assert identity._enabled(cfg, "sessions") is False
     assert identity.collect(root, cfg) == 1
+
+# --- the verdict on the row --------------------------------------------------
+
+
+def test_a_live_credential_is_marked_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake(url: str, headers: dict[str, str], deadline: float, **_: Any):
+        if url.endswith("/users/@me"):
+            return reply(document={"id": "1", "username": "bench"})
+        return reply(document=[])
+
+    monkeypatch.setattr(identity, "_request", fake)
+    record = identity._discord_account("t", "brave/Default", 1e9)
+    assert record is not None
+    assert record["status"] == identity.VALID
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_credential_is_marked_dead(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    # 403 is a refusal for Roblox only after the CSRF retry, and Discord has no handshake
+    # at all: the origin is stating that this credential does not work.
+    monkeypatch.setattr(
+        identity, "_request", lambda *a, **k: identity._Reply(status, b"", "", {})
+    )
+    record = identity._discord_account("t", "brave/Default", 1e9)
+    assert record is not None
+    assert record["status"] == identity.DEAD
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(429, ""), (500, ""), (0, "deadline"), (0, "transport"), (200, "")],
+)
+def test_a_check_that_did_not_answer_is_not_a_dead_credential(
+    monkeypatch: pytest.MonkeyPatch, status: int, error: str
+) -> None:
+    """The distinction that keeps this from being worse than no check at all.
+
+    A rate limit, a server fault, a timeout and a 200 whose body changed shape all say
+    nothing about the credential. Calling any of them dead would drop a live cookie from
+    the dump, and the only other copy is on a machine that is not coming back.
+    """
+    body = b"{}" if status == 200 else b""
+    monkeypatch.setattr(
+        identity, "_request", lambda *a, **k: identity._Reply(status, body, error, {})
+    )
+    record = identity._discord_account("t", "brave/Default", 1e9)
+    assert record is not None
+    assert record["status"] == identity.UNKNOWN
+
+
+def test_the_status_sidecar_names_every_row_and_totals_the_verdicts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = workspace(tmp_path, discord=True, roblox=True)
+
+    def fake(url: str, headers: dict[str, str], deadline: float, **_: Any):
+        if url.endswith("/users/@me"):
+            return reply(document={"id": "1", "username": "bench"})
+        if url.endswith("/v1/users/authenticated"):
+            return identity._Reply(401, b"", "", {})
+        return reply(document=[])
+
+    monkeypatch.setattr(identity, "_request", fake)
+
+    assert identity.collect(root, config()) == 1
+    status = json.loads(
+        (root / "accounts" / identity.STATUS_FILE).read_text(encoding="utf-8")
+    )
+
+    assert status["counts"] == {identity.VALID: 1, identity.DEAD: 1, identity.UNKNOWN: 0}
+    rows = {(row["platform"], row["status"]) for row in status["rows"]}
+    assert rows == {("discord", identity.VALID), ("roblox", identity.DEAD)}
+    dead = next(row for row in status["rows"] if row["status"] == identity.DEAD)
+    assert dead["reason"] == "session: unauthorized"
+    alive = next(row for row in status["rows"] if row["status"] == identity.VALID)
+    assert "reason" not in alive
+
+
+def test_only_a_valid_row_counts_as_resolved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = workspace(tmp_path, discord=True)
+    monkeypatch.setattr(
+        identity, "_request", lambda *a, **k: identity._Reply(429, b"", "", {})
+    )
+    # An unknown verdict is not a resolved account, and it is not a dead one either.
+    assert identity.collect(root, config(roblox=False)) == 0
+    status = json.loads(
+        (root / "accounts" / identity.STATUS_FILE).read_text(encoding="utf-8")
+    )
+    assert status["rows"][0]["status"] == identity.UNKNOWN
+    assert status["rows"][0]["reason"] == "user: rate_limited"
+
+
+def test_the_status_file_is_in_the_identity_module_layout() -> None:
+    """A file a module writes has to be a file the layout says it may write."""
+    from agent import layout
+
+    assert identity.STATUS_FILE in layout.MODULE_PREFIXES["identity"]

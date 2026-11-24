@@ -2358,3 +2358,35 @@ blob and belongs to neither.
 
 Gate: **542 passed**, ruff clean, compileall 0, sable_forge 47/47, sable_validate 59/59,
 sable_launcher **57/57** on both shapes.
+
+---
+
+## 3.4 - a dead cookie is a fact, and a rate limit is not one
+
+Tokens were validated live; cookies were not. The failure that produces is specific: a dump
+where some rows are accounts and some rows are strings that look like accounts, with nothing
+on the row saying which. The reference set names it (#6, 00:05:42) and the fix is one field.
+
+Every credential row now carries `status`: `valid`, `dead` or `unknown`.
+
+The third value is the point. `dead` is something only the origin can state - a 401, or a 403
+that survived the CSRF handshake it asked for. A timeout, a 429, a 500 and a 200 whose body
+changed shape are `unknown`, because none of them says anything about the credential. Mapping
+those to `dead` would delete a live cookie from the dump over a rate limit, and the only other
+copy is on a machine that is not coming back. A wrong verdict here is worse than no verdict.
+
+`dead` and `unknown` also stop counting as `resolved`: the counter measures accounts
+identified, and a row that could not be identified is not one.
+
+The verdicts go to `accounts/session_status.json`, a sidecar rather than a field inside
+`identity.json`, because the two files answer different questions. `identity.json` is what
+was learned about an account and has no row at all for a credential that failed;
+`session_status.json` names every row that was tested, its platform, its source, its verdict,
+and - when there is one - the fault label already produced by `_fault`. Counts are totalled
+in the document so a reader does not have to walk the rows to find out how much of the dump was
+alive.
+
+`STATUS_FILE` is registered in `layout.MODULE_PREFIXES["identity"]`; a file a module writes
+that the layout does not know it may write is a file the layout audit reports.
+
+Gate: **553 passed**, ruff clean, compileall 0, `sable_forge` 47/47.
