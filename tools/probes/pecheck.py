@@ -31,12 +31,10 @@ TAG_SIZE = 16
 KEY_BYTES = 32
 KDF_ITERATIONS = 200_000
 
-FOOTER_MAGIC = b"SBLT"
-FOOTER_SIZE = 12
-TRAILER_MAGIC = b"SBLK"
+FOOTER_SIZE = 8
 KEY_SLOT = 64
 MUTEX_SLOT = 200 * 4
-TRAILER_SIZE = len(TRAILER_MAGIC) + KEY_SLOT + MUTEX_SLOT
+TRAILER_SIZE = KEY_SLOT + MUTEX_SLOT
 
 RT_ICON = 3
 RT_GROUP_ICON = 14
@@ -94,22 +92,26 @@ class Container:
 
 
 def container(path: Path) -> Container:
-    """Read footer, trailer and sealed blob out of a finished ``.exe``."""
+    """Read footer, trailer and sealed blob out of a finished ``.exe``.
+
+    Everything is position: the footer is the last eight bytes, the trailer the fixed
+    width before it. Nothing is searched for, so a payload that happens to contain the old
+    markers' bytes cannot confuse the reader — and no artifact carries a marker to find.
+    """
     raw = path.read_bytes()
     footer = raw[-FOOTER_SIZE:]
-    footer_ok = footer[:4] == FOOTER_MAGIC
-    offset = int.from_bytes(footer[4:], "little") if footer_ok else -1
+    footer_ok = len(footer) == FOOTER_SIZE
+    offset = int.from_bytes(footer, "little") if footer_ok else -1
 
     block_at = len(raw) - FOOTER_SIZE - TRAILER_SIZE
     block = raw[block_at:block_at + TRAILER_SIZE] if block_at >= 0 else b""
-    trailer_ok = block[:4] == TRAILER_MAGIC
+    trailer_ok = len(block) == TRAILER_SIZE and b"\x00" in block
 
     key = ""
     mutex = ""
     if trailer_ok:
-        key = block[4:4 + KEY_SLOT].split(b"\x00", 1)[0].decode("utf-8", "replace")
-        start = 4 + KEY_SLOT
-        mutex = block[start:start + MUTEX_SLOT].split(b"\x00", 1)[0].decode("utf-8", "replace")
+        key = block[:KEY_SLOT].split(b"\x00", 1)[0].decode("utf-8", "replace")
+        mutex = block[KEY_SLOT:].split(b"\x00", 1)[0].decode("utf-8", "replace")
 
     sealed = raw[offset:block_at] if footer_ok and offset >= 0 else b""
     return Container(

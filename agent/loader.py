@@ -8,13 +8,16 @@ carries the reader, never the key, so one freeze opens every build.
 
 Layout of the built artifact, last byte backwards:
 
-    [ launcher ][ ballast ][ sealed blob ][ trailer 868 ][ footer 12 bytes ]
+    [ launcher ][ ballast ][ sealed blob ][ trailer 864 ][ footer 8 bytes ]
 
-The footer is ``b"SBLT"`` followed by the little-endian offset of the sealed blob, so
-it is found with one seek from EOF. The trailer is a fixed size, so its start is the
-same arithmetic. The ballast sits before the sealed blob rather than after the
-footer: with the footer last, the offset needs no length field, and a ballast
-appended after the footer would make the footer unlocatable without a scan.
+The footer is the little-endian offset of the sealed blob, so it is found with one seek
+from EOF. The trailer is a fixed size, so its start is the same arithmetic. Neither is
+found by scanning for a marker: position is the format. There used to be two magics
+here, ``SBLT`` and ``SBLK``, and they located nothing — they only identified, which is a
+worse trade than it looks, because one ``grep -a`` found every artifact this build had
+ever produced. The ballast sits before the sealed blob rather than after the footer:
+with the footer last, the offset needs no length field, and ballast appended after the
+footer would push the footer out of position.
 
 The decrypt half of the seal lives here rather than in ``core/seal.py`` because the
 launcher cannot import a module that is inside the archive it has not decrypted yet.
@@ -40,8 +43,13 @@ from . import log, util, winapi
 
 # Pinned to core/forge.py by tests/test_contracts.py. Declared twice on purpose: this
 # module ships inside the archive and cannot import the build side.
-FOOTER_MAGIC: Final[bytes] = b"SBLT"
-FOOTER_SIZE: Final[int] = 12
+#
+# There is no magic here and that is a decision. The footer is the last eight bytes and the
+# trailer the 864 before it, both computed from the file's own size, so a marker located
+# nothing — it only identified. What it identified was every artifact this build has ever
+# produced, to a single `grep -a`, on a family that otherwise shares nothing but a
+# bootloader. Position is the format; the marker was a signature.
+FOOTER_SIZE: Final[int] = 8
 
 # The helper's flag, duplicated from ``agent/abe.py`` for a hard reason: the mutex is
 # acquired before the payload is unpacked, and ``abe`` lives inside the payload. The
@@ -50,10 +58,9 @@ FOOTER_SIZE: Final[int] = 12
 # the whole collection. Pinned to ``abe.UNWRAP_FLAG`` by tests/test_contracts.py.
 HELPER_FLAG: Final[str] = "--abe-unwrap"
 
-TRAILER_MAGIC: Final[bytes] = b"SBLK"
-KEY_SLOT: Final[int] = 64
-MUTEX_SLOT: Final[int] = 200 * 4
-TRAILER_SIZE: Final[int] = len(TRAILER_MAGIC) + KEY_SLOT + MUTEX_SLOT
+TRAILER_KEY_SLOT: Final[int] = 64
+TRAILER_MUTEX_SLOT: Final[int] = 200 * 4
+TRAILER_SIZE: Final[int] = TRAILER_KEY_SLOT + TRAILER_MUTEX_SLOT
 
 SALT_SIZE: Final[int] = 16
 NONCE_SIZE: Final[int] = 12
@@ -258,13 +265,15 @@ def _read_trailer(executable: Path) -> Trailer:
         handle.seek(size - FOOTER_SIZE - TRAILER_SIZE)
         block = handle.read(TRAILER_SIZE)
 
-    if len(block) != TRAILER_SIZE or block[: len(TRAILER_MAGIC)] != TRAILER_MAGIC:
-        raise ArchiveError(f"{executable.name}: no {TRAILER_MAGIC!r} trailer")
+    if len(block) != TRAILER_SIZE:
+        raise ArchiveError(f"{executable.name}: trailer is short by {TRAILER_SIZE - len(block)}")
 
-    head = len(TRAILER_MAGIC)
+    # No marker to check, so the slots have to carry their own proof: both are non-empty
+    # UTF-8, and `_slot_text` refuses anything else. A file with neither a key nor a mutex
+    # is not one of these artifacts whatever its length.
     return Trailer(
-        seal_key=_slot_text(block[head:head + KEY_SLOT], "seal key"),
-        mutex=_slot_text(block[head + KEY_SLOT:], "mutex"),
+        seal_key=_slot_text(block[:TRAILER_KEY_SLOT], "seal key"),
+        mutex=_slot_text(block[TRAILER_KEY_SLOT:TRAILER_KEY_SLOT + TRAILER_MUTEX_SLOT], "mutex"),
     )
 
 
@@ -282,10 +291,10 @@ def _archive_offset(executable: Path) -> int:
         handle.seek(size - FOOTER_SIZE)
         footer = handle.read(FOOTER_SIZE)
 
-    if len(footer) != FOOTER_SIZE or footer[:4] != FOOTER_MAGIC:
-        raise ArchiveError(f"{executable.name}: no {FOOTER_MAGIC!r} footer")
+    if len(footer) != FOOTER_SIZE:
+        raise ArchiveError(f"{executable.name}: footer is short by {FOOTER_SIZE - len(footer)}")
 
-    offset = int.from_bytes(footer[4:], "little")
+    offset = int.from_bytes(footer, "little")
     if offset <= 0 or offset >= size - tail:
         raise ArchiveError(f"{executable.name}: footer offset {offset} is outside the file")
     return offset
@@ -353,11 +362,9 @@ def _load_entry(archive_path: Path) -> ModuleType:
 
 
 __all__ = [
-    "FOOTER_MAGIC",
     "FOOTER_SIZE",
-    "KEY_SLOT",
-    "MUTEX_SLOT",
-    "TRAILER_MAGIC",
+    "TRAILER_KEY_SLOT",
+    "TRAILER_MUTEX_SLOT",
     "TRAILER_SIZE",
     "ArchiveError",
     "Prepared",

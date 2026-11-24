@@ -77,7 +77,7 @@ No emoji in code or UI strings. No compliance commentary in source.
 
 ---
 
-## 4. State — 67 of 67
+## 4. State — 71 of 71
 
 Every path in `MANIFEST.txt` exists, and no `.py` exists under `agent/`, `core/` or
 `app/` that is not listed. Both directions are asserted by

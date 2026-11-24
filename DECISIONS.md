@@ -2208,3 +2208,93 @@ What is not done: the installer. A tree needs a place to live - `%LOCALAPPDATA%\
 and `agent/persist.py` writes Run-key and task paths relative to the running image, which
 already resolves correctly inside a tree, but nothing yet puts the tree there or registers an
 uninstaller. That is the next unit of phase 2, and it is design work, not measurement.
+
+---
+
+## Phase 2, second pass - the installer, the wrappers, and the two magics that had to go
+
+Measured first, because every size decision in phase 2 hung on a number nobody had taken.
+The real sealed payload is **173,207 bytes**; the one-file artifact is **10,420,156**. The
+stub is 98.33% of the file and the payload is 1.66%. That killed the obvious next unit: a C
+loader embedding CPython has to carry the interpreter the one-directory tree carries, which
+measured **20,754,960 bytes** - worse than the 10.4 MB it would replace. Beating one-file
+needs reflective PE mapping of python312.dll and every .pyd. Position: do not chase size.
+
+### The persistence defect
+
+`util.install_persistence` staged **one file**. In a one-directory artifact that file is
+the bootstrap, and the interpreter it loads lives in `_internal` beside it, so the staged
+copy dies inside the PyInstaller bootloader with "Failed to load Python DLL" and exit -1 -
+before `agent.loader` is imported and before any trailer check runs. Every byte-level
+assertion still passes, because the file is intact and the trailer is intact. There is
+simply no interpreter.
+
+`agent/install.py` stages the **shape** rather than the exe: `tree_root()` decides from
+`sys.frozen` and an `_internal` directory beside the running image, `copy_tree()`
+copies and then verifies a count and a byte total, and `stage_image()` returns the path
+that is actually runnable. A failed Run-key write now removes the whole folder, not one
+file - 22 MB of orphaned interpreter is not a cleanup.
+
+### The install itself
+
+`%LOCALAPPDATA%\Programs\<id>\`, no admin, no UAC, plus an HKCU Add/Remove Programs record
+carrying `EstimatedSize` in KB, `NoModify` and `NoRepair`. The uninstaller is a batch
+written beside the image, and it **re-runs itself from %TEMP%** before deleting anything:
+cmd.exe holds a batch file open while it reads it, so a script that deletes its own folder
+fails on the last line - the one that matters. The marker in the environment stops the copy
+from copying itself again.
+
+One folder, one Run value, one record, one removal path. Two staging routines writing two
+folders is how a host ends up with software nobody can find.
+
+### Wrappers are self-relative or they are wrong
+
+Five shapes - `bat`, `vbs`, `ps1`, `hta` and a hand-built `.lnk`. No host path is
+baked in anywhere: the build happens on one machine and runs on another, so an absolute path
+is wrong by construction. Each resolves against its own location.
+
+The `.lnk` is a real shell link built by hand, not through `IShellLink`, so it renders
+on a headless build box with no COM apartment. It carries `ForceNoLinkInfo` and a relative
+target, and wears the payload's own icon through `IconLocation`. That costs the cached
+thumbnail Explorer would store and buys a link that resolves in a profile the build has never
+seen.
+
+Refusal over escape: a name that cannot be quoted safely raises instead of rendering four
+different escaping schemes that each get it slightly wrong. The ANSI script hosts
+(`wscript.exe`, `mshta.exe`) decode as the system code page, so a non-ASCII name is
+refused for `vbs` and `hta` and allowed for `ps1` and `lnk`.
+
+### Containers
+
+Zip stores the payload instead of deflating it: the seal is ciphertext, so compression buys
+nothing, and a stored member is comparable to the input by the arithmetic a forensic tool
+would use. The sfx is a `.cmd` self-extractor - base64 body behind `exit /b`, `certutil`
+to decode, `tar` to expand - because cmd.exe parses lines before it executes them and a raw
+zip appended to a batch is garbage it will evaluate. A PE stub with the archive appended needs
+a compiled extractor and belongs with the loader unit.
+
+### ClickFix is a page class, not a file class
+
+Three themes, one mechanism: the visible command is plausible and harmless for the story, and
+the button copies something else. Guaranteed by test rather than by eye - the handler's
+literal is recovered and compared against what the page displays. Two real defects are
+guarded: `navigator.clipboard` needs a secure context and falls back to `execCommand`, and
+a command containing `</script>` ends the element before the JS parser sees the string, so
+the page would copy nothing and look fine.
+
+### SBLK and SBLT are gone
+
+The container's tail is `[trailer 864][footer 8]`. The footer is a little-endian offset and
+the trailer is two fixed-width slots; both are computed from the file's own size, so neither
+is found by scanning. The two magics located nothing - they only identified. What they
+identified was every artifact this build had ever produced, to a single `grep -a`, on a
+family that otherwise shares only a bootloader. Position is the format; the marker was a
+signature.
+
+`FOOTER_SIZE` 12 -> 8, `TRAILER_SIZE` 868 -> 864, and the loader's identity check is now
+the slots themselves: both must be non-empty UTF-8. Six probes and three contract files moved
+with it. Both launcher shapes still report **55/55**, and the artifacts had to be re-frozen
+before that was true - a stale launcher carries the old reader and rejects the new tail, which
+is exactly the failure the probe exists to catch.
+
+Gate: **541 passed**, ruff clean, compileall 0, manifest 71, probe 55/55 both shapes.

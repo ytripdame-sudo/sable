@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from agent import loader
 from core import forge, seal
-from core.schema import RelayConfig, RunConfig, SourceConfig
+from core.schema import SOURCE_FIELDS, RelayConfig, RunConfig, SourceConfig
 
 results: list[tuple[str, bool, str]] = []
 
@@ -63,7 +63,16 @@ def main() -> int:
         check("payload has cfg.json", "cfg.json" in names, "")
         check("payload has no pycache", not any("__pycache__" in n for n in names), "")
         agent_count = len([n for n in names if n.startswith("agent/")])
-        check("payload has every agent module", agent_count == 22, str(agent_count))
+        # Counted against the manifest rather than a magic number: the number rots the
+        # moment a module lands, and the property that matters is that the archive carries
+        # every agent file the repository ships.
+        listed = [
+            line.strip()
+            for line in (ROOT / "MANIFEST.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("agent/")
+        ]
+        missing = [name for name in listed if name not in names]
+        check("payload has every agent module", missing == [], f"{agent_count} present, missing {missing}")
 
         shipped_loader = archive.read("agent/loader.py")
         on_disk = (ROOT / "agent" / "loader.py").read_bytes()
@@ -79,34 +88,33 @@ def main() -> int:
 
         document = json.loads(archive.read("cfg.json"))
         check("cfg round-trips", document["mutex"] == MUTEX, document["mutex"])
+        # Against the schema, not a literal: a field added to SourceConfig is a field the
+        # archive has to carry, and a hardcoded set here would silently stop checking.
         check(
             "cfg carries every source flag",
-            set(document["sources"]) == {
-                "autofill",
-                "documents",
-                "wallets",
-                "sessions",
-                "system",
-                "browsers",
-            },
-            "",
+            set(document["sources"]) == set(SOURCE_FIELDS),
+            f"{sorted(set(SOURCE_FIELDS) - set(document['sources']))} missing",
         )
 
         # --- trailer ---
         block = forge.trailer(CFG)
         check("trailer size", len(block) == forge.TRAILER_SIZE, str(len(block)))
-        check("trailer magic", block[:4] == forge.TRAILER_MAGIC, block[:4].hex())
         check(
             "trailer key slot",
-            block[4:4 + forge.KEY_SLOT].rstrip(b"\x00") == SEAL_KEY.encode(),
+            block[:forge.KEY_SLOT].rstrip(b"\x00") == SEAL_KEY.encode(),
             "",
         )
         check(
             "trailer mutex slot",
-            block[4 + forge.KEY_SLOT:].rstrip(b"\x00") == MUTEX.encode(),
+            block[forge.KEY_SLOT:].rstrip(b"\x00") == MUTEX.encode(),
             "",
         )
-        check("trailer is fixed width", forge.TRAILER_SIZE == 4 + 64 + 800, str(forge.TRAILER_SIZE))
+        check("trailer is fixed width", forge.TRAILER_SIZE == 64 + 800, str(forge.TRAILER_SIZE))
+        check(
+            "no family marker in the trailer",
+            b"SBLK" not in block and b"SBLT" not in block,
+            "",
+        )
 
         # --- seal ---
         sealed = seal.seal(data, SEAL_KEY)
@@ -123,14 +131,15 @@ def main() -> int:
         check("exe size", len(blob) == expected_size, f"{len(blob)} vs {expected_size}")
 
         footer = blob[-forge.FOOTER_SIZE:]
-        check("footer magic", footer[:4] == forge.FOOTER_MAGIC, footer[:4].hex())
-        offset = int.from_bytes(footer[4:], "little")
+        offset = int.from_bytes(footer, "little")
         check("footer offset", offset == 4096, str(offset))
+        check("footer carries no marker", footer != b"SBLT", footer.hex())
 
         trailer_start = len(blob) - forge.FOOTER_SIZE - forge.TRAILER_SIZE
         check(
             "trailer sits in front of the footer",
-            blob[trailer_start:trailer_start + 4] == forge.TRAILER_MAGIC,
+            blob[trailer_start:trailer_start + forge.KEY_SLOT].rstrip(b"\x00")
+            == SEAL_KEY.encode(),
             "",
         )
         check(

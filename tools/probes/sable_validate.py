@@ -217,7 +217,9 @@ def main() -> int:
         exe = pipeline.run(cfg(), root=ROOT, out_dir=out, mode="exe", stub=stub)
         check("exe produced", exe.artifact.suffix == ".exe" and exe.artifact.is_file())
         blob = exe.artifact.read_bytes()
-        check("exe carries footer", blob[-12:-8] == b"SBLT", blob[-12:].hex())
+        offset = int.from_bytes(blob[-8:], "little")
+        check("exe carries an offset footer", 0 < offset < len(blob), blob[-8:].hex())
+        check("no family marker in the tail", b"SBLT" not in blob[-12:], blob[-12:].hex())
 
         # --- pipeline: validation failure carries every problem --------------------
         try:

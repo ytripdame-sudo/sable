@@ -110,18 +110,16 @@ def test_seal_constants_are_pinned_to_the_loader() -> None:
     assert loader.NONCE_SIZE == seal.NONCE_SIZE
     assert loader.TAG_SIZE == seal.TAG_SIZE
     assert loader.KDF_ITERATIONS == seal.KDF_ITERATIONS
-    assert loader.FOOTER_MAGIC == forge.FOOTER_MAGIC
     assert loader.FOOTER_SIZE == forge.FOOTER_SIZE
-    assert loader.TRAILER_MAGIC == forge.TRAILER_MAGIC
-    assert loader.KEY_SLOT == forge.KEY_SLOT
-    assert loader.MUTEX_SLOT == forge.MUTEX_SLOT
+    assert loader.TRAILER_KEY_SLOT == forge.KEY_SLOT
+    assert loader.TRAILER_MUTEX_SLOT == forge.MUTEX_SLOT
     assert loader.TRAILER_SIZE == forge.TRAILER_SIZE
 
 
 def test_the_key_and_mutex_slots_fit_what_validate_accepts() -> None:
     """A form that passes must always produce a trailer forge can write."""
     assert validate_module.MAX_SEAL_KEY_LENGTH == forge.KEY_SLOT
-    assert validate_module.MAX_MUTEX_LENGTH * 4 <= loader.MUTEX_SLOT
+    assert validate_module.MAX_MUTEX_LENGTH * 4 <= loader.TRAILER_MUTEX_SLOT
 
 
 @needs_crypto
@@ -223,13 +221,13 @@ def test_payload_config_is_readable_by_the_schema_it_ships() -> None:
 def test_trailer_carries_the_key_and_the_mutex_in_fixed_slots() -> None:
     block = forge.trailer(config())
     assert len(block) == forge.TRAILER_SIZE
-    assert block[:4] == forge.TRAILER_MAGIC
+    assert block[:4] != b"SBLK", "the family marker is gone; position is the format"
 
-    key = block[4:4 + forge.KEY_SLOT]
+    key = block[: forge.KEY_SLOT]
     assert key.rstrip(b"\x00") == SEAL_KEY.encode("utf-8")
     assert len(key) == forge.KEY_SLOT
 
-    mutex = block[4 + forge.KEY_SLOT:]
+    mutex = block[forge.KEY_SLOT :]
     assert mutex.rstrip(b"\x00") == MUTEX.encode("utf-8")
     assert len(mutex) == forge.MUTEX_SLOT
 
@@ -257,14 +255,14 @@ def test_exe_container_offset_and_footer(tmp_path: Path, stub: Path) -> None:
     assert raw[: stub.stat().st_size] == stub.read_bytes()
 
     footer = raw[-forge.FOOTER_SIZE:]
-    assert footer[:4] == forge.FOOTER_MAGIC
-    assert int.from_bytes(footer[4:], "little") == stub.stat().st_size
+    assert int.from_bytes(footer, "little") == stub.stat().st_size
+    assert footer != b"SBLT" + bytes(4)
 
     # The trailer sits between the sealed blob and the footer, so the blob ends
-    # exactly where the trailer starts.
+    # exactly where the trailer starts — and the trailer starts with the key, not a magic.
     trailer_start = len(raw) - forge.FOOTER_SIZE - forge.TRAILER_SIZE
-    assert raw[trailer_start:trailer_start + 4] == forge.TRAILER_MAGIC
-    assert raw[trailer_start - len(blob):trailer_start] == blob
+    assert raw[trailer_start : trailer_start + forge.KEY_SLOT].rstrip(b"\x00") == SEAL_KEY.encode()
+    assert raw[trailer_start - len(blob) : trailer_start] == blob
 
 
 @needs_crypto
@@ -437,8 +435,8 @@ def test_a_trailer_that_is_truncated_is_refused(tmp_path: Path, stub: Path) -> N
 @needs_crypto
 def test_an_empty_slot_is_refused_rather_than_silently_blank(tmp_path: Path) -> None:
     path = tmp_path / "blank.exe"
-    block = forge.TRAILER_MAGIC + b"\x00" * (forge.KEY_SLOT + forge.MUTEX_SLOT)
-    path.write_bytes(b"\x00" * 64 + block + forge.FOOTER_MAGIC + (0).to_bytes(8, "little"))
+    block = b"\x00" * (forge.KEY_SLOT + forge.MUTEX_SLOT)
+    path.write_bytes(b"\x00" * 64 + block + (0).to_bytes(8, "little"))
 
     with pytest.raises(loader.ArchiveError):
         loader._read_trailer(path)
@@ -1617,7 +1615,7 @@ def test_an_icon_grows_the_launcher_and_the_footer_follows(tmp_path: Path) -> No
     )
 
     raw = built.read_bytes()
-    offset = int.from_bytes(raw[-forge.FOOTER_SIZE + 4:], "little")
+    offset = int.from_bytes(raw[-forge.FOOTER_SIZE :], "little")
 
     # Ballast is zero, so the footer's offset is the patched stub's size. It is not the
     # launcher's size — measured, Windows rebuilds the resource section and the rebuilt

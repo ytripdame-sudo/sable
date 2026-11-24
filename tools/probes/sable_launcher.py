@@ -308,7 +308,7 @@ def main(argv: list[str]) -> int:
         third_exe = bootable(third)
 
         baseline = forge.expected_offset(launcher_exe.stat().st_size, 0)
-        offset = int.from_bytes(third_exe.read_bytes()[-forge.FOOTER_SIZE + 4:], "little")
+        offset = int.from_bytes(third_exe.read_bytes()[-forge.FOOTER_SIZE:], "little")
         check("icon rewrites the image", offset != baseline, f"{offset} vs {baseline}")
         check(
             "icon is in the resources",

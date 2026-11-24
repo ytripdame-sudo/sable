@@ -136,14 +136,13 @@ def main() -> int:
 
         blob = seal.seal(payload, key_text)
         artifact = work / "python-artifact.exe"
-        trailer = b"SBLK" + key_text.encode().ljust(64, b"\x00") + b"Global\\Interop".ljust(800, b"\x00")
+        trailer = key_text.encode().ljust(64, b"\x00") + b"Global\\Interop".ljust(800, b"\x00")
         body = b"MZ" + bytes(4096)
         offset = len(body)
         artifact.write_bytes(
             body
             + blob
             + trailer
-            + b"SBLT"
             + struct.pack("<Q", offset)
         )
 

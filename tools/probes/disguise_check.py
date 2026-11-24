@@ -120,9 +120,7 @@ def main() -> int:
     # 4. The container still holds: footer offset lands on the sealed blob, and the
     #    launcher's archive is still on the tail.
     raw = artifact.read_bytes()
-    offset = int.from_bytes(raw[-forge.FOOTER_SIZE + 4:], "little")
-    if raw[-forge.FOOTER_SIZE:-forge.FOOTER_SIZE + 4] != forge.FOOTER_MAGIC:
-        failures.append("the footer magic is missing")
+    offset = int.from_bytes(raw[-forge.FOOTER_SIZE:], "little")
     if offset <= 0 or offset >= len(raw):
         failures.append(f"the footer offset {offset} is outside the file")
 

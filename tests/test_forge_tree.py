@@ -77,9 +77,10 @@ def test_dir_mode_grows_the_exe_inside_the_tree(tmp_path: Path) -> None:
 
     raw = exe.read_bytes()
     assert raw[stub_size:stub_size + len(_sealed(cfg))] == _sealed(cfg)
-    assert raw[-forge.FOOTER_SIZE:][:4] == forge.FOOTER_MAGIC
-    assert int.from_bytes(raw[-forge.FOOTER_SIZE + 4:], "little") == forge.expected_offset(stub_size, 0)
-    assert raw[-forge.FOOTER_SIZE - forge.TRAILER_SIZE:][:4] == forge.TRAILER_MAGIC
+    assert int.from_bytes(raw[-forge.FOOTER_SIZE:], "little") == forge.expected_offset(stub_size, 0)
+    trailer = raw[-forge.FOOTER_SIZE - forge.TRAILER_SIZE : -forge.FOOTER_SIZE]
+    assert trailer[: forge.KEY_SLOT].rstrip(b"\x00") == cfg.seal_key.encode()
+    assert b"SBLK" not in raw[-forge.FOOTER_SIZE - forge.TRAILER_SIZE :]
 
 
 def test_the_copied_tree_is_independent_of_the_stub(tmp_path: Path) -> None:

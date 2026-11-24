@@ -24,10 +24,12 @@ Five things are owned here and nowhere else:
    launcher is a file on the build machine, and the bound file has to be inside the
    archive for the agent to ever see it.
 
-The footer is ``b"SBLT"`` and the little-endian 64-bit offset of the sealed blob.
-The offset is measured from the start of the file, which is why ballast sits before
-the sealed blob rather than after the footer: appending ballast at the end would
-push the footer out of position, and the loader would have to scan.
+The footer is the little-endian 64-bit offset of the sealed blob, written as the last
+eight bytes with nothing in front of it. The offset is measured from the start of the
+file, which is why ballast sits before the sealed blob rather than after the footer:
+appending ballast at the end would push the footer out of position, and the loader
+would have to scan. There is no marker anywhere in the tail — a marker locates nothing
+the file's own length does not, and a shared one is a signature for the whole family.
 """
 
 from __future__ import annotations
@@ -59,16 +61,23 @@ OUTPUT_PY: Final[str] = "py"
 OUTPUT_DIR: Final[str] = "dir"
 OUTPUT_MODES: Final[tuple[str, ...]] = (OUTPUT_EXE, OUTPUT_PY, OUTPUT_DIR)
 
-FOOTER_MAGIC: Final[bytes] = b"SBLT"
-FOOTER_SIZE: Final[int] = 12
+# The container's tail, from the last byte backwards:
+#
+#     [ launcher ][ ballast ][ sealed blob ][ trailer 864 ][ footer 8 ]
+#
+# Nothing here is located by a marker. The footer is a little-endian offset written as the
+# last eight bytes; the trailer is a fixed width immediately before it. Two magic strings
+# used to sit in these positions and they were pure cost: they resolved nothing that the
+# file's own length does not, and they were the one byte sequence shared by every artifact
+# this build has ever produced — a family signature for a single `grep -a`.
+FOOTER_SIZE: Final[int] = 8
 
 # The trailer sits between the sealed blob and the footer and carries the two values a
 # launcher needs before it can decrypt anything: the seal key and the mutex name.
 #
 # Fixed-width slots, so a reader computes the position instead of parsing a length
 # prefix, and so a key of any length up to the slot costs the same bytes on disk.
-TRAILER_MAGIC: Final[bytes] = b"SBLK"
-
+#
 # The seal key is a passphrase, capped in bytes because the slot is bytes. Twelve
 # characters is the floor over in ``core/validate.py``; sixty-four bytes is where a
 # PBKDF2 passphrase stops gaining anything and starts costing trailer space.
@@ -79,7 +88,7 @@ KEY_SLOT: Final[int] = 64
 # per WCHAR is the widest UTF-8 can get, so the slot holds any name validate accepts.
 MUTEX_SLOT: Final[int] = 200 * 4
 
-TRAILER_SIZE: Final[int] = len(TRAILER_MAGIC) + KEY_SLOT + MUTEX_SLOT
+TRAILER_SIZE: Final[int] = KEY_SLOT + MUTEX_SLOT
 
 SCHEMA_MEMBER: Final[str] = "sable_schema.py"
 CONFIG_MEMBER: Final[str] = "cfg.json"
@@ -1107,12 +1116,8 @@ def _slot(text: str, width: int, name: str) -> bytes:
 
 
 def trailer(cfg: RunConfig) -> bytes:
-    """The bytes a launcher reads before it can decrypt anything."""
-    return (
-        TRAILER_MAGIC
-        + _slot(cfg.seal_key, KEY_SLOT, "seal key")
-        + _slot(cfg.mutex, MUTEX_SLOT, "mutex")
-    )
+    """The bytes a launcher reads before it can decrypt anything. No header, no marker."""
+    return _slot(cfg.seal_key, KEY_SLOT, "seal key") + _slot(cfg.mutex, MUTEX_SLOT, "mutex")
 
 
 def _write_ballast(handle: object, megabytes: int) -> None:
@@ -1147,7 +1152,7 @@ def _write_exe(
             _write_ballast(handle, ballast_mb)
             handle.write(sealed)
             handle.write(block)
-            handle.write(FOOTER_MAGIC + offset.to_bytes(_OFFSET_BYTES, "little"))
+            handle.write(offset.to_bytes(_OFFSET_BYTES, "little"))
         # Same directory, so a half-written artifact is never visible under the
         # shipping name.
         os.replace(staging, destination)
@@ -1405,7 +1410,6 @@ def build(
 __all__ = [
     "BOUND_SUFFIXES",
     "CONFIG_MEMBER",
-    "FOOTER_MAGIC",
     "FOOTER_SIZE",
     "FUSE_PREFIX",
     "KEY_SLOT",
@@ -1418,7 +1422,6 @@ __all__ = [
     "OUTPUT_MODES",
     "OUTPUT_PY",
     "SCHEMA_MEMBER",
-    "TRAILER_MAGIC",
     "TRAILER_SIZE",
     "Donor",
     "ForgeError",

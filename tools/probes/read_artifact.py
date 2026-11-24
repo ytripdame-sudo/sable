@@ -26,14 +26,12 @@ FOOTER = loader.FOOTER_SIZE
 TRAILER = loader.TRAILER_SIZE
 
 footer = data[-FOOTER:]
-print(f"footer magic   {footer[:4]!r}")
-offset = struct.unpack("<Q", footer[4:])[0]
+offset = struct.unpack("<Q", footer)[0]
 print(f"archive offset {offset}")
 print(f"file size      {len(data)}")
 
 trailer = data[-FOOTER - TRAILER: -FOOTER]
-print(f"trailer magic  {trailer[:4]!r}")
-key = trailer[4:4 + loader.KEY_SLOT].decode("utf-8", "replace")
+key = trailer[:loader.TRAILER_KEY_SLOT].decode("utf-8", "replace").rstrip("\x00")
 print(f"key            {key!r}")
 
 sealed = data[offset: -FOOTER - TRAILER]
