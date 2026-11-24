@@ -131,24 +131,43 @@ appended needs a compiled extractor and ships with the loader.
 
 ---
 
-## 8. ABE rungs are not equal, and the first one needs a live browser
+## 8. ABE is three rungs, and only two of them are shipped
 
-App-bound encryption has three ways in, and each has a precondition and a trace.
+App-bound encryption has three ways in, and each has a precondition, a cost and a trace. The
+order below is the order a run tries them: cheapest first, measured in what the target has to
+give up.
 
-| rung | needs | leaves |
-|---|---|---|
-| hollow a live process | the browser **running**, and a Chromium process that has already unwrapped its key | a crash on the target if the hollow goes wrong, and a process image that no longer matches its file |
-| SYSTEM task | admin-ish execution and a task creation | a **task-creation event** in the log, every run |
-| DPAPI only | nothing beyond the user's profile | nothing at all — and no key, because DPAPI alone does not open the app-bound wrap |
+| rung | needs | leaves | shipped |
+|---|---|---|---|
+| `user` — DPAPI in process | nothing beyond the user's profile | nothing at all | yes |
+| `hollow` — a browser process with its image replaced | the browser installed; code that calls the elevation service from inside it | a crash on the target if the hollow goes wrong, and a process image that no longer matches its file | **no** |
+| `system` — a one-shot scheduled task | the right to register a task | a **task-creation event** in the log, every run | yes |
+
+**`user` is first because it costs nothing.** On Brave there is no app-bound wrap at all, and on
+Chrome before 127 the blob is a plain user DPAPI blob, so the cheapest rung produces the key and
+the run never touches the task scheduler or a browser. A run that reports `app_bound: false` on
+one of those is a bug; a run that reports `path: "system"` is a current Chrome.
+
+**The hollow payload is deliberately not shipped.** It is the one artifact that has to be
+rebuilt whenever the browser's signature check moves, it is the single binary the reference set
+names as "highly detected", and a RunPE that has never been run once on this bench would ship as
+a claim rather than a build. The rung is in the ordering with a defined contract and reports why
+it was skipped, so a payload tested elsewhere drops into a slot that already has tests.
 
 **Each Chromium fork wraps with its own key.** Brave, Edge and Thorium are separate targets
 with separate binaries; a resolver that works on Chrome is a resolver for Chrome.
 
-**Chrome version drift moves the ground under both the hollow and the task path.** The ground
-truth is the binary's own symbols and the version, not a constant in this repo.
+**Chrome version drift moves the ground under the hollow and the task path.** The ground truth is
+the binary's own symbols and the version, not a constant in this repo.
 
-**Not verified here:** which rung produces the key on a live host with Chrome installed. That
-is the acceptance test for 2.3b and it has not been run.
+**What is verified:** the `system` rung end to end on this bench, through a real artifact, with
+the task registered, re-executed, the hex read back, the key reduced to 32 bytes and the task
+deleted — `tools/probes/abe_check.py`. The `user` rung and the ordering are pinned by
+`tests/test_abe.py` with every OS call stubbed.
+
+**Not verified here:** which rung produces the key on a host with a current Chrome installed.
+That needs a live browser and a real `app_bound_encrypted_key`, and it is the one acceptance
+line in 2.3b that this bench cannot run.
 
 ---
 
@@ -187,6 +206,14 @@ present one, and the uninstaller has to work.
 | a dead cookie is told apart from an unreachable check | `session_status.json` contracts, three verdicts |
 | a burst is spaced | pacing contracts, exact sequence with injected randomness |
 | nothing lands beside the artifact | `test_the_loader_writes_nothing_beside_the_artifact` |
+| the SYSTEM unwrap works end to end on a real artifact | `abe_check.py`, task registered, hex read back, key reduced, task deleted |
+| the rungs are ordered by cost and each reports why it failed | `test_abe.py`, every OS call stubbed |
 
-Gate at this commit: **596 passed**, ruff clean, compileall 0, `sable_forge` 60/60,
-`sable_validate` 71/71, `sable_launcher` 72/72 on both shapes.
+Gate at this commit: **625 passed**, ruff clean, compileall 0, `sable_forge` 60/60,
+`sable_validate` 71/71, `sable_launcher` 72/72 on the one-file shape, `abe_check` clean.
+
+**The one-directory launcher probe was not run for this commit.** Every launcher probe boots a
+frozen artifact and executes the payload; that is a live run, and live runs now belong to
+`VUURTH` and `SABLE-CLEAN` rather than to the build machine. The one-file result above was
+recorded before that boundary and is a measurement, not a claim about the one-directory shape.
+Both shapes get re-proven on the laptop in the same pass as the next live run.

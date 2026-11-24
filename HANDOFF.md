@@ -111,11 +111,16 @@ thumbnail is a complete JPEG with its own `FFD9`. The 2.3a C loader stays deferr
 CPython-embedding loader measured 20,754,960 bytes against the 10,420,156-byte one-file build,
 so the interpreter is the whole argument and nothing in the carrier work changes that.
 
-2.3b is next and goes in two rungs, not three. Rung 2 (the SYSTEM task) already exists in
-`agent/abe.py`; rung 1 (hollow a live process) is the only one the reference set treats as the
-real answer and the only one whose acceptance needs a browser driven by hand, so it is proved
-on the host rather than in the loop. Rung 3 is DPAPI-only and yields no app-bound key on its
-own — it is the fallback that reports `abe_path` rather than a route to the key.
+2.3b landed as a dispatcher over three rungs ordered cheapest first: `user`, `hollow`,
+`system`. The plan's own order is deliberately inverted — `user` opens nothing and writes
+nothing, `system` logs a task creation, so a run that can finish in-process must. The `hollow`
+payload is not shipped, with the reason in `DECISIONS.md` and `LIMITS.md` section 8: it is the
+one binary the reference set itself calls highly detected, it needs rebuilding every time the
+browser's check moves, and a RunPE that has never been run once here would be a claim rather
+than a build. `abe_path` travels in the browser profile record, so `app_bound: false` now
+carries the fact that explains it. Proven end to end on this bench: `tools/probes/abe_check.py`
+registers the task, re-executes the artifact with the flag, reads the hex back, reduces the key
+to 32 bytes and deletes the task.
 
 ---
 
@@ -327,6 +332,17 @@ Nothing below is a claim; each line is a test that ran on Windows 11, CPython 3.
 ---
 
 ## 6. Environment
+
+**Execution boundary.** The build machine compiles, runs unit tests, and writes files. It does
+not execute a payload, boot a frozen artifact, register a task, or probe a live browser. Every
+one of those happens on `VUURTH` (ssh `fydral@192.168.1.64`) or inside `SABLE-CLEAN` on it, and
+nowhere else. The distinction matters because most of the probes in `tools/probes/` are live
+runs that happen to be written in Python: a `pytest` run is stubbed and static, a
+`sable_launcher.py` run is not.
+
+What stays on the build machine: `pytest`, `ruff`, `compileall`, `sable_forge.py` and
+`sable_validate.py` (both build into a temporary directory and never start what they build),
+`git`, and the freeze itself.
 
 **Elevated runner.** `SABLE-ELEVATED` is registered with `/rl HIGHEST` and stays.
 Invoke it from an unelevated shell with no UAC prompt:

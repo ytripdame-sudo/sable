@@ -27,8 +27,8 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "sable"))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
 from agent import abe  # noqa: E402
 from core import pipeline  # noqa: E402
@@ -39,7 +39,7 @@ from core.schema import (  # noqa: E402
     SourceConfig,
 )
 
-LAUNCHER = ROOT / "sable" / "tools" / "dist" / "sable-launcher.exe"
+LAUNCHER = ROOT / "tools" / "dist" / "sable-launcher.exe"
 SCHTASKS = Path(os.environ.get("SYSTEMROOT") or r"C:\Windows") / "System32" / "schtasks.exe"
 RESULT_TIMEOUT = 90.0
 MUTEX = r"Global\sable-abe-check"
@@ -101,7 +101,7 @@ def build_artifact(work: Path) -> Path:
         self_remove=False,
         ballast_mb=0,
     )
-    outcome = pipeline.run(cfg, root=ROOT / "sable", out_dir=work, stub=LAUNCHER)
+    outcome = pipeline.run(cfg, root=ROOT, out_dir=work, stub=LAUNCHER)
     return outcome.artifact
 
 
@@ -159,8 +159,6 @@ def main() -> int:
     frozen = getattr(sys, "frozen", None)
     executable = sys.executable
     wanted = secrets.token_bytes(32)
-    workspace = abe._workspace()
-    task = abe._task_name(workspace)
 
     # Hold the artifact's mutex for the whole unwrap. This is the production state: the
     # agent that asks for the key is the process holding the guard. Before the helper
@@ -178,8 +176,10 @@ def main() -> int:
         # process asks for the command line a frozen artifact would build.
         sys.frozen = True  # type: ignore[attr-defined]
         sys.executable = str(artifact)
-        (workspace / abe._SOURCE_NAME).write_bytes(protect(wanted))
-        got = abe.unwrap(protect(wanted))
+        # The rung, not the dispatcher: this probe exists to drive the out-of-process path
+        # end to end on a real artifact, and the dispatcher would stop at the in-process rung
+        # first because ``protect`` wraps with the current user's DPAPI.
+        got, detail = abe._rung_system(protect(wanted))
     finally:
         abe._schtasks = real_schtasks
         if frozen is None:
@@ -190,14 +190,23 @@ def main() -> int:
         _kernel32.CloseHandle(holder)
 
     started = time.monotonic()
-    leftovers = task_state(task)
+    # The task name comes out of the registration the rung itself made, because the rung
+    # allocates its workspace. Reading it off the probe's own ``_workspace()`` would query a
+    # name that was never created and read as a clean teardown that never happened.
+    registered = [
+        arguments[arguments.index("/tn") + 1]
+        for arguments in rewrites
+        if "/create" in arguments and "/tn" in arguments
+    ]
+    leftovers = task_state(registered[-1]) if registered else "absent"
     print(f"  tasks     {len(rewrites)} registered as the current user")
     print(f"  leftover  {leftovers} after {time.monotonic() - started:.1f}s")
+    print(f"  path      {detail}")
     print(f"  key       {'none' if got is None else f'{len(got)} bytes'}")
 
     failures: list[str] = []
     if got is None:
-        failures.append("abe.unwrap returned None; the helper never wrote its result")
+        failures.append(f"the SYSTEM rung produced no key ({detail})")
     elif got != wanted:
         failures.append("the helper returned a key that is not the one it was given")
     if not rewrites:

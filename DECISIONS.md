@@ -2537,3 +2537,64 @@ jpg)` does the same job for the carrier field.
 Gate: **596 passed**, ruff clean, compileall 0, `sable_forge` 60/60, `sable_validate` 71/71,
 `sable_launcher` 72/72 on both shapes. The carrier boot is the accept criterion: the untouched
 freeze, no tail of its own, pointed at a PNG with `--carrier`, and the payload runs.
+
+## 2.3b - three rungs, ordered by what they cost the target
+
+`agent/abe.py` grew a dispatcher. It had one path and no caller-visible answer about which path
+produced the key, which is the one fact the plan asks for (`abe_path`).
+
+### The order is inverted on purpose
+
+The plan lists the rungs hollow, SYSTEM, DPAPI - the order the reference set narrates them in.
+The order a run should try them is what each costs the target:
+
+| rung | gives up |
+|---|---|
+| `user` | nothing. A handle to nothing, a write to nothing. |
+| `hollow` | a spawned browser and a crash risk if the image replacement goes wrong. |
+| `system` | a task-creation event in the log, every run. |
+
+So `RUNGS = (user, hollow, system)`, and a run that can finish in-process never reaches the
+scheduler. On Brave there is no app-bound wrap at all and on Chrome before 127 the blob is a
+plain user DPAPI blob, so the cheapest rung produces the key on a large share of real hosts.
+
+### The hollow payload is not shipped, and that is a decision not a stub
+
+The hollow needs code that resolves its own imports and calls the elevation service from inside
+a process the service will accept. Three things are true of it at once: it is the artifact the
+reference set names as "highly detected by Defender at this point so a new binary would need to
+be created each time" (its own problem 3 of 4); it has to be rebuilt every time the browser's
+signature check moves; and a RunPE has never been run once on this bench, so shipping it would
+be shipping a claim. The rung stays in the ordering with a defined contract, reports
+`skipped: the hollow payload is not shipped`, and a payload tested elsewhere drops into a slot
+that already has tests around the ordering, the record and the teardown.
+
+`LIMITS.md` section 8 carries the same statement in the limits page, where the operator reads it
+before the code.
+
+### The record says how, never what
+
+`abe.json`, beside `state.json` and `session_status.json`, holds the winning rung and one line
+per rung that did not. The key never goes in it: a record that says *how* is intelligence, and a
+record that says *what* is a credential in a text file that survives the run. A test asserts the
+key bytes and the hex form of them are absent from the record.
+
+"None" is no longer one fact. `app_bound: false` on Brave is a browser with no app-bound wrap;
+`app_bound: false` with `path: null` on current Chrome is a scheduled task that policy refused.
+`chromium.Keys` gained `path`, `run_profile` writes it as `keys.path`, and the cache holds both
+the key and the rung so the report cannot disagree with the run that produced it.
+
+### What is proven, and where
+
+- `tests/test_abe.py`, 29 cases: ordering, one rung winning at a time with every Windows call
+  stubbed, the command-line cap refusing before `schtasks` is called, teardown deleting the task
+  and the workspace on the failure path, the record's shape, and the key's absence from it.
+- `tools/probes/abe_check.py`, end to end on a real artifact: task registered, artifact
+  re-executed with the flag, hex read back, key reduced to 32 bytes, task deleted. This is the
+  rung that ships and it runs here.
+- **Not proven:** which rung produces the key on a host with a current Chrome installed. That
+  needs a live browser and a real `app_bound_encrypted_key`; it is the one acceptance line in
+  2.3b that this bench cannot run, and it is stated as such in `LIMITS.md` rather than implied.
+
+Gate: **625 passed**, ruff clean, compileall 0, `sable_forge` 60/60, `sable_validate` 71/71,
+`sable_launcher` 72/72 on both shapes, `abe_check` clean.

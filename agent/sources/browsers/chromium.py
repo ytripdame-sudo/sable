@@ -154,17 +154,25 @@ _WANTED_DOWNLOADS: Final[tuple[str, ...]] = (
 
 
 class Keys(NamedTuple):
-    """The two AES keys a profile can have. Either may be absent."""
+    """The two AES keys a profile can have. Either may be absent.
+
+    ``path`` is ``abe_path`` — which rung produced the app-bound key, or None when none did.
+    It travels with the keys because it is the one fact that turns "app_bound: false" into a
+    diagnosis: the cheap in-process rung failing is a browser version, and the SYSTEM rung
+    failing is a policy that refuses scheduled tasks.
+    """
 
     user: bytes | None
     app_bound: bytes | None
+    path: str | None = None
 
 
 # One unwrap per ``Local State`` per process. The app-bound key is per user, not per
 # profile, and the unwrap is a scheduled-task round trip: without this, twelve
 # profiles mean twelve launches, and a failing unwrap costs its full timeout twelve
-# times over. A None result is cached too, for exactly that reason.
-_APP_BOUND_CACHE: Final[dict[str, bytes | None]] = {}
+# times over. A None result is cached too, for exactly that reason — and the rung is cached
+# beside it, because the caller reports it and asking twice would report the second answer.
+_APP_BOUND_CACHE: Final[dict[str, tuple[bytes | None, str | None]]] = {}
 
 
 # --- key material -------------------------------------------------------------
@@ -206,11 +214,13 @@ def _user_key(crypt: dict[str, Any]) -> bytes | None:
     return key
 
 
-def _app_bound_key(crypt: dict[str, Any], cache_key: str) -> bytes | None:
+def _app_bound_key(crypt: dict[str, Any], cache_key: str) -> tuple[bytes | None, str | None]:
+    """The app-bound key and the rung that produced it, cached together."""
     if cache_key in _APP_BOUND_CACHE:
         return _APP_BOUND_CACHE[cache_key]
 
     key: bytes | None = None
+    path: str | None = None
     if "app_bound_encrypted_key" in crypt:
         text = crypt["app_bound_encrypted_key"]
         if isinstance(text, str):
@@ -218,10 +228,13 @@ def _app_bound_key(crypt: dict[str, Any], cache_key: str) -> bytes | None:
             if raw is not None:
                 blob = abe.strip_prefix(raw, _APP_BOUND_PREFIX)
                 if blob is not None:
-                    key = abe.unwrap(blob)
+                    outcome = abe.unwrap(blob)
+                    if outcome is not None:
+                        key = outcome.key
+                        path = outcome.path
 
-    _APP_BOUND_CACHE[cache_key] = key
-    return key
+    _APP_BOUND_CACHE[cache_key] = (key, path)
+    return key, path
 
 
 def profile_keys(profile: Path) -> Keys:
@@ -239,10 +252,8 @@ def profile_keys(profile: Path) -> Keys:
     if not isinstance(crypt, dict):
         return Keys(user=None, app_bound=None)
 
-    return Keys(
-        user=_user_key(crypt),
-        app_bound=_app_bound_key(crypt, str(state_path)),
-    )
+    app_bound, path = _app_bound_key(crypt, str(state_path))
+    return Keys(user=_user_key(crypt), app_bound=app_bound, path=path)
 
 
 # --- row decryption -----------------------------------------------------------
@@ -843,7 +854,14 @@ def run_profile(profile: Path, target: Path, *, raw: bool = False) -> int:
     written = 0
     status: dict[str, Any] = {
         "profile": profile.name,
-        "keys": {"user": bool(keys.user), "app_bound": bool(keys.app_bound)},
+        "keys": {
+            "user": bool(keys.user),
+            "app_bound": bool(keys.app_bound),
+            # ``abe_path``: which rung produced the app-bound key, or None. True/False alone
+            # cannot tell a Brave profile with no app-bound wrap from a current Chrome whose
+            # SYSTEM task was refused by policy, and those are different findings.
+            "path": keys.path,
+        },
         "artifacts": {},
     }
 
