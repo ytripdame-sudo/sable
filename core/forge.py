@@ -134,6 +134,16 @@ MAX_ICON_BYTES: Final[int] = 4 * 1024 * 1024
 # be ignored on some shells and picked over the original on others.
 _RT_ICON: Final[int] = 3
 _RT_GROUP_ICON: Final[int] = 14
+
+# A per-build resource that carries no meaning at all, on purpose. Every artifact from one
+# freeze shares the entire image head — sections, headers, the bootloader's own bytes — so
+# file hashes differ (ballast is random) while structural clustering does not care. A random
+# blob in the resource section changes the section data and the header checksum per build,
+# which is the cheap equivalent of the recompile-per-build the reference set uses for the
+# same reason.
+_RT_RCDATA: Final[int] = 10
+_NONCE_ID: Final[int] = 1
+NONCE_BYTES: Final[int] = 32
 _ICON_FIRST_ID: Final[int] = 1
 _GROUP_ID: Final[int] = 1
 
@@ -835,6 +845,7 @@ def patch_resources(
     *,
     icons: list[IconEntry] | None = None,
     version: bytes | None = None,
+    nonce: bytes | None = None,
 ) -> bytes:
     """The stub's image with its resources replaced and its overlay put back.
 
@@ -845,10 +856,12 @@ def patch_resources(
     Windows-only, and the DLL is loaded inside the function so this module still imports
     on a machine without ``kernel32``. The Linux import test is a real test.
     """
-    if icons is None and version is None:
+    if icons is None and version is None and nonce is None:
         raise ForgeError("nothing to patch")
     if icons is not None and not icons:
         raise ForgeError("icon carries no images")
+    if nonce is not None and len(nonce) < 8:
+        raise ForgeError(f"nonce is {len(nonce)} bytes; too short to be random")
     if os.name != "nt":
         raise ForgeError("resource replacement needs Windows")
 
@@ -957,6 +970,8 @@ def patch_resources(
             put(_RT_GROUP_ICON, group_id, group_payload(icons), icon_language)
         if version is not None:
             put(_RT_VERSION, _VERSION_ID, version, version_language)
+        if nonce is not None:
+            put(_RT_RCDATA, _NONCE_ID, nonce, 0)
 
         # Discard on failure: a half-written resource table is not an image worth
         # keeping, and the staging file is thrown away either way.
@@ -988,6 +1003,8 @@ def patch_resources(
             raise ForgeError(f"{stub}: group icons are {sorted(drawn)}, wanted [{group_id}]")
     if version is not None and not any(ref.kind == _RT_VERSION for ref in after):
         raise ForgeError(f"{stub}: the version block did not settle")
+    if nonce is not None and not any(ref.kind == _RT_RCDATA for ref in after):
+        raise ForgeError(f"{stub}: the per-build nonce did not settle")
 
     return settled + overlay
 
@@ -1004,16 +1021,18 @@ def _patched_stub(
     icons: list[IconEntry] | None = None,
     version: VersionConfig | None = None,
 ) -> Iterator[Path]:
-    """A staging copy of the launcher carrying the build's resources."""
-    blob = version_blob(version) if version is not None else b""
-    if icons is None and not blob:
-        yield stub
-        return
+    """A staging copy of the launcher carrying the build's resources.
 
+    The per-build nonce is unconditional. It exists so two artifacts from one freeze do not
+    share a section-data image, and a build that skipped the patch would be the one artifact
+    worth clustering — so there is no path that yields the frozen launcher unpatched.
+    """
+    blob = version_blob(version) if version is not None else b""
     patched = patch_resources(
         stub,
         icons=icons,
         version=blob or None,
+        nonce=os.urandom(NONCE_BYTES),
     )
     handle, name = tempfile.mkstemp(prefix="sable-stub-", suffix=".exe")
     os.close(handle)

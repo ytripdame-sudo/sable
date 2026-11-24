@@ -24,6 +24,36 @@ def check(label: str, ok: bool, detail: str = "") -> None:
     results.append((label, ok, detail))
 
 
+def _pe_stub() -> bytes:
+    """The smallest image ``BeginUpdateResource`` accepts, so a build can stamp into it.
+
+    Duplicated from ``tests/support.py`` on purpose: a probe is run against an installed
+    tree and cannot import the test package. Kept short rather than clever.
+    """
+    import struct
+
+    import struct
+
+    dos = bytearray(0x80)
+    dos[0:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, 0x80)
+    coff = struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 0xF0, 0x22)
+    optional = bytearray(0xF0)
+    struct.pack_into("<H", optional, 0, 0x20B)
+    struct.pack_into("<I", optional, 16, 0x1000)
+    struct.pack_into("<I", optional, 20, 0x1000)
+    struct.pack_into("<I", optional, 32, 0x1000)
+    struct.pack_into("<I", optional, 36, 0x200)
+    struct.pack_into("<I", optional, 56, 0x2000)
+    struct.pack_into("<I", optional, 60, 0x200)
+    struct.pack_into("<I", optional, 108, 16)
+    section = struct.pack(
+        "<8sIIIIIIHHI", b".text", 0x200, 0x1000, 0x200, 0x200, 0, 0, 0, 0, 0x60000020
+    )
+    head = bytes(dos) + b"PE\x00\x00" + coff + bytes(optional) + section
+    return head.ljust(0x200, b"\x00") + b"\xcc" * 0x200
+
+
 MUTEX = "Global\\SABLE_TEST_MUTEX_9f2c"
 SEAL_KEY = "k-3f9a-test-key"
 CFG = RunConfig(
@@ -121,19 +151,30 @@ def main() -> int:
         check("sealed size", len(sealed) == seal.sealed_size(len(data)), str(len(sealed)))
 
         # --- exe container ---
+        # A resource-patchable image, not random bytes: every build stamps a per-build nonce
+        # into the stub's resources, so a stub that is not a PE is refused before the
+        # container arithmetic is ever reached.
         stub = work / "stub.bin"
-        stub.write_bytes(os.urandom(4096))
+        stub.write_bytes(_pe_stub())
         exe = work / "artifact.exe"
         forge.build(CFG, sealed, exe, mode="exe", stub=stub)
 
         blob = exe.read_bytes()
-        expected_size = 4096 + len(sealed) + forge.TRAILER_SIZE + forge.FOOTER_SIZE
-        check("exe size", len(blob) == expected_size, f"{len(blob)} vs {expected_size}")
-
-        footer = blob[-forge.FOOTER_SIZE:]
-        offset = int.from_bytes(footer, "little")
-        check("footer offset", offset == 4096, str(offset))
-        check("footer carries no marker", footer != b"SBLT", footer.hex())
+        offset = int.from_bytes(blob[-forge.FOOTER_SIZE:], "little")
+        prefix = blob[:offset]
+        check(
+            "exe size",
+            len(blob) == offset + len(sealed) + forge.TRAILER_SIZE + forge.FOOTER_SIZE,
+            f"{len(blob)} at offset {offset}",
+        )
+        check("footer offset", forge.image_end(prefix) == offset, str(offset))
+        check("footer carries no marker", blob[-forge.FOOTER_SIZE:] != b"SBLT", blob[-forge.FOOTER_SIZE:].hex())
+        check("stub was re-stamped", offset != stub.stat().st_size, f"{offset} vs {stub.stat().st_size}")
+        check(
+            "per-build nonce is in the resources",
+            forge._RT_RCDATA in {ref.kind for ref in forge.resource_refs(prefix)},
+            "",
+        )
 
         trailer_start = len(blob) - forge.FOOTER_SIZE - forge.TRAILER_SIZE
         check(
@@ -153,7 +194,7 @@ def main() -> int:
         check("loader reads the mutex", header.mutex == MUTEX, header.mutex)
 
         read_offset = loader._archive_offset(exe)
-        check("loader reads the offset", read_offset == 4096, str(read_offset))
+        check("loader reads the offset", read_offset == offset, str(read_offset))
 
         recovered = loader._open_sealed(loader._read_sealed(exe, read_offset), header.seal_key)
         check("loader opens the forge seal", recovered == data, f"{len(recovered)} bytes")
@@ -203,11 +244,15 @@ def main() -> int:
         padded_exe = work / "padded.exe"
         forge.build(padded, sealed, padded_exe, mode="exe", stub=stub)
         padded_offset = loader._archive_offset(padded_exe)
-        check("ballast offset", padded_offset == 4096 + 2 * 1024 * 1024, str(padded_offset))
+        check(
+            "ballast offset",
+            padded_offset == offset + 2 * 1024 * 1024,
+            f"{padded_offset} vs {offset} + 2 MiB",
+        )
         check(
             "ballast size",
             padded_exe.stat().st_size
-            == 4096 + 2 * 1024 * 1024 + len(sealed) + forge.TRAILER_SIZE + forge.FOOTER_SIZE,
+            == padded_offset + len(sealed) + forge.TRAILER_SIZE + forge.FOOTER_SIZE,
             str(padded_exe.stat().st_size),
         )
         check(

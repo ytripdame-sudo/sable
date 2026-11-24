@@ -7,9 +7,11 @@ PyInstaller bootloader with "Failed to load Python DLL" before ``agent.loader`` 
 imported. So ``forge.build(mode="dir")`` copies the tree and grows the exe that is already
 in it, rather than writing a new file next to the launcher.
 
-These tests use a synthetic tree — a few bytes under an ``.exe`` name — because the
-property under test is the layout, not the boot. Booting is proved end to end by
-``tools/probes/sable_launcher.py <tree>``, which reports 55/55 for both shapes.
+These tests use a synthetic tree — a resource-patchable PE image under an ``.exe`` name and
+two files in ``_internal`` — because the property under test is the layout, not the boot.
+The image is not bootable; ``tests/support.py`` says why it has to be a real PE anyway.
+Booting is proved end to end by ``tools/probes/sable_launcher.py <tree>``, which reports
+55/55 for both shapes.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import pytest
 
 from core import forge
 from core.schema import RelayConfig, RunConfig, SourceConfig
+from tests.support import pe_stub
 
 
 def _config(key: str = "k-dir-test-01", ballast: int = 0) -> RunConfig:
@@ -34,10 +37,10 @@ def _config(key: str = "k-dir-test-01", ballast: int = 0) -> RunConfig:
     )
 
 
-def _tree(root: Path, *, exes: tuple[str, ...] = ("launcher.exe",), payload: bytes = b"MZ" + bytes(2048)) -> Path:
+def _tree(root: Path, *, exes: tuple[str, ...] = ("launcher.exe",)) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     for name in exes:
-        (root / name).write_bytes(payload)
+        (root / name).write_bytes(pe_stub())
     internal = root / "_internal"
     internal.mkdir(parents=True, exist_ok=True)
     (internal / "python312.dll").write_bytes(b"MZ" + bytes(512))
@@ -72,12 +75,19 @@ def test_dir_mode_grows_the_exe_inside_the_tree(tmp_path: Path) -> None:
     forge.build(cfg, _sealed(cfg), out, mode=forge.OUTPUT_DIR, stub=stub)
 
     exe = out / "launcher.exe"
-    grew = exe.stat().st_size - stub_size
-    assert grew == len(_sealed(cfg)) + forge.TRAILER_SIZE + forge.FOOTER_SIZE
-
     raw = exe.read_bytes()
-    assert raw[stub_size:stub_size + len(_sealed(cfg))] == _sealed(cfg)
-    assert int.from_bytes(raw[-forge.FOOTER_SIZE:], "little") == forge.expected_offset(stub_size, 0)
+    offset = int.from_bytes(raw[-forge.FOOTER_SIZE :], "little")
+
+    # The exe inside the tree is patched before it is welded, so the growth is the nonce
+    # resource plus the blob plus the tail. What is asserted is the container's own
+    # arithmetic: the offset lands where the image ends, and the blob is exactly there.
+    assert offset > stub_size, "the nonce resource did not land"
+    assert forge.image_end(raw[:offset]) == offset
+    assert raw[offset : offset + len(_sealed(cfg))] == _sealed(cfg)
+    assert (
+        len(raw) == offset + len(_sealed(cfg)) + forge.TRAILER_SIZE + forge.FOOTER_SIZE
+    )
+
     trailer = raw[-forge.FOOTER_SIZE - forge.TRAILER_SIZE : -forge.FOOTER_SIZE]
     assert trailer[: forge.KEY_SLOT].rstrip(b"\x00") == cfg.seal_key.encode()
     assert b"SBLK" not in raw[-forge.FOOTER_SIZE - forge.TRAILER_SIZE :]

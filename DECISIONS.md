@@ -2298,3 +2298,63 @@ before that was true - a stale launcher carries the old reader and rejects the n
 is exactly the failure the probe exists to catch.
 
 Gate: **541 passed**, ruff clean, compileall 0, manifest 71, probe 55/55 both shapes.
+
+---
+
+## The per-build nonce, and the fixtures it broke
+
+Every artifact from one freeze carried the same image head: same bootloader, same sections,
+same headers. The hashes differed - the ballast is random - and a hash is not what structural
+clustering reads. It reads the head, and two artifacts with an identical head are one cluster
+whatever their length.
+
+So orge.patch_resources now takes a 
+once and _patched_stub stamps
+os.urandom(32) into RT_RCDATA id 1 on **every** build. The patch is unconditional, which
+is the point: a build that skipped it would be the one artifact worth clustering. The cost is
+one BeginUpdateResource cycle that was already happening for icon and version builds, and it
+also changes the header checksum, which is the cheap equivalent of the recompile-per-build the
+reference set does for the same reason.
+
+The tail is untouched. Two builds from one freeze now differ in the bytes before the sealed
+blob and agree byte for byte after it - which is exactly the property 	est_two_builds_from_one_freeze_do_not_share_a_section_image asserts.
+
+### What it broke, and why that was the useful part
+
+Ten tests failed and every one of them for the same reason: they passed a stub that was not a
+PE. os.urandom(4096) was honest while _patched_stub had an early return that yielded the
+stub untouched when there were no icons and no version block - nothing downstream parsed the
+image. Removing that path means every build runs a resource update, and
+BeginUpdateResource refuses a file that is not an executable image.
+
+Two ways to fix it. An escape hatch - a 
+once=False parameter, or "skip the patch when the
+stub is not a PE" - would have created the one unpatched build path the feature exists to
+remove, and it would have hidden a real hole: orge.build accepted a non-PE stub and wrote an
+artifact no loader could ever read.
+
+So the fixtures got a real image instead. 	ests/support.py builds the smallest PE Windows
+will accept as a resource target - DOS header, PE\0\0, one COFF section header, a PE32+
+optional header, 512 bytes of int3 - and BeginUpdateResource accepts it, measured, growing
+the file from 1024 to 1536 bytes. Copying the 10 MB launcher per test case would also have
+worked and would have cost a 10 MB write per test.
+
+Four assertions also had to change, and they were asserting the wrong thing: offset ==
+stub.stat().st_size was true only while the stub was copied verbatim. The property that
+matters is the container's own arithmetic - the footer offset is where the image ends, and the
+sealed blob starts there. orge.expected_offset(stub.stat().st_size, ...) in the ballast test
+now takes the image length the build actually measured, which is the number the build has and
+the test can derive: offset - ballast.
+
+### Probes
+
+Three probes had the same fake stub and one had the same "the artifact starts with the
+launcher" assertion. sable_forge.py and sable_validate.py each carry their own copy of the
+minimal-PE writer - a probe runs against an installed tree and cannot import the test package -
+and sable_launcher.py now checks that both artifacts came from one freeze, that each was
+re-stamped, and that the launcher's own overlay survived the rewrite. That last one is
+image_end(prefix) <= offset rather than ==, because ballast sits between the image and the
+blob and belongs to neither.
+
+Gate: **542 passed**, ruff clean, compileall 0, sable_forge 47/47, sable_validate 59/59,
+sable_launcher **57/57** on both shapes.

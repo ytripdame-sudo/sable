@@ -283,9 +283,27 @@ def main(argv: list[str]) -> int:
         first_exe = bootable(first)
         second_exe = bootable(second)
 
+        # Both came from one freeze, and neither carries that freeze's image verbatim: each
+        # build stamps its own nonce resource. The check is that the difference is confined
+        # to the image and the tail is where it should be, not that the launcher is copied.
+        first_raw = first_exe.read_bytes()
+        second_raw = second_exe.read_bytes()
+        first_offset = int.from_bytes(first_raw[-forge.FOOTER_SIZE:], "little")
+        second_offset = int.from_bytes(second_raw[-forge.FOOTER_SIZE:], "little")
         check(
-            "both artifacts use the same launcher",
-            first_exe.read_bytes()[: launcher_exe.stat().st_size] == launcher_exe.read_bytes(),
+            "both artifacts come from one freeze",
+            first_offset > 0 and second_offset > 0 and first_raw[:2] == b"MZ" and second_raw[:2] == b"MZ",
+            f"{first_offset} / {second_offset}",
+        )
+        check(
+            "each build is re-stamped",
+            first_raw[:first_offset] != second_raw[:second_offset],
+            "two artifacts from one freeze share an image head",
+        )
+        check(
+            "the launcher's own overlay survived",
+            forge.image_end(first_raw[:first_offset]) <= first_offset
+            and forge.image_end(second_raw[:second_offset]) <= second_offset,
             "",
         )
         check("ballast changes the size", second_exe.stat().st_size > first_exe.stat().st_size, "")

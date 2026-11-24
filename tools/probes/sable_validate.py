@@ -17,6 +17,35 @@ from core.schema import RelayConfig, RunConfig, SourceConfig
 results: list[tuple[str, bool, str]] = []
 
 
+def _pe_stub() -> bytes:
+    """The smallest image `BeginUpdateResource` accepts.
+
+    Every build stamps a per-build nonce resource into the stub, so a stub that is not a PE
+    is refused before any container arithmetic runs. Duplicated from `tests/support.py`
+    because a probe cannot import the test package.
+    """
+    import struct
+
+    dos = bytearray(0x80)
+    dos[0:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, 0x80)
+    coff = struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 0xF0, 0x22)
+    optional = bytearray(0xF0)
+    struct.pack_into("<H", optional, 0, 0x20B)
+    struct.pack_into("<I", optional, 16, 0x1000)
+    struct.pack_into("<I", optional, 20, 0x1000)
+    struct.pack_into("<I", optional, 32, 0x1000)
+    struct.pack_into("<I", optional, 36, 0x200)
+    struct.pack_into("<I", optional, 56, 0x2000)
+    struct.pack_into("<I", optional, 60, 0x200)
+    struct.pack_into("<I", optional, 108, 16)
+    section = struct.pack(
+        "<8sIIIIIIHHI", b".text", 0x200, 0x1000, 0x200, 0x200, 0, 0, 0, 0, 0x60000020
+    )
+    head = bytes(dos) + b"PE\x00\x00" + coff + bytes(optional) + section
+    return head.ljust(0x200, b"\x00") + b"\xcc" * 0x200
+
+
 def check(label: str, ok: bool, detail: str = "") -> None:
     results.append((label, ok, str(detail)))
 
@@ -120,7 +149,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="sable-pipe-") as scratch:
         work = Path(scratch)
         stub = work / "stub.bin"
-        stub.write_bytes(os.urandom(4096))
+        stub.write_bytes(_pe_stub())
         empty_stub = work / "empty.bin"
         empty_stub.write_bytes(b"")
 
@@ -172,7 +201,7 @@ def main() -> int:
         out = Path(scratch) / "out"
         events: list[pipeline.Event] = []
         stub = Path(scratch) / "stub.bin"
-        stub.write_bytes(os.urandom(4096))
+        stub.write_bytes(_pe_stub())
 
         outcome = pipeline.run(
             cfg(),
