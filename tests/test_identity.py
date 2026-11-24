@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -526,3 +527,69 @@ def test_the_status_file_is_in_the_identity_module_layout() -> None:
     from agent import layout
 
     assert identity.STATUS_FILE in layout.MODULE_PREFIXES["identity"]
+
+# --- pacing, from the module that spends the calls ---------------------------
+
+
+def test_the_request_path_spaces_a_burst(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pacing lives inside ``_request`` so no call site can forget it.
+
+    The counter is module state, so the test drives it directly: three calls on a fresh
+    counter, and the waits have to be zero, then two positives.
+    """
+    waits: list[float] = []
+
+    def fake_urlopen(*_: Any, **__: Any):
+        raise identity.urllib.error.URLError("offline")
+
+    monkeypatch.setattr(identity.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(identity, "_sleep", waits.append)
+    monkeypatch.setattr(identity, "_calls", 0)
+
+    for _ in range(3):
+        reply_value = identity._request("https://example.invalid/x", {}, time.monotonic() + 5)
+        assert reply_value.error == "unreachable"
+
+    assert len(waits) == 2, "the first call must not wait"
+    assert all(wait > 0 for wait in waits)
+
+
+def test_pacing_never_spends_a_deadline_it_cannot_keep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wait longer than what is left is not taken.
+
+    And skipping the wait does not mean skipping the request: the socket is still touched,
+    because a call made with no room to wait is a call that may still answer in time.
+    """
+    waits: list[float] = []
+    touched: list[int] = []
+
+    def fake_urlopen(*_: Any, **__: Any):
+        touched.append(1)
+        raise identity.urllib.error.URLError("offline")
+
+    monkeypatch.setattr(identity.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(identity, "_sleep", waits.append)
+    monkeypatch.setattr(identity, "_calls", 40)
+
+    reply_value = identity._request("https://example.invalid/x", {}, time.monotonic() + 0.01)
+    assert waits == [], "an unkeepable wait must not be spent"
+    assert touched == [1], "the request still goes out"
+    assert reply_value.error == "unreachable"
+
+
+def test_a_burst_is_counted_from_zero_each_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A run that inherited a counter from a previous one would open with a wait."""
+    root = workspace(tmp_path, discord=True)
+    seen: list[int] = []
+
+    def fake(url: str, headers: dict[str, str], deadline: float, **_: Any):
+        seen.append(identity._calls)
+        return reply(document={"id": "1", "username": "bench"})
+
+    monkeypatch.setattr(identity, "_request", fake)
+    monkeypatch.setattr(identity, "_calls", 99)
+
+    identity.collect(root, config(roblox=False))
+    assert seen[0] == 0

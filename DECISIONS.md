@@ -2390,3 +2390,35 @@ alive.
 that the layout does not know it may write is a file the layout audit reports.
 
 Gate: **553 passed**, ruff clean, compileall 0, `sable_forge` 47/47.
+
+---
+
+## Request pacing is a chokepoint, not a habit
+
+Both references attribute detection to volume rather than to the technique (#3 00:06:43, #4
+00:05:12). A machine that touches eight endpoints in four hundred milliseconds is not a
+browser, whatever its user agent says.
+
+`util.paced_delay` returns the wait before request `index` of a burst: zero for the first,
+then linear growth to a 1.5 s ceiling, jittered by a **fraction** of the wait rather than a
+fixed number of seconds - a fixed jitter would dominate a 0.35 s base and vanish inside a 1.5 s
+one. Linear rather than exponential because these requests have not failed; exponential is for a
+retry after a server has already said "later". It is pure and injectable, so the contracts
+assert the exact sequence without sleeping.
+
+The call site is `identity._request` and it is the only one, deliberately. There are four
+wrappers and a CSRF retry above it, and a rule that has to be repeated five times is a rule that
+gets missed once - and the one that gets missed is the retry, which is the second request in a
+row against one host.
+
+Two details that are easy to get wrong and are asserted:
+
+- pacing is spent **inside** the deadline, not on top of it, and a wait longer than the time
+  remaining is not taken at all
+- skipping the wait does not skip the request: a call with no room to wait is still a call that
+  may answer in time
+
+The counter is module state and `_collect` resets it, so a run cannot inherit a wait from the
+one before it.
+
+Gate: **561 passed**, ruff clean, compileall 0.

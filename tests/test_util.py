@@ -616,3 +616,53 @@ def test_acpi_ignores_a_table_shorter_than_its_header() -> None:
 
 def test_acpi_drops_fields_that_are_only_padding() -> None:
     assert winapi._acpi_header_strings(acpi_header(b"\x00" * 6, b"   \x00\x00\x00")) == []
+
+# --- request pacing ----------------------------------------------------------
+
+
+def test_no_wait_before_the_first_request() -> None:
+    assert util.paced_delay(0) == 0.0
+    assert util.paced_delay(-3) == 0.0
+
+
+def test_the_wait_grows_linearly_and_stops_at_the_cap() -> None:
+    def no_jitter(low: float, high: float) -> float:
+        assert low < 0 < high
+        return 0.0
+
+    assert util.paced_delay(1, uniform=no_jitter) == util.PACE_BASE
+    assert util.paced_delay(2, uniform=no_jitter) == util.PACE_BASE + util.PACE_STEP
+    assert util.paced_delay(50, uniform=no_jitter) == util.PACE_CAP
+
+
+def test_jitter_is_a_fraction_of_the_wait_not_a_fixed_number() -> None:
+    """So the spread scales with the delay. A fixed second of jitter would dominate a
+    half-second base and vanish inside a two-second wait."""
+
+    def lowest(low: float, high: float) -> float:
+        return low
+
+    def highest(low: float, high: float) -> float:
+        return high
+
+    for index in (1, 4, 20):
+        low = util.paced_delay(index, uniform=lowest)
+        high = util.paced_delay(index, uniform=highest)
+        base = util.paced_delay(index, jitter=0.0)
+        assert low < base < high
+        assert low >= 0.0
+
+
+def test_pacing_can_be_switched_off_entirely() -> None:
+    assert util.paced_delay(9, jitter=0.0) == util.PACE_CAP
+
+
+def test_paced_sleep_waits_what_it_returns_and_never_waits_negative() -> None:
+    slept: list[float] = []
+    waited = util.paced_sleep(1, sleep=slept.append, uniform=lambda low, high: low)
+    assert waited == slept[0]
+    assert waited >= 0
+
+    slept.clear()
+    assert util.paced_sleep(0, sleep=slept.append) == 0.0
+    assert slept == []

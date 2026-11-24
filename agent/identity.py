@@ -64,6 +64,15 @@ _USER_AGENT: Final[str] = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
+# One counter for the whole module, reset by ``_collect``. Pacing lives inside ``_request``
+# rather than at each call site because the call sites are four wrappers and a retry path:
+# a rule that has to be repeated five times is a rule that gets missed once, and the one that
+# gets missed is the CSRF retry, which is the second request in a row against one host.
+_calls: int = 0
+
+# Injected in tests, which are not allowed to sleep on purpose. Production uses the real one.
+_sleep: Any = time.sleep
+
 _DISCORD_API: Final[str] = "https://discord.com/api/v9"
 _ROBLOX_USERS: Final[str] = "https://users.roblox.com"
 _ROBLOX_PREMIUM: Final[str] = "https://premiumfeatures.roblox.com"
@@ -107,6 +116,18 @@ def _request(
     key.
     """
     remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return _Reply(0, b"", "deadline", {})
+
+    # Pacing is inside the budget, not on top of it: a wait that would run past the
+    # deadline is not spent, because the call it was making room for would be refused
+    # anyway.
+    global _calls
+    wait = util.paced_delay(_calls)
+    _calls += 1
+    if wait > 0 and wait < remaining:
+        _sleep(wait)
+        remaining -= wait
     if remaining <= 0:
         return _Reply(0, b"", "deadline", {})
 
@@ -507,6 +528,11 @@ def _collect(root: Path, cfg: Any) -> int:
     discord_records: list[dict[str, Any]] = []
     roblox_records: list[dict[str, Any]] = []
     resolved = 0
+
+    # One burst per run, so the pacing counter starts from zero here rather than from
+    # whatever a previous run left behind.
+    global _calls
+    _calls = 0
 
     for token, label in discord_tokens:
         record = _discord_account(token, label, deadline)
