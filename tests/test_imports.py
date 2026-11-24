@@ -35,9 +35,9 @@ def manifest_paths() -> list[str]:
     return [line.strip() for line in MANIFEST.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def test_manifest_exists_and_is_locked_at_sixty_nine() -> None:
+def test_manifest_exists_and_is_locked_at_seventy() -> None:
     assert MANIFEST.is_file(), "MANIFEST.txt is the spec; it cannot be missing"
-    assert len(manifest_paths()) == 69
+    assert len(manifest_paths()) == 70
 
 
 def test_every_listed_path_exists() -> None:
