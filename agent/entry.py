@@ -549,7 +549,9 @@ def main(argv: list[str] | None = None) -> int:
                 # image back every 15 minutes until the queue is empty, then removes
                 # itself; the image stays on disk only while something is waiting.
                 parked = util.park_archive(shipped)
-                if parked is not None and util.schedule_retry(util.executable_path()):
+                if parked is not None and util.schedule_retry(
+                    util.executable_path(), loader.carrier_args()
+                ):
                     where = "parked | retrying every 15 min"
                 elif parked is not None:
                     where = f"parked {parked.name} | no task"

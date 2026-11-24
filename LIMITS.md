@@ -85,7 +85,42 @@ verify that the right command was pasted.
 
 ---
 
-## 6. The self-extractor is a `.cmd`, not a PE
+## 6. A carrier image is transport, not a launcher
+
+`png` and `jpg` output weld the same tail past the image's own terminator: the footer is
+still the last eight bytes, the trailer the 864 before it, and the offset comes from the
+head's length. Nothing about the arithmetic changes. What changes is that **an image cannot
+be started** — so this is not a delivery shape, it is a transport. It only works when a
+launcher is *already* on the machine, and that launcher is pointed at the file with
+`--carrier`.
+
+The reference set agrees, and it is the reason the mode exists: the loader is described as
+"just a binary which is loading and executing shell code from an image file", with the note
+that once the image is deleted after the shell code has come out of it, there is nothing left
+to point at.
+
+**Cost — the container is no longer the picture.** Any tool that compares a file's size to
+its own terminator sees the tail immediately. `carrier_size` refuses to build on a file that
+already has one for exactly this reason, so a build of a build cannot happen; but the output
+is a picture whose byte length no longer matches its `IEND` chunk. That is only invisible to
+a viewer, not to a scanner.
+
+**Cost — carrier validation is structural, not decodability.** The walk proves the format
+terminates where the file ends. It does not prove a decoder will render the head, and it
+costs one full read of the file to walk (ceiling 64 MiB). A carrier that is a renamed
+executable is refused because the signature is what is dispatched on, never the extension.
+
+**Cost — the carrier's own size is not free steganography.** Ballast still applies and still
+moves the offset, but every byte of ballast is a byte of file that grows visibly. A picture
+that arrives at 20 MB and leaves at 20.2 MB is a size that changed.
+
+**Cost — deletion is conditional.** `cleanup` removes the carrier only when
+`util.pending_queue()` is empty. A parked archive brings the same image back on a task and
+needs the container it was pointed at, so a failed delivery leaves the picture on disk.
+
+---
+
+## 7. The self-extractor is a `.cmd`, not a PE
 
 `sfx_bundle` emits a batch self-extractor: base64 body behind `exit /b`, `certutil` to decode,
 `tar` to expand. It needs no external tooling and it works.
@@ -96,7 +131,7 @@ appended needs a compiled extractor and ships with the loader.
 
 ---
 
-## 7. ABE rungs are not equal, and the first one needs a live browser
+## 8. ABE rungs are not equal, and the first one needs a live browser
 
 App-bound encryption has three ways in, and each has a precondition and a trace.
 
@@ -117,7 +152,7 @@ is the acceptance test for 2.3b and it has not been run.
 
 ---
 
-## 8. Persistence is per-user and visible in one place
+## 9. Persistence is per-user and visible in one place
 
 The installer writes `%LOCALAPPDATA%\Programs\<id>\`, one `Run` value, and one HKCU
 Add/Remove Programs record with `EstimatedSize`. No admin, no UAC, no service.
@@ -128,7 +163,7 @@ present one, and the uninstaller has to work.
 
 ---
 
-## 9. What is claimed and not verified
+## 10. What is claimed and not verified
 
 - The three ABE rungs on a live Chrome install (2.3b) — the acceptance test is unrun.
 - The carrier mode (2.3d) is not built.
@@ -139,16 +174,19 @@ present one, and the uninstaller has to work.
 
 ---
 
-## 10. What is verified, and how
+## 11. What is verified, and how
 
 | claim | proof |
 |---|---|
-| the container survives a rebuild | `sable_launcher.py` **57/57**, both shapes |
+| the container survives a rebuild | `sable_launcher.py` **72/72**, both shapes |
+| a picture opens a payload on a launcher that carries nothing | `sable_launcher.py` carrier boot, `--carrier` on the bare freeze |
+| the carrier arithmetic is the exe arithmetic | `test_carrier.py`, same `expected_offset`, footer, trailer and decrypt |
+| a thumbnail is not mistaken for the end of a JPEG | `test_carrier.py`, nested `APP1` fixture |
 | the payload that comes out is the payload that went in | container contracts, byte identity |
 | two builds from one freeze differ | nonce contract, plus the probe's re-stamp check |
 | a dead cookie is told apart from an unreachable check | `session_status.json` contracts, three verdicts |
 | a burst is spaced | pacing contracts, exact sequence with injected randomness |
 | nothing lands beside the artifact | `test_the_loader_writes_nothing_beside_the_artifact` |
 
-Gate at this commit: **563 passed**, ruff clean, compileall 0, `sable_forge` 47/47,
-`sable_validate` 59/59, `sable_launcher` 57/57 on both shapes.
+Gate at this commit: **596 passed**, ruff clean, compileall 0, `sable_forge` 60/60,
+`sable_validate` 71/71, `sable_launcher` 72/72 on both shapes.

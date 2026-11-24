@@ -2243,7 +2243,7 @@ def test_the_helper_is_not_treated_as_a_second_instance(monkeypatch: pytest.Monk
     # The whole app-bound key depends on this. The running agent holds the mutex; the
     # helper re-execs the same image and would be refused as a duplicate before it read
     # its flag, which reads as "brave has no passwords" rather than "the unwrap died".
-    monkeypatch.setattr(loader, "acquire", lambda *args: False)
+    monkeypatch.setattr(loader, "acquire", lambda *args, **kwargs: False)
 
     assert loader._guarded(["agent.exe", loader.HELPER_FLAG, "C:/temp/s1"]) is True
     assert loader._guarded(["agent.exe"]) is False

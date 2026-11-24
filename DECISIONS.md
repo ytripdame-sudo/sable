@@ -2456,3 +2456,84 @@ A Python-side in-memory mount would still leave the interpreter's own `_MEIPASS`
 the one-file shape, so it would move one file and not the category.
 
 Gate: **563 passed**, ruff clean, compileall 0.
+
+## Carrier mode - a picture is a transport, and 2.3b was the wrong next unit
+
+The plan had 2.3d as carrier mode and 2.3b as ABE rungs, and the hook-up order said wrappers
+before the loader. 2.3b went second on the page and nowhere else: its acceptance criterion is
+a **live Chrome on `SABLE-CLEAN`**, and a browser that has to be driven by hand cannot be
+driven in a session where nobody is at the keyboard. A unit whose proof needs an operator is a
+unit that stalls the loop. 2.3d's proof is arithmetic, so it went first.
+
+### What the mode actually is
+
+The tail is unchanged. `[head][ballast][sealed][trailer 864][footer 8]`, offset computed from
+the head's own length, footer the last eight bytes. The head is a PNG or a JPEG instead of a
+launcher. That is the entire difference, and it is why the loader needed a flag and not a
+second code path: `prepare(container)` names a different file and everything below the first
+line is the same arithmetic.
+
+**An image cannot be started.** So this is not a delivery shape in the sense the nine others
+are - it does not get clicked. It is a transport for a launcher that is already on the
+machine, pointed at the file with `--carrier`. The reference set says the same thing in its own
+words ("just a binary which is loading and executing shell code from an image file", and at
+00:03:50 the note that once the image is deleted after the shell code came out of it there is
+nothing left). Building it as a shape would have meant a stub and a size argument we already
+lost.
+
+### The JPEG end is walked, not searched
+
+A phone photograph carries a thumbnail in `APP1`, and that thumbnail is a complete JPEG with
+its own `FFD9`. "The last end-of-image marker in the file" is therefore right by luck and
+wrong the first time anything is appended to a file that has one. `_jpeg_end` follows the
+format: length-prefixed segments, standalone markers with no length, entropy-coded data where
+`FF00` is a stuffed byte and `FFD0`-`FFD7` are restarts, then the real `FFD9`. The fixture in
+`tests/support.py` is built to contain both a nested photo and a stuffed byte so the walk's
+every branch is exercised.
+
+PNG is simpler: chunks are `length,type,body,crc` and `IEND` ends it. The length is read out of
+the file, so it is checked before it is added to a cursor - an overstated length is a refused
+read, not a seek past the end.
+
+### Validation is structural, not decodability
+
+`carrier_size` proves the image terminates where the file ends and refuses anything that
+already has a tail: *that is already a container, not a carrier*. It does not prove a decoder
+will render the head, and it does not try. The 64 MiB ceiling is there because the walk reads
+the whole file.
+
+`validate._check_carrier` reads only the signature and the last four bytes. That is a second,
+cheaper opinion on the same question, and it exists so a bad carrier is an operator-fixable
+problem on the form rather than a build that dies at the write stage. Both opinions are
+pinned by tests, and the PNG tail is compared against the full `AE 42 60 82` IEND CRC rather
+than the two-byte `IEND` type.
+
+### Deletion is conditional on there being nothing left to deliver
+
+`cleanup` removes the carrier only when `util.pending_queue()` is empty. A parked archive
+brings the same image back on a task and needs the container it was pointed at; deleting on
+every exit would leave the retry pointing at nothing and turn a recoverable failure into a
+permanent one. The mode's whole point - an image that is gone leaves nothing to analyse - only
+holds once the delivery actually finished.
+
+### What the flag cost
+
+Three callers re-execute the image from a fresh command line and none of them inherits argv:
+the retry task, the SYSTEM helper, and the operator. So `--carrier` had to be threaded through
+`util.schedule_retry`, `abe._command_line` and `loader.carrier_args`, each of which is a place
+where a missing fragment looks like "there is no payload" rather than "the flag was dropped".
+`schedule_retry` gained an `args` parameter and quotes its way into the task action; the ABE
+helper's length check is what catches an overflow, and a helper that cannot be described is an
+unavailable key rather than a broken run.
+
+### RESOURCE_MODES, because the note was lying
+
+`validate` emitted "ignored: a script has no icon slot" for **every** non-exe mode, and `dir`
+is a launcher tree whose exe takes the same icon and version patch as `exe` does. The note was
+telling the operator a setting was ignored while the build quietly applied it. Three notes now
+key off `RESOURCE_MODES = (exe, dir)` instead of `mode != exe`, and `CARRIER_MODES = (png,
+jpg)` does the same job for the carrier field.
+
+Gate: **596 passed**, ruff clean, compileall 0, `sable_forge` 60/60, `sable_validate` 71/71,
+`sable_launcher` 72/72 on both shapes. The carrier boot is the accept criterion: the untouched
+freeze, no tail of its own, pointed at a PNG with `--carrier`, and the payload runs.

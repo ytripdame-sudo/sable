@@ -46,6 +46,29 @@ def _pe_stub() -> bytes:
     return head.ljust(0x200, b"\x00") + b"\xcc" * 0x200
 
 
+def _png_stub() -> bytes:
+    """A real, decodable 4x4 PNG. Duplicated from ``tests/support.py``: a probe cannot
+    import the test package."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (
+            len(body).to_bytes(4, "big")
+            + kind
+            + body
+            + zlib.crc32(kind + body).to_bytes(4, "big")
+        )
+
+    raw = b"".join(b"\x00" + b"\x40\x80\xc0" * 4 for _ in range(4))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+
+
 def check(label: str, ok: bool, detail: str = "") -> None:
     results.append((label, ok, str(detail)))
 
@@ -177,6 +200,73 @@ def main() -> int:
         check(
             "matching name passes",
             not validate.blocking(validate.validate(cfg(), mode="py", name="report.py")),
+        )
+
+        # --- carrier ---
+        #
+        # The check reads the file's own terminator rather than trusting its name, because a
+        # build of a build is a file whose size no longer matches its image.
+        carrier = work / "shot.png"
+        carrier.write_bytes(_png_stub())
+        carried = work / "already.png"
+        carried.write_bytes(_png_stub() + b"\x00" * 64)
+        exe_as_png = work / "fake.png"
+        exe_as_png.write_bytes(_pe_stub())
+
+        check(
+            "an image mode without a carrier blocks",
+            "output" in rules(validate.validate(cfg(), mode="png")),
+        )
+        check(
+            "an image mode with a carrier passes",
+            not validate.blocking(validate.validate(cfg(), mode="png", carrier=carrier)),
+        )
+        check(
+            "missing carrier file blocks",
+            "output" in rules(validate.validate(cfg(), mode="png", carrier=work / "nope.png")),
+        )
+        check(
+            "a carrier with a tail blocks",
+            "output" in rules(validate.validate(cfg(), mode="png", carrier=carried)),
+        )
+        check(
+            "an executable named .png blocks",
+            "output" in rules(validate.validate(cfg(), mode="png", carrier=exe_as_png)),
+        )
+        check(
+            "a carrier on a script mode is a note",
+            not validate.blocking(validate.validate(cfg(), mode="py", carrier=carrier)),
+        )
+        check(
+            "a bare image name is a note",
+            not validate.blocking(validate.validate(cfg(), mode="png", name="shot", carrier=carrier)),
+        )
+        check(
+            "a wrong image suffix blocks",
+            "output" in rules(
+                validate.validate(cfg(), mode="png", name="shot.jpg", carrier=carrier)
+            ),
+        )
+
+        # ``dir`` is a launcher tree, so its exe takes icon and version patches. The note
+        # used to fire here too, telling the operator a setting was ignored while the build
+        # applied it.
+        icon = work / "a.ico"
+        icon.write_bytes(bytes.fromhex("000001000100") + b"\x00" * 32)
+        for mode in ("py", "png", "jpg"):
+            check(
+                f"icon is ignored for {mode}",
+                any(
+                    "has no resource table" in problem.message
+                    for problem in validate.validate(cfg(), mode=mode, icon=icon, carrier=carrier)
+                ),
+            )
+        check(
+            "icon applies to dir",
+            not any(
+                "has no resource table" in problem.message
+                for problem in validate.validate(cfg(), mode="dir", icon=icon, stub=stub)
+            ),
         )
 
     # --- never raises ---------------------------------------------------------

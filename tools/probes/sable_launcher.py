@@ -165,14 +165,40 @@ def ico_file(target: Path) -> Path:
     return target
 
 
-def boot_once(artifact: Path, marker: Path, label: str) -> None:
+def png_file(target: Path) -> Path:
+    """A real, decodable 4x4 PNG: the head of a carrier container.
+
+    Duplicated from ``tests/support.py`` for the same reason the PE stub is: a probe runs
+    against an installed tree and cannot import the test package.
+    """
+    import zlib
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (
+            len(body).to_bytes(4, "big")
+            + kind
+            + body
+            + zlib.crc32(kind + body).to_bytes(4, "big")
+        )
+
+    raw = b"".join(b"\x00" + b"\x40\x80\xc0" * 4 for _ in range(4))
+    target.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+    return target
+
+
+def boot_once(artifact: Path, marker: Path, label: str, args: tuple[str, ...] = ()) -> None:
     environment = dict(os.environ)
     environment["SABLE_PROOF_MARKER"] = str(marker)
 
     started = time.monotonic()
     try:
         completed = subprocess.run(
-            [str(artifact)],
+            [str(artifact), *args],
             env=environment,
             capture_output=True,
             timeout=120,
@@ -345,6 +371,58 @@ def main(argv: list[str]) -> int:
             )
 
         boot_once(third_exe, work / "three.json", "third")
+
+        # Fourth: an image container opened by a launcher that carries nothing of its own.
+        #
+        # A picture cannot be started, so this is not a launcher shape — it is a transport.
+        # The launcher is the untouched freeze and it is pointed at the file with
+        # ``--carrier``; the only way the payload can run is out of the image, which is what
+        # makes this the mode's accept criterion rather than a variation on the first three.
+        carrier_cfg = config("k-proof-four-5a2e", "Global\\SABLE_PROOF_FOUR")
+        image = png_file(work / "delivered.png")
+        image_size = image.stat().st_size
+        shipped = work / "delivered-container.png"
+        forge.build(
+            carrier_cfg,
+            seal.seal(forge.payload(root, carrier_cfg), carrier_cfg.seal_key),
+            shipped,
+            mode=forge.OUTPUT_PNG,
+            carrier=image,
+        )
+        check(
+            "the container is still a picture",
+            forge.carrier_end(shipped.read_bytes()) == image_size,
+            f"{image_size} B of image, {shipped.stat().st_size - image_size} B of tail",
+        )
+
+        boot_once(
+            launcher_exe,
+            work / "four.json",
+            "carrier",
+            (loader.CARRIER_FLAG, str(shipped)),
+        )
+        check("the carrier is removed after the run", not shipped.exists(), str(shipped))
+
+        # Second run: the container is gone, so there is nothing to open. The launcher has no
+        # tail on its own image and must refuse rather than read somebody else's bytes.
+        retry_environment = dict(os.environ)
+        retry_environment["SABLE_PROOF_MARKER"] = str(work / "four-again.json")
+        try:
+            again = subprocess.run(
+                [str(launcher_exe), loader.CARRIER_FLAG, str(shipped)],
+                env=retry_environment,
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            check("a removed carrier is refused", False, "timed out")
+        else:
+            check(
+                "a removed carrier is refused",
+                again.returncode != 0,
+                f"rc={again.returncode}",
+            )
 
         # The mutex is real: a second copy launched while the first still runs exits 0
         # without a marker of its own. Proven by exit code only, since both share it.

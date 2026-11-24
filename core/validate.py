@@ -28,13 +28,19 @@ from urllib.parse import urlsplit
 
 from .forge import (
     BOUND_SUFFIXES,
+    CARRIER_MODES,
     KEY_SLOT,
+    MAX_CARRIER_BYTES,
     MAX_FUSE_BYTES,
     MAX_ICON_BYTES,
     MUTEX_SLOT,
+    OUTPUT_DIR,
     OUTPUT_EXE,
+    OUTPUT_JPG,
     OUTPUT_MODES,
+    OUTPUT_PNG,
     OUTPUT_PY,
+    RESOURCE_MODES,
     ForgeError,
     version_parts,
 )
@@ -79,7 +85,13 @@ _TELEGRAM_TOKEN: Final[re.Pattern[str]] = re.compile(r"^\d+:[A-Za-z0-9_-]{20,}$"
 _PHANTOM_REPO: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 _PHANTOM_TOKEN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_]{20,}$")
 
-_EXTENSIONS: Final[dict[str, str]] = {OUTPUT_EXE: ".exe", OUTPUT_PY: ".py"}
+_EXTENSIONS: Final[dict[str, str]] = {
+    OUTPUT_EXE: ".exe",
+    OUTPUT_PY: ".py",
+    OUTPUT_DIR: "",
+    OUTPUT_PNG: ".png",
+    OUTPUT_JPG: ".jpg",
+}
 
 RULE_MUTEX: Final[str] = "mutex"
 RULE_SEAL_KEY: Final[str] = "seal_key"
@@ -368,7 +380,7 @@ def _check_name(name: str, mode: str) -> list[Problem]:
         problems.append(_problem(RULE_OUTPUT, "output.name", str(exc)))
         return problems
 
-    if suffix.lower() != expected:
+    if expected and suffix.lower() != expected:
         problems.append(
             _problem(RULE_OUTPUT, "output.name", f"{mode} output must end {expected}")
         )
@@ -442,8 +454,8 @@ def _check_icon(icon: Path | None, mode: str) -> list[Problem]:
     if 6 + count * 16 > size:
         return [_problem(RULE_OUTPUT, "output.icon", f"{icon.name}: directory runs past it")]
 
-    if mode != OUTPUT_EXE:
-        return [_note(RULE_OUTPUT, "output.icon", "ignored: a script has no icon slot")]
+    if mode not in RESOURCE_MODES:
+        return [_note(RULE_OUTPUT, "output.icon", f"ignored: {mode} output has no resource table")]
     return []
 
 
@@ -468,8 +480,79 @@ def _check_donor(donor: Path | None, mode: str) -> list[Problem]:
     if head != b"MZ":
         return [_problem(RULE_OUTPUT, "output.donor", f"{donor.name}: not a Windows executable")]
 
-    if mode != OUTPUT_EXE:
-        return [_note(RULE_OUTPUT, "output.donor", "ignored: a script has no resources")]
+    if mode not in RESOURCE_MODES:
+        return [_note(RULE_OUTPUT, "output.donor", f"ignored: {mode} output has no resource table")]
+    return []
+
+
+def _check_carrier(carrier: Path | None, mode: str) -> list[Problem]:
+    """The image the tail is welded onto.
+
+    Only the signature and the last four bytes of structure are read here — enough to tell
+    a PNG from a JPEG from a renamed executable — and the full walk lives in ``forge``, the
+    same split the icon header uses. A carrier already carrying a tail is refused here
+    rather than at the write stage, because that is a file the operator can replace.
+    """
+    if carrier is None:
+        if mode in CARRIER_MODES:
+            return [
+                _problem(RULE_OUTPUT, "output.carrier", f"{mode} output needs a carrier image")
+            ]
+        return []
+
+    if not carrier.is_file():
+        return [_problem(RULE_OUTPUT, "output.carrier", f"{carrier}: not a file")]
+
+    try:
+        size = carrier.stat().st_size
+    except OSError as exc:
+        return [_problem(RULE_OUTPUT, "output.carrier", f"{carrier}: cannot stat ({exc.strerror})")]
+    if size <= 0:
+        return [_problem(RULE_OUTPUT, "output.carrier", f"{carrier.name}: is empty")]
+    if size > MAX_CARRIER_BYTES:
+        return [
+            _problem(
+                RULE_OUTPUT,
+                "output.carrier",
+                f"{size} bytes, the ceiling is {MAX_CARRIER_BYTES}",
+            )
+        ]
+
+    try:
+        with carrier.open("rb") as handle:
+            head = handle.read(8)
+            handle.seek(max(0, size - 4))
+            tail = handle.read(4)
+    except OSError as exc:
+        return [_problem(RULE_OUTPUT, "output.carrier", f"{carrier}: cannot read ({exc.strerror})")]
+
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        # A PNG ends with the IEND chunk, whose CRC is the constant AE 42 60 82. Four bytes
+        # are cheaper than the walk and catch the case that matters: something appended.
+        if tail != b"\xae\x42\x60\x82":
+            return [
+                _problem(
+                    RULE_OUTPUT,
+                    "output.carrier",
+                    f"{carrier.name}: PNG does not end at its IEND chunk",
+                )
+            ]
+    elif head.startswith(b"\xff\xd8"):
+        if tail[-2:] != b"\xff\xd9":
+            return [
+                _problem(
+                    RULE_OUTPUT,
+                    "output.carrier",
+                    f"{carrier.name}: JPEG does not end at its end-of-image marker",
+                )
+            ]
+    else:
+        return [
+            _problem(RULE_OUTPUT, "output.carrier", f"{carrier.name}: not a PNG or a JPEG")
+        ]
+
+    if mode not in CARRIER_MODES:
+        return [_note(RULE_OUTPUT, "output.carrier", f"ignored: {mode} output takes a launcher")]
     return []
 
 
@@ -557,9 +640,9 @@ def _check_version(version: VersionConfig, mode: str) -> list[Problem]:
             version.file_version,
             version.product_version,
         )
-    ) and mode != OUTPUT_EXE:
+    ) and mode not in RESOURCE_MODES:
         problems.append(
-            _note(RULE_OUTPUT, "output.version", "ignored: a script has no resources")
+            _note(RULE_OUTPUT, "output.version", f"ignored: {mode} output has no resource table")
         )
     return problems
 
@@ -615,6 +698,7 @@ def validate(
     icon: Path | None = None,
     fuse: Path | None = None,
     donor: Path | None = None,
+    carrier: Path | None = None,
 ) -> list[Problem]:
     """Every rule, every failure, in rule order. Never raises.
 
@@ -648,6 +732,7 @@ def validate(
             problems += _check_stub(stub, mode)
             problems += _check_icon(icon, mode)
             problems += _check_donor(donor, mode)
+            problems += _check_carrier(carrier, mode)
             problems += _check_fuse(fuse)
 
         return problems

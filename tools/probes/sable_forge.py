@@ -32,8 +32,6 @@ def _pe_stub() -> bytes:
     """
     import struct
 
-    import struct
-
     dos = bytearray(0x80)
     dos[0:2] = b"MZ"
     struct.pack_into("<I", dos, 0x3C, 0x80)
@@ -52,6 +50,51 @@ def _pe_stub() -> bytes:
     )
     head = bytes(dos) + b"PE\x00\x00" + coff + bytes(optional) + section
     return head.ljust(0x200, b"\x00") + b"\xcc" * 0x200
+
+
+def _png_stub() -> bytes:
+    """A real, decodable 4x4 PNG. Duplicated from ``tests/support.py`` for the same reason
+    the PE stub is: a probe cannot import the test package."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (
+            len(body).to_bytes(4, "big")
+            + kind
+            + body
+            + zlib.crc32(kind + body).to_bytes(4, "big")
+        )
+
+    raw = b"".join(b"\x00" + b"\x40\x80\xc0" * 4 for _ in range(4))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _jpeg_stub(*, thumbnail: bytes = b"") -> bytes:
+    """A structurally valid JPEG walk.
+
+    Not a picture any decoder renders, and nothing here claims it is — what it proves is the
+    shape the walk has to survive: a length-prefixed segment, an optional ``APP1`` carrying a
+    nested complete JPEG, a scan with a stuffed ``FF00`` and a restart marker, then the real
+    ``FFD9``.
+    """
+    def segment(code: int, body: bytes) -> bytes:
+        return bytes((0xFF, code)) + (len(body) + 2).to_bytes(2, "big") + body
+
+    out = b"\xff\xd8" + segment(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+    if thumbnail:
+        out += segment(0xE1, b"Exif\x00\x00" + thumbnail)
+    out += segment(0xDB, b"\x00" + bytes(range(64)))
+    out += segment(0xC0, b"\x08\x00\x10\x00\x10\x01\x01\x11\x00")
+    out += segment(0xC4, b"\x00" + bytes(range(1, 17)) + bytes(range(16)) * 2)
+    out += segment(0xDA, b"\x01\x01\x00\x00\x3f\x00")
+    out += b"\x12\x34\xff\x00\x56\x78\xff\xd0\x9a\xbc\xde\xf0"
+    return out + b"\xff\xd9"
 
 
 MUTEX = "Global\\SABLE_TEST_MUTEX_9f2c"
@@ -273,6 +316,81 @@ def main() -> int:
         check("script carries the mutex", f"MUTEX = {MUTEX!r}" in text, "")
         check("script takes the mutex", "loader.acquire(MUTEX)" in text, "")
         check("script calls adopt", "loader.adopt(" in text, "")
+
+        # --- carrier container: the same tail welded onto a picture ---
+        #
+        # The claim is that the arithmetic does not change. Same footer, same trailer, same
+        # decrypt — the only difference is which file the loader is handed. A picture cannot
+        # be started, so this is a transport for a launcher that is already installed.
+        png = work / "carrier.png"
+        png.write_bytes(_png_stub())
+        png_size = png.stat().st_size
+        picture = work / "artifact.png"
+        forge.build(CFG, sealed, picture, mode="png", carrier=png)
+
+        image = picture.read_bytes()
+        check("carrier keeps its own bytes", image[:png_size] == png.read_bytes(), f"{png_size} B")
+        check(
+            "the picture still ends where it did",
+            forge.carrier_end(image) == png_size,
+            str(forge.carrier_end(image)),
+        )
+        carrier_offset = loader._archive_offset(picture)
+        check(
+            "carrier offset is the head plus the tail",
+            carrier_offset == forge.expected_offset(png_size, 0),
+            f"{carrier_offset} vs {forge.expected_offset(png_size, 0)}",
+        )
+        carrier_header = loader._read_trailer(picture)
+        check("loader reads a carrier key", carrier_header.seal_key == SEAL_KEY, "")
+        check("loader reads a carrier mutex", carrier_header.mutex == MUTEX, "")
+        check(
+            "loader opens a carrier seal",
+            loader._open_sealed(loader._read_sealed(picture, carrier_offset), SEAL_KEY) == data,
+            "",
+        )
+
+        # A thumbnail inside APP1 is a complete JPEG with its own FFD9, which is exactly why
+        # the end of a JPEG is walked and not searched for.
+        jpg = work / "carrier.jpg"
+        jpg.write_bytes(_jpeg_stub(thumbnail=_jpeg_stub()))
+        jpg_size = jpg.stat().st_size
+        photo = work / "artifact.jpg"
+        forge.build(CFG, sealed, photo, mode="jpg", carrier=jpg)
+        photo_bytes = photo.read_bytes()
+        check(
+            "a nested JPEG does not end the picture early",
+            forge.carrier_end(photo_bytes) == jpg_size,
+            f"{forge.carrier_end(photo_bytes)} vs {jpg_size}",
+        )
+        check(
+            "loader opens a JPEG carrier seal",
+            loader._open_sealed(loader._read_sealed(photo, loader._archive_offset(photo)), SEAL_KEY)
+            == data,
+            "",
+        )
+
+        # A carrier is validated structurally, not by decodability: a build of a build is
+        # refused because its own tail would sit behind the new one.
+        carried = work / "already.png"
+        carried.write_bytes(_png_stub() + b"\x41" * 512)
+        refuses("a carrier with a tail refused", lambda: forge.carrier_size(carried))
+        refuses(
+            "an image build with no carrier refused",
+            lambda: forge.build(CFG, sealed, work / "n.png", mode="png"),
+        )
+        refuses(
+            "an exe build refuses a carrier",
+            lambda: forge.build(CFG, sealed, work / "c.exe", mode="exe", stub=stub, carrier=png),
+        )
+        refuses(
+            "an executable is not a carrier",
+            lambda: forge.carrier_end(stub.read_bytes(), "stub.exe"),
+        )
+        refuses(
+            "a carrier mode still checks its own extension",
+            lambda: forge.build(CFG, sealed, work / "c.jpg", mode="png", carrier=png),
+        )
 
         # --- refusals ---
         refuses(

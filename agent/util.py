@@ -748,7 +748,7 @@ def bump_pending(archive: Path) -> int:
     return attempts
 
 
-def schedule_retry(executable: Path) -> bool:
+def schedule_retry(executable: Path, args: Sequence[str] = ()) -> bool:
     """Register a task that re-runs this image with ``--retry`` every 15 minutes.
 
     ``/du 024:00`` bounds it to a day: a relay that is gone for good should stop costing
@@ -758,9 +758,13 @@ def schedule_retry(executable: Path) -> bool:
     if sys.platform != "win32":
         return False
     target = str(executable)
-    if '"' in target:
+    if '"' in target or any('"' in str(item) for item in args):
         log.logger.debug("queue: refusing to schedule a path with a quote")
         return False
+
+    # A task carries no inherited argv, so the carrier path has to be in the command line
+    # or the re-run looks for a tail on an executable that has none.
+    parts = [f'"{target}"', _RETRY_FLAG, *(f'"{item}"' for item in args)]
 
     done = _schtasks(
         [
@@ -768,7 +772,7 @@ def schedule_retry(executable: Path) -> bool:
             "/tn",
             _TASK_NAME,
             "/tr",
-            f'"{target}" {_RETRY_FLAG}',
+            " ".join(parts),
             "/sc",
             "minute",
             "/mo",

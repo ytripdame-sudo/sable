@@ -102,6 +102,21 @@ missing since it was written. `screen` and `camera` are the only collectors that
 `captures/`, and the ownership rule is pinned by
 `tests/test_runtime.py::test_captures_is_shared_by_name_and_nothing_else_may_write_there`.
 
+Carrier mode (2.3d) is in and is the newest container. `png` and `jpg` output weld the same
+tail past the image's own terminator — same footer, same trailer, same offset from the head's
+length — and the launcher opens it with `--carrier` because an image cannot be started. It is a
+transport for a launcher already on the machine, not a tenth delivery shape. The JPEG end is
+walked rather than searched, because a phone photograph carries a thumbnail in `APP1` and that
+thumbnail is a complete JPEG with its own `FFD9`. The 2.3a C loader stays deferred: a
+CPython-embedding loader measured 20,754,960 bytes against the 10,420,156-byte one-file build,
+so the interpreter is the whole argument and nothing in the carrier work changes that.
+
+2.3b is next and goes in two rungs, not three. Rung 2 (the SYSTEM task) already exists in
+`agent/abe.py`; rung 1 (hollow a live process) is the only one the reference set treats as the
+real answer and the only one whose acceptance needs a browser driven by hand, so it is proved
+on the host rather than in the loop. Rung 3 is DPAPI-only and yields no app-bound key on its
+own — it is the fallback that reports `abe_path` rather than a route to the key.
+
 ---
 
 ## 5. What is verified, and how

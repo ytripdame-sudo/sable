@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Final
 
-from . import util, winapi
+from . import loader, util, winapi
 
 UNWRAP_FLAG: Final[str] = "--abe-unwrap"
 
@@ -202,7 +202,14 @@ def _command_line(workspace: Path) -> str:
         windowless = executable.with_name("pythonw.exe")
         runner = windowless if windowless.is_file() else executable
         launcher = f'"{runner}" "{Path(sys.argv[0]).resolve()}"'
-    return f'{launcher} {UNWRAP_FLAG} "{workspace}"'
+
+    # The helper is a fresh process with a fresh command line, so a carrier container has
+    # to be named again. Without it the helper's own boot looks for a tail on the
+    # executable, which in carrier mode carries none, and the unwrap never starts. The
+    # length check in ``unwrap`` is what catches the overflow this can cause; a helper that
+    # cannot be described is an unavailable key rather than a broken run.
+    carrier = "".join(f' "{item}"' for item in loader.carrier_args())
+    return f'{launcher} {UNWRAP_FLAG} "{workspace}"{carrier}'
 
 
 def _schtasks(arguments: list[str]) -> bool:

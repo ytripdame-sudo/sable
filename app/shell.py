@@ -323,6 +323,7 @@ class MainWindow(QWidget):
             icon=self._forge.icon(),
             fuse=self._forge.fuse(),
             donor=self._forge.donor(),
+            carrier=self._forge.carrier(),
         )
 
         # ``core.validate`` describes a config, and a config has no output folder. The
@@ -376,6 +377,7 @@ class MainWindow(QWidget):
             fuse=self._forge.fuse(),
             version=self._forge.version(),
             donor=self._forge.donor(),
+            carrier=self._forge.carrier(),
             parent=self,
         )
         worker.progress.connect(self._run.on_progress)

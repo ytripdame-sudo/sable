@@ -45,7 +45,13 @@ STAGES: Final[tuple[str, ...]] = (
     STAGE_DONE,
 )
 
-_EXTENSIONS: Final[dict[str, str]] = {forge.OUTPUT_EXE: ".exe", forge.OUTPUT_PY: ".py"}
+_EXTENSIONS: Final[dict[str, str]] = {
+    forge.OUTPUT_EXE: ".exe",
+    forge.OUTPUT_PY: ".py",
+    forge.OUTPUT_DIR: "",
+    forge.OUTPUT_PNG: ".png",
+    forge.OUTPUT_JPG: ".jpg",
+}
 _WORKING_STEM: Final[str] = "sable-build-"
 
 
@@ -169,6 +175,7 @@ def run(
     fuse: Path | None = None,
     version: VersionConfig | None = None,
     donor: Path | None = None,
+    carrier: Path | None = None,
     progress: Progress | None = None,
     cancel: Cancel | None = None,
 ) -> Outcome:
@@ -192,7 +199,9 @@ def run(
 
     _check_cancel(cancel, STAGE_VALIDATE)
     emit(STAGE_VALIDATE, "checking the form", 0.0)
-    problems = validate(cfg, mode=mode, name=name, stub=stub, icon=icon, fuse=fuse, donor=donor)
+    problems = validate(
+        cfg, mode=mode, name=name, stub=stub, icon=icon, fuse=fuse, donor=donor, carrier=carrier
+    )
     stopped = blocking(problems)
     if stopped:
         raise ValidationFailed(
@@ -229,7 +238,15 @@ def run(
     emit(STAGE_FORGE, f"writing {mode} container", 0.55)
     try:
         built = forge.build(
-            cfg, sealed, working, mode=mode, stub=stub, icon=icon, version=version, donor=donor
+            cfg,
+            sealed,
+            working,
+            mode=mode,
+            stub=stub,
+            icon=icon,
+            version=version,
+            donor=donor,
+            carrier=carrier,
         )
     except forge.ForgeError as exc:
         raise PipelineError(STAGE_FORGE, str(exc)) from exc

