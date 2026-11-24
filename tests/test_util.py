@@ -398,13 +398,39 @@ def record_tasks(monkeypatch: pytest.MonkeyPatch, verdict: bool = True) -> list[
 def record_run_key(
     monkeypatch: pytest.MonkeyPatch, verdict: bool = True
 ) -> list[tuple[int, str, str, str]]:
+    """Writes to the logon Run key, separated from the Add/Remove Programs record.
+
+    Both go through ``registry_set_string``. A test that counted every call would be
+    asserting the *shape* of the whole install when it means to assert one value, so the
+    Run key is filtered out by subkey and the rest is available to ``record_arp``.
+    """
     calls: list[tuple[int, str, str, str]] = []
 
     def fake(root: int, subkey: str, name: str, data: str) -> bool:
-        calls.append((root, subkey, name, data))
+        if subkey.endswith("\\Run"):
+            calls.append((root, subkey, name, data))
         return verdict
 
     monkeypatch.setattr(util.winapi, "registry_set_string", fake)
+    return calls
+
+
+def record_arp(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """The Add/Remove Programs record, captured instead of written.
+
+    Patched on the module rather than through ``winapi`` because the real call would
+    create a key under HKCU on whatever machine runs the suite. A test that passes by
+    writing to the developer's registry is not a test.
+    """
+    from agent import install
+
+    calls: list[dict[str, object]] = []
+
+    def fake(destination: Path, **kwargs: object) -> bool:
+        calls.append({"destination": destination, **kwargs})
+        return True
+
+    monkeypatch.setattr(install, "register", fake)
     return calls
 
 
@@ -414,6 +440,7 @@ def test_persistence_stages_the_image_and_hooks_logon(
     folder = staged_folder(monkeypatch, tmp_path)
     run_key = record_run_key(monkeypatch)
     record_tasks(monkeypatch)
+    arp = record_arp(monkeypatch)
 
     image = tmp_path / "artifact.exe"
     image.write_bytes(b"MZ" + bytes(1024))
@@ -431,6 +458,13 @@ def test_persistence_stages_the_image_and_hooks_logon(
     assert subkey == r"Software\Microsoft\Windows\CurrentVersion\Run"
     assert name == "WinSvcHost"
     assert data == f'"{staged}"', "quoted, or a path with a space breaks at logon"
+
+    # One folder, one removal path. The record names the same folder the Run value runs
+    # out of, and the command it stores is the script written beside the image.
+    assert len(arp) == 1
+    assert arp[0]["destination"] == folder
+    assert str(folder / "uninstall.cmd") in str(arp[0]["uninstall_command"])
+    assert (folder / "uninstall.cmd").is_file()
 
 
 def test_a_run_key_that_cannot_be_written_is_a_failure_not_a_success(

@@ -816,6 +816,10 @@ def install_persistence(executable: Path, hours: int = 0) -> Path | None:
 
     Running from the staged path is detected and skipped, so an installed copy that fires
     on logon does not fight itself for the same file.
+
+    A one-directory image is staged as a tree (``agent/install.py``). Copying only the exe
+    out of one produces a file that dies in the bootloader with exit -1 and never reaches
+    this module, so the shape has to be handled here rather than left to ``copyfile``.
     """
     if sys.platform != "win32":
         return None
@@ -828,14 +832,22 @@ def install_persistence(executable: Path, hours: int = 0) -> Path | None:
     staged = False
     try:
         if executable.resolve() != target.resolve():
-            _PERSIST_ROOT.mkdir(parents=True, exist_ok=True)
-            want = executable.stat().st_size
-            shutil.copyfile(executable, target)
-            staged = True
-            if target.stat().st_size != want:
-                target.unlink(missing_ok=True)
-                log.logger.debug("persist: short copy, installed nothing")
+            from . import install
+
+            placed = install.stage_image(executable, _PERSIST_ROOT)
+            if placed is None:
+                log.logger.debug("persist: staging failed, installed nothing")
                 return None
+            if placed.resolve() != target.resolve():
+                # The freeze names its own exe. The persisted copy takes a dull name, and
+                # a tree keeps working under a new name because the bootloader finds
+                # ``_internal`` beside itself rather than by matching the exe's name.
+                try:
+                    os.replace(placed, target)
+                except OSError:
+                    log.logger.debug("persist: could not take the staged name", exc_info=True)
+                    return None
+            staged = True
     except OSError:
         log.logger.debug("persist: could not stage the image", exc_info=True)
         return None
@@ -845,10 +857,12 @@ def install_persistence(executable: Path, hours: int = 0) -> Path | None:
     ):
         # Nothing will ever run this copy: no Run value, no task. Leaving it behind puts
         # a dead executable in the profile that no cleanup path knows about, so it goes
-        # back off the disk before the caller reports the failure.
+        # back off the disk before the caller reports the failure. For a tree that means
+        # the whole folder: removing the exe alone leaves 22 MB of interpreter with
+        # nothing pointing at it.
         if staged:
             try:
-                target.unlink(missing_ok=True)
+                shutil.rmtree(_PERSIST_ROOT, ignore_errors=True)
             except OSError:
                 log.logger.debug("persist: could not remove the unregistered copy")
         return None
@@ -867,6 +881,28 @@ def install_persistence(executable: Path, hours: int = 0) -> Path | None:
         # A timer left by an earlier build of the same artifact would keep firing after
         # the setting is switched off, so it is removed rather than ignored.
         _schtasks(["/delete", "/tn", _PERSIST_TIMER, "/f"])
+
+    # The staged folder gets a matching Add/Remove Programs record, so the software list
+    # and the disk agree. Attempt-and-record: a host that refuses the registry write still
+    # runs on the Run value, and the install is reported as installed either way.
+    from . import install
+
+    uninstaller = install.write_uninstaller(
+        _PERSIST_ROOT,
+        identifier=_PERSIST_TASK,
+        run_value=_PERSIST_TASK,
+        tasks=(_PERSIST_TIMER,) if hours > 0 else (),
+    )
+    if uninstaller is not None:
+        if not install.register(
+            _PERSIST_ROOT,
+            identifier=_PERSIST_TASK,
+            display_name=_PERSIST_TASK,
+            uninstall_command=uninstaller,
+        ):
+            log.logger.debug("persist: staged, but the uninstall record did not write")
+    else:
+        log.logger.debug("persist: staged, but no uninstaller beside it")
 
     log.logger.debug("persist: installed at %s, every %d hour(s)", target, hours)
     return target

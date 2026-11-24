@@ -4,6 +4,7 @@ agent/config.py
 agent/winapi.py
 agent/log.py
 agent/util.py
+agent/install.py
 agent/abe.py
 agent/decoy.py
 agent/patch.py
@@ -40,6 +41,7 @@ core/schema.py
 core/seal.py
 core/rename.py
 core/forge.py
+core/wrappers.py
 core/validate.py
 core/pipeline.py
 app/__init__.py

@@ -345,6 +345,25 @@ def _declare() -> None:
     _advapi32.RegDeleteValueW.argtypes = [wintypes.HKEY, wintypes.LPCWSTR]
     _advapi32.RegDeleteValueW.restype = wintypes.LONG
 
+    # The uninstall entry is a key of its own, so the install path has to be able to make
+    # one and the uninstall path has to be able to take it away. RegCreateKeyExW takes the
+    # disposition out-param even when the caller does not care what it was.
+    _advapi32.RegCreateKeyExW.argtypes = [
+        wintypes.HKEY,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.HKEY),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _advapi32.RegCreateKeyExW.restype = wintypes.LONG
+
+    _advapi32.RegDeleteKeyW.argtypes = [wintypes.HKEY, wintypes.LPCWSTR]
+    _advapi32.RegDeleteKeyW.restype = wintypes.LONG
+
     _iphlpapi.GetAdaptersAddresses.argtypes = [
         wintypes.ULONG,
         wintypes.ULONG,
@@ -863,6 +882,48 @@ def registry_delete_value(root: int, subkey: str, name: str) -> bool:
 
     if status != ERROR_SUCCESS:
         log.logger.debug("RegDeleteValueW %s\\%s -> %d", subkey, name, status)
+    return status == ERROR_SUCCESS
+
+
+def registry_create_key(root: int, subkey: str) -> bool:
+    """Create a key, with its parents. True when it exists afterwards.
+
+    Unlike the Run key, the uninstall key usually does not exist yet on a machine that has
+    never had per-user software installed, so this one creates rather than opening.
+    """
+    if not _WINDOWS:
+        return False
+
+    handle = wintypes.HKEY()
+    disposition = wintypes.DWORD()
+    status = int(
+        _advapi32.RegCreateKeyExW(
+            wintypes.HKEY(root),
+            subkey,
+            0,
+            None,
+            0,
+            KEY_SET_VALUE,
+            None,
+            ctypes.byref(handle),
+            ctypes.byref(disposition),
+        )
+    )
+    if status != ERROR_SUCCESS:
+        log.logger.debug("RegCreateKeyExW %s -> %d", subkey, status)
+        return False
+    _advapi32.RegCloseKey(handle)
+    return True
+
+
+def registry_delete_key(root: int, subkey: str) -> bool:
+    """Remove a key and everything under it. Absent is a False, not an error."""
+    if not _WINDOWS:
+        return False
+
+    status = int(_advapi32.RegDeleteKeyW(wintypes.HKEY(root), subkey))
+    if status != ERROR_SUCCESS:
+        log.logger.debug("RegDeleteKeyW %s -> %d", subkey, status)
     return status == ERROR_SUCCESS
 
 
