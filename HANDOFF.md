@@ -77,7 +77,7 @@ No emoji in code or UI strings. No compliance commentary in source.
 
 ---
 
-## 4. State — 66 of 66
+## 4. State — 67 of 67
 
 Every path in `MANIFEST.txt` exists, and no `.py` exists under `agent/`, `core/` or
 `app/` that is not listed. Both directions are asserted by
@@ -664,7 +664,7 @@ drifts to 68 in a commit that only touched a document is worth failing over.
 | `_nightly/QUEUE.md` | One item per night, `@human` marks what the loop must skip. |
 | `_nightly/STOP` | Drop this file and the loop halts at the next round boundary. |
 | `_nightly/REPORT.md` | The morning read. Written by the loop, committed on the branch. |
-| `pyrightconfig.json` | Editor types only. Not in the gate: 455 contracts are the gate. |
+| `pyrightconfig.json` | Editor types only. Not in the gate: 466 contracts are the gate. |
 
 Run it by hand before trusting a schedule:
 
@@ -692,3 +692,28 @@ Four contracts skip on CI because they need a frozen launcher in `tools/dist`. T
 launcher job builds one, but it builds it in its own runner, so the python jobs still
 see a tree that has never been frozen. The skip reason names it; that is the whole cost
 of a clean checkout.
+
+### Phase 2, first unit: one directory
+
+The `%TEMP%` extraction tree is gone as of `forge.build(mode="dir")`. A one-directory freeze
+puts the interpreter in `_internal\` beside the exe and writes nothing to `%TEMP%` at boot.
+
+| | one-file | one-dir |
+|---|---|---|
+| artifact | 10,259,979 B | 22,859,938 B tree |
+| boot to a running payload | 1878 ms mean | 376 ms warm / 1388 ms cold |
+| `%TEMP%` written at launch | ~10 MB, then deleted | nothing |
+
+The exe inside a one-directory tree still carries the trailer, the footer and the seal; the
+loader reads `sys.executable` and neither knows nor cares that `_internal` exists. Probe:
+**55/55 for both shapes**. Gate: **466 passed**. Nine new contracts live in
+`tests/test_forge_tree.py`. Full reasoning in `DECISIONS.md`.
+
+The trap worth remembering: welding a one-directory exe and copying it somewhere on its own
+produces an artifact that dies in the bootloader with `Failed to load Python DLL` and exit
+code `-1`, before `agent.loader` is reached. The trailer reads back fine, so every
+payload-level check passes while nothing runs. The tree is the unit of output.
+
+Open in this phase: the per-user installer under `%LOCALAPPDATA%\Programs`, and whether
+`agent/persist.py` needs any change once the image lives in a tree rather than beside
+itself. Then the delivery wrappers, which are the same file and the same harness.

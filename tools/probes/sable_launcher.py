@@ -21,6 +21,7 @@ import ast
 import io
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -212,49 +213,85 @@ def boot_once(artifact: Path, marker: Path, label: str) -> None:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 1:
-        print("usage: sable_launcher.py <launcher.exe>")
+        print("usage: sable_launcher.py <launcher.exe | launcher tree>")
         return 2
 
     launcher = Path(argv[0]).resolve()
-    if not launcher.is_file():
-        print(f"FAIL  {launcher}: not a file")
+    # A one-file freeze is a single exe. A one-directory freeze is a tree whose exe
+    # cannot run without ``_internal`` beside it, so the tree is the launcher and the
+    # artifact has to be built in the same shape. Both are proved by the same checks;
+    # only the unit written and booted differs.
+    if launcher.is_dir():
+        shape = forge.OUTPUT_DIR
+        tree: Path | None = launcher
+        try:
+            launcher_exe = forge.sole_exe(launcher)
+        except forge.ForgeError as exc:
+            print(f"FAIL  {launcher}: {exc}")
+            return 2
+    elif launcher.is_file():
+        shape = forge.OUTPUT_EXE
+        tree = None
+        launcher_exe = launcher
+    else:
+        print(f"FAIL  {launcher}: not a file or a tree")
         return 2
 
-    check("launcher exists", launcher.stat().st_size > 1_000_000, f"{launcher.stat().st_size} bytes")
+    check(
+        f"launcher exists ({shape})",
+        launcher_exe.stat().st_size > 1_000_000,
+        f"{launcher_exe.stat().st_size} bytes",
+    )
+
+    def artifact(name: str) -> Path:
+        """Where this shape's output goes: a file for one-file, a folder for one-dir."""
+        return work / name if shape == forge.OUTPUT_DIR else work / f"{name}.exe"
+
+    def bootable(built: Path) -> Path:
+        return forge.sole_exe(built) if built.is_dir() else built
+
+    def make(name: str, cfg: RunConfig, sealed: bytes, **kwargs: object) -> Path:
+        target = artifact(name)
+        forge.build(
+            cfg,
+            sealed,
+            target,
+            mode=shape,
+            stub=tree if shape == forge.OUTPUT_DIR else launcher_exe,
+            **kwargs,  # type: ignore[arg-type]
+        )
+        return target
 
     with tempfile.TemporaryDirectory(prefix="sable-launcher-") as scratch:
         work = Path(scratch)
         root = fake_root(work)
 
         first_cfg = config("k-proof-one-2f9a", "Global\\SABLE_PROOF_ONE")
-        first = work / "one.exe"
-        forge.build(
+        first = make(
+            "one",
             first_cfg,
             seal.seal(forge.payload(root, first_cfg), first_cfg.seal_key),
-            first,
-            mode="exe",
-            stub=launcher,
         )
 
         second_cfg = config("k-proof-two-7c41", "Global\\SABLE_PROOF_TWO", ballast=1)
-        second = work / "two.exe"
-        forge.build(
+        second = make(
+            "two",
             second_cfg,
             seal.seal(forge.payload(root, second_cfg), second_cfg.seal_key),
-            second,
-            mode="exe",
-            stub=launcher,
         )
+
+        first_exe = bootable(first)
+        second_exe = bootable(second)
 
         check(
             "both artifacts use the same launcher",
-            first.read_bytes()[: launcher.stat().st_size] == launcher.read_bytes(),
+            first_exe.read_bytes()[: launcher_exe.stat().st_size] == launcher_exe.read_bytes(),
             "",
         )
-        check("ballast changes the size", second.stat().st_size > first.stat().st_size, "")
+        check("ballast changes the size", second_exe.stat().st_size > first_exe.stat().st_size, "")
 
-        boot_once(first, work / "one.json", "first")
-        boot_once(second, work / "two.json", "second")
+        boot_once(first_exe, work / "one.json", "first")
+        boot_once(second_exe, work / "two.json", "second")
 
         # Third: an icon patched into the same launcher and a file welded into the
         # payload. The boot proves the resource patch left a runnable image; the footer
@@ -262,27 +299,25 @@ def main(argv: list[str]) -> int:
         third_cfg = config("k-proof-three-1d0e", "Global\\SABLE_PROOF_THREE")
         bound = work / "bound-proof.exe"
         bound.write_bytes(b"MZ" + bytes(64))
-        third = work / "three.exe"
-        forge.build(
+        third = make(
+            "three",
             third_cfg,
             seal.seal(forge.payload(root, third_cfg, fuse=bound), third_cfg.seal_key),
-            third,
-            mode="exe",
-            stub=launcher,
             icon=ico_file(work / "proof.ico"),
         )
+        third_exe = bootable(third)
 
-        baseline = forge.expected_offset(launcher.stat().st_size, 0)
-        offset = int.from_bytes(third.read_bytes()[-forge.FOOTER_SIZE + 4:], "little")
+        baseline = forge.expected_offset(launcher_exe.stat().st_size, 0)
+        offset = int.from_bytes(third_exe.read_bytes()[-forge.FOOTER_SIZE + 4:], "little")
         check("icon rewrites the image", offset != baseline, f"{offset} vs {baseline}")
         check(
             "icon is in the resources",
-            forge.group_payload(forge.icon_entries(work / "proof.ico")) in third.read_bytes(),
+            forge.group_payload(forge.icon_entries(work / "proof.ico")) in third_exe.read_bytes(),
             "",
         )
 
         packed = loader._open_sealed(
-            loader._read_sealed(third, offset), third_cfg.seal_key
+            loader._read_sealed(third_exe, offset), third_cfg.seal_key
         )
         with zipfile.ZipFile(io.BytesIO(packed)) as archive:
             check(
@@ -291,15 +326,20 @@ def main(argv: list[str]) -> int:
                 "",
             )
 
-        boot_once(third, work / "three.json", "third")
+        boot_once(third_exe, work / "three.json", "third")
 
         # The mutex is real: a second copy launched while the first still runs exits 0
         # without a marker of its own. Proven by exit code only, since both share it.
-        boot_once(first, work / "one-again.json", "rerun")
+        boot_once(first_exe, work / "one-again.json", "rerun")
 
         # A launcher on its own is not an artifact and must refuse rather than hang.
-        bare = work / "bare.exe"
-        bare.write_bytes(launcher.read_bytes())
+        if shape == forge.OUTPUT_DIR:
+            bare_tree = work / "bare"
+            shutil.copytree(tree, bare_tree)  # type: ignore[arg-type]
+            bare = forge.sole_exe(bare_tree)
+        else:
+            bare = work / "bare.exe"
+            bare.write_bytes(launcher_exe.read_bytes())
         try:
             completed = subprocess.run([str(bare)], capture_output=True, timeout=120, check=False)
         except subprocess.TimeoutExpired:

@@ -121,3 +121,12 @@ jobs:
       # typed. This is the only check that proves the bundle is complete at run time.
       - name: probe
         run: python tools/probes/sable_launcher.py tools/dist/sable-launcher.exe
+
+      # The one-directory shape, proved the same way. Its exe cannot run without
+      # _internal beside it, so the probe takes the tree and forges its artifacts in the
+      # matching shape. A one-directory build that has never been booted is a guess.
+      - name: freeze one-directory
+        run: python -m PyInstaller tools/sable-launcher-onedir.spec --distpath tools/dist-onedir --workpath tools/build-onedir --noconfirm
+
+      - name: probe one-directory
+        run: python tools/probes/sable_launcher.py tools/dist-onedir/sable-launcher

@@ -49,11 +49,15 @@ from typing import Final, Literal
 from .schema import MAX_BALLAST_MB, VERSION_FIELDS, RunConfig, VersionConfig, to_dict
 from .seal import MIN_SEALED_BYTES
 
-OutputMode = Literal["exe", "py"]
+OutputMode = Literal["exe", "py", "dir"]
 
 OUTPUT_EXE: Final[str] = "exe"
 OUTPUT_PY: Final[str] = "py"
-OUTPUT_MODES: Final[tuple[str, ...]] = (OUTPUT_EXE, OUTPUT_PY)
+# One-directory: a launcher tree instead of a single file. The exe gets the same
+# trailer and the same seal; the interpreter sits beside it in ``_internal`` and is
+# never extracted at run time.
+OUTPUT_DIR: Final[str] = "dir"
+OUTPUT_MODES: Final[tuple[str, ...]] = (OUTPUT_EXE, OUTPUT_PY, OUTPUT_DIR)
 
 FOOTER_MAGIC: Final[bytes] = b"SBLT"
 FOOTER_SIZE: Final[int] = 12
@@ -83,7 +87,7 @@ CONFIG_MEMBER: Final[str] = "cfg.json"
 _MIB: Final[int] = 1024 * 1024
 _COPY_CHUNK: Final[int] = 1024 * 1024
 _OFFSET_BYTES: Final[int] = 8
-_EXTENSIONS: Final[dict[str, str]] = {OUTPUT_EXE: ".exe", OUTPUT_PY: ".py"}
+_EXTENSIONS: Final[dict[str, str]] = {OUTPUT_EXE: ".exe", OUTPUT_PY: ".py", OUTPUT_DIR: ""}
 
 # Fixed timestamp on every member so two builds of the same tree produce the same
 # payload bytes. The seal is randomised per artifact, so this only makes the zip
@@ -1157,6 +1161,64 @@ def _write_exe(
     return destination
 
 
+def _write_tree(
+    destination: Path,
+    tree: Path,
+    sealed: bytes,
+    ballast_mb: int,
+    cfg: RunConfig,
+    *,
+    icons: list[IconEntry] | None = None,
+    version: VersionConfig | None = None,
+) -> Path:
+    """Copy a frozen launcher tree and weld the payload onto the exe inside it.
+
+    A one-directory build is not one file: the exe is a bootstrap and the interpreter
+    it loads lives in ``_internal`` beside it. Writing the artifact under some other
+    name in some other folder is what a single-file build does, and for this shape it
+    produces an exe that fails in the bootloader with "Failed to load Python DLL" before
+    the loader is ever reached. So the tree is the unit of output, and the exe inside
+    it is the only file that grows.
+    """
+    if not tree.is_dir():
+        raise ForgeError(f"{tree}: dir output needs a launcher tree, not a file")
+    if destination.exists():
+        raise ForgeError(f"{destination}: already exists")
+
+    try:
+        shutil.copytree(tree, destination)
+    except OSError as exc:
+        raise ForgeError(f"{destination}: cannot copy the launcher tree ({exc.strerror})") from exc
+
+    exe = sole_exe(destination)
+    # The patch and the weld both stage through a temporary file and replace, so the
+    # exe is never readable in a half-written state under the name the bootloader uses.
+    with _patched_stub(exe, icons=icons, version=version) as patched:
+        _write_exe(exe, patched, sealed, ballast_mb, cfg)
+
+    return destination
+
+
+def sole_exe(tree: Path) -> Path:
+    """The one executable at the top of a launcher tree.
+
+    Every PyInstaller one-directory build puts exactly one exe next to ``_internal``,
+    and its name is whatever the spec chose. Looking it up beats threading a name
+    through the config: the name is a property of the freeze, and the freeze is an
+    input file, not a run setting.
+    """
+    try:
+        found = sorted(
+            item for item in tree.iterdir() if item.is_file() and item.suffix.lower() == ".exe"
+        )
+    except OSError as exc:
+        raise ForgeError(f"{tree}: cannot list ({exc.strerror})") from exc
+
+    if len(found) != 1:
+        raise ForgeError(f"{tree}: expected one .exe at the top, found {len(found)}")
+    return found[0]
+
+
 def _write_script(destination: Path, sealed: bytes, cfg: RunConfig) -> Path:
     text = script_text(sealed, cfg.seal_key, cfg.mutex)
     staging = destination.with_name(destination.name + ".part")
@@ -1308,12 +1370,12 @@ def build(
         raise ForgeError(f"sealed payload is {len(sealed)} bytes, needs {MIN_SEALED_BYTES}")
 
     expected = _EXTENSIONS[mode]
-    if destination.suffix.lower() != expected:
+    if expected and destination.suffix.lower() != expected:
         raise ForgeError(f"{destination.name}: {mode} output must end {expected}")
 
-    if mode == OUTPUT_EXE:
+    if mode in (OUTPUT_EXE, OUTPUT_DIR):
         if stub is None:
-            raise ForgeError("exe output needs a frozen stub")
+            raise ForgeError(f"{mode} output needs a frozen launcher")
         taken = harvest(donor) if donor is not None else None
         entries = icon_entries(icon) if icon is not None else None
         if entries is None and taken is not None and taken.icons:
@@ -1327,6 +1389,10 @@ def build(
         # place that computes it stays the one place that computes it. Icon and version
         # are one staging pass: two update cycles would re-append the launcher's archive
         # twice, and the second tail is not a tail any loader expects.
+        if mode == OUTPUT_DIR:
+            return _write_tree(
+                destination, stub, sealed, ballast, cfg, icons=entries, version=settled
+            )
         with _patched_stub(stub, icons=entries, version=settled) as patched:
             return _write_exe(destination, patched, sealed, ballast, cfg)
 
@@ -1347,6 +1413,7 @@ __all__ = [
     "MAX_ICON_BYTES",
     "MAX_VERSION_BYTES",
     "MUTEX_SLOT",
+    "OUTPUT_DIR",
     "OUTPUT_EXE",
     "OUTPUT_MODES",
     "OUTPUT_PY",

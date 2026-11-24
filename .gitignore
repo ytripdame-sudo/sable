@@ -21,6 +21,10 @@ htmlcov/
 # Native crate build output
 native/aes/target/
 
+# One-directory freeze output: 23 MB of interpreter, never committed
+tools/dist-onedir/
+tools/build-onedir/
+
 # Operator-local
 .env
 *.log

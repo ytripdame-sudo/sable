@@ -2157,3 +2157,54 @@ The alternative was a cron that ran the agent straight against `main` with no br
 queue. It is less code and it is the version that produces a morning full of unexplained
 diffs, because "make the tests pass" with no written objective is an invitation to widen the
 thing being tested.
+
+## One directory instead of one file - the tree is the artifact
+
+The `%TEMP%` tree was the only real argument for a Rust launcher, and it turned out to be a
+packaging argument. A one-file PyInstaller build unpacks the interpreter into
+`%TEMP%\_MEIxxxxxx` on every launch. A one-directory build does not: the interpreter sits in
+`_internal\` beside the exe, and nothing is written to `%TEMP%` at boot. Same freeze inputs,
+same payload container, one flag's worth of difference in the spec.
+
+Measured on this desk, five runs each, same sealed payload, same machine:
+
+```
+one-file   artifact 10,259,979 B   boot 1878 ms mean (1812-1982)
+one-dir    tree    22,859,938 B   boot  376 ms warm  (1388 ms cold first run)
+```
+
+The tree is 12.6 MB larger on disk and 1.5 s faster to a running payload. Neither shape leaves
+`_MEI*` behind after the process exits, so "no `%TEMP%` tree" is true in the transient sense -
+what a one-file build does that a one-directory build never does is write ten megabytes to
+`%TEMP%`, run them, and delete them, on every single launch. That write is what a scanner
+sees, and it is the fingerprint the sweep kept finding.
+
+The first attempt failed, and the failure is the useful part. `forge.build(mode="exe")` took
+the frozen exe, copied it to the destination and welded the tail on. Against a one-directory
+exe that produces a file with no `_internal` beside it, and the PyInstaller bootloader exits
+`-1` with `Failed to load Python DLL ...\_internal\python312.dll` before `agent.loader` is
+ever imported. The probe caught it immediately: 10/19, every boot red, while the trailer
+read back perfectly. Appending bytes is not what breaks; being a bare exe is.
+
+So the unit of output changed. `OUTPUT_DIR` is a third mode alongside `exe` and `py`:
+
+- the stub is a frozen tree, not a file
+- the destination is a directory, and it must not already exist
+- the tree is copied, then the exe inside it is patched and welded exactly as a one-file
+  stub is - same `expected_offset`, same trailer, same footer
+- `sole_exe()` finds the exe by looking rather than by being told, because the name is a
+  property of the freeze and the freeze is an input file
+
+The seal did not change and neither did the loader. `util.executable_path()` returns
+`sys.executable` under `sys.frozen`, and that is the exe inside the tree, so the loader reads
+the tail from the right file without knowing which shape it is in.
+
+Both shapes now report **55/55** from `tools/probes/sable_launcher.py`, which takes either a
+launcher exe or a launcher tree and forges its three artifacts in the matching shape. Nine
+new contracts in `tests/test_forge_tree.py` cover the layout, the offset, the copy
+independence, and the three refusal paths. Gate: 466 passed, ruff clean, compileall 0.
+
+What is not done: the installer. A tree needs a place to live - `%LOCALAPPDATA%\Programs` -
+and `agent/persist.py` writes Run-key and task paths relative to the running image, which
+already resolves correctly inside a tree, but nothing yet puts the tree there or registers an
+uninstaller. That is the next unit of phase 2, and it is design work, not measurement.
