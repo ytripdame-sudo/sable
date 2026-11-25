@@ -2691,5 +2691,84 @@ assumption.
   `guest/recorder.rs` are that check — it compiles a launcher that writes down its own argv,
   loads the DLL, and looks for it. It runs on `VUURTH` or `SABLE-CLEAN`, never here.
 
-Gate: **625 passed**, ruff clean, compileall 0, `sable_forge` 60/60, `sable_validate` 71/71,
+Gate: **658 passed**, ruff clean, compileall 0, `sable_forge` 60/60, `sable_validate` 71/71,
 `dll_exports` 17/17 against the system DLL.
+
+## 3.4 - a cookie is a claim until an origin answers
+
+The plan's last collector ask: tokens are validated live, cookies are not (#6, 00:05:42), and a
+log of dead cookies is noise. `agent/cookies.py` marks every row it can, in the same three words
+`identity` already uses — `valid`, `dead`, `unknown`.
+
+### The free half is the larger half
+
+A row whose `expires` has passed is dead by definition. No request, no third party, nothing to go
+wrong, and in a real jar it is most of the file: a browser keeps rows for sites the user logged
+out of years ago. That half costs one date comparison per row.
+
+The other half costs a request, so it is asked sparingly and only about cookies in `CHECKS`.
+
+### Only a 401 is a death
+
+This is the rule the module is built around, and it is deliberately narrower than it could be.
+`403` is what a WAF, a user-agent filter and a geoblock all return; `429` and any `5xx` are
+statements about the run. Reading any of them as `dead` would drop a live session out of the
+archive, and the copy on that machine is not coming back — the exact failure `identity._session_status`
+already refuses for tokens ("reporting those as dead is worse than reporting nothing"). So a
+refusal has to be the origin saying *not this credential*, which is a 401 and nothing else.
+
+That rule is what decides which entries can exist at all. An endpoint that needs a bearer of ours
+to answer could return 401 because the bearer went stale, and that would be a false death read off
+a constant — which is why X, Twitch and Reddit are not in the table even though the check would be
+easy to write.
+
+### Three entries, and a documented reason each
+
+`github` (`user_session` → `api.github.com/user`), `gitlab` (`_gitlab_session` →
+`gitlab.com/api/v4/user`), `roblox` (`.ROBLOSECURITY` → `users.roblox.com/v1/users/authenticated`).
+Each one presents the cookie as a `Cookie` header to the origin that set it, and each one is in the
+table only because a 401 there cannot mean anything else.
+
+A longer list would be worse, not better. Every entry is a request from a machine that is
+presumably being watched, and the reference set attributes detection to volume rather than to
+technique (#3 00:06:43, #4 00:05:12). Six requests is the cap; three is what the bar produced.
+
+### Where it runs, and why it runs there
+
+In-process, after `identity.collect` and before `enrich`, so one pacing counter covers both
+modules. Two counters would be two bursts — the shape the pacing exists to prevent — and the
+counter, the per-call ceiling and the deadline arithmetic are one policy that belongs in one
+module. `cookies` therefore calls `identity._request` and imports the verdict words from it: a
+private import, taken on purpose, with the reason written where the import is.
+
+Sequencing rather than interleaving: identity runs, then cookies. Interleaving would be a
+refactor of both modules to buy nothing a reader can see.
+
+### Four states on a row, not three
+
+`valid`, `dead`, `unknown` are verdicts. A row with no `status` key was never a candidate — no
+table entry, no budget left, or not a session cookie at all. That distinction is the one that
+matters when the cap bites: a row that was not asked must not read as "asked and could not tell",
+so the cap and the deadline leave rows untouched rather than stamping them `unknown`.
+
+`cookies.json` keeps every field it had and gains `status` and `reason` beside the value, because
+the row is what a reader looks at. `accounts/cookie_status.json` is the same schema as
+`accounts/session_status.json` — one file per kind of credential, both answering "was this alive
+when it was read". Neither carries a value: a record that says *how* is intelligence, a record
+that says *what* is a session in a text file.
+
+### Proven, and not
+
+- `tests/test_cookies.py`, 33 cases: expiry free and exact, an unparseable date not read as a
+  death, every status mapped, the 403 case pinned separately, host matching across the shapes a
+  jar uses, one request per credential across profiles, the cap leaving rows unmarked, an
+  exhausted deadline refusing before the first request, the record's shape, and the value's
+  absence from it.
+- **Not proven:** the three endpoints in the field. Every call in the tests is stubbed; the
+  module has never made a request from this bench, and `LIMITS.md` §10 says so.
+  `tools/probes/cookies_check.py` is the field check that belongs on a guest — it sends a garbage
+  value to each entry and fails if any of them answers 200, because an endpoint that accepts a
+  value that is not a credential is not authenticating on that cookie at all. Written, not run.
+
+`MANIFEST.txt` gains `agent/cookies.py` — 72 slots, and the lock in `tests/test_imports.py` moved
+with it. Adding a shipped file is meant to be a decision, not a side effect.

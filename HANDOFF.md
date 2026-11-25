@@ -77,7 +77,7 @@ No emoji in code or UI strings. No compliance commentary in source.
 
 ---
 
-## 4. State — 71 of 71
+## 4. State — 72 of 72
 
 Every path in `MANIFEST.txt` exists, and no `.py` exists under `agent/`, `core/` or
 `app/` that is not listed. Both directions are asserted by
@@ -134,6 +134,17 @@ eighteenth export, and `--entry=DllMain` is passed explicitly because the CRT st
 export table and the entry point statically: 17/17 names, entry a `jmp rel32` into the attach
 function. The live half — launcher starts, `--carrier` reaches it — is
 `tools/probes/version_dll_check.py` on a guest.
+
+3.4 marks the cookie dump row by row. `agent/cookies.py` runs after `identity.collect` so both
+share one pacing counter, and every row gets one of the same three words the tokens get. The free
+half is the larger half: a row whose `expires` has passed is dead with no request at all, and that
+is most rows in a real jar. The rest are checked only if they are in `CHECKS` — GitHub, GitLab,
+Roblox, each one an endpoint where a 401 can only mean the cookie is dead and no bearer of ours is
+involved, because a stale constant of ours returning 401 would be a live session marked dead.
+`dead` comes from a 401 and nothing else: 403 is what a WAF and a geoblock say, 429 and 5xx are
+statements about the run. A row with no `status` key was never a candidate, which is what keeps
+"not asked" from reading as "unknown". `accounts/cookie_status.json` is the same schema as
+`accounts/session_status.json`, and neither file holds a value. `MANIFEST.txt` is 72 slots now.
 
 ---
 

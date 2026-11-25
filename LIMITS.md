@@ -193,6 +193,11 @@ present one, and the uninstaller has to work.
 - Delivery on a host that has never seen the image. Everything is proven against
   `SABLE-CLEAN`; a clean commercial machine with Defender in cloud mode is a different
   measurement.
+- The three cookie endpoints. `cookies.validate` has never made a request — every call in the
+  tests is stubbed. Whether `user_session` against `api.github.com/user` still answers 200 for a
+  live session, and 401 for a dead one, is a fact about three vendors' behaviour in the field.
+  `tools/probes/cookies_check.py` checks the premise from a guest (a garbage value must be
+  refused); it is written and has not been run.
 
 ---
 
@@ -213,8 +218,13 @@ present one, and the uninstaller has to work.
 | the rungs are ordered by cost and each reports why it failed | `test_abe.py`, every OS call stubbed |
 | the sideload exports exactly what the host imports, no more | `dll_exports.py --expect C:\Windows\System32\version.dll`, 17/17 |
 | the sideload's entry point is the attach function | `dll_exports.py`, entry is `jmp rel32` into `.text`, not the CRT startup |
+| a row that expired is dead without spending a request | `test_cookies.py`, the free half |
+| only a 401 is a death | `test_cookies.py`, every other status parameterised |
+| the same credential is asked once | `test_cookies.py`, two profiles, one request |
+| the verdict record holds no cookie value | `test_cookies.py`, the status document read back as text |
+| not asked is not the same as unknown | `test_cookies.py`, cap and deadline leave rows unmarked |
 
-Gate at this commit: **625 passed**, ruff clean, compileall 0, `sable_forge` 60/60,
+Gate at this commit: **658 passed**, ruff clean, compileall 0, `sable_forge` 60/60,
 `sable_validate` 71/71, `sable_launcher` 72/72 on the one-file shape, `abe_check` clean,
 `dll_exports` 17/17 against the system `version.dll`.
 

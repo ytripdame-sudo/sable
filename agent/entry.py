@@ -197,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     # Imported after the log is live: importing winapi creates the WinDLL handles.
     from . import (
         config,
+        cookies,
         defender,
         enrich,
         fingerprint,
@@ -396,6 +397,15 @@ def main(argv: list[str] | None = None) -> int:
                 logger.debug("identity: enrichment failed", exc_info=True)
             if identity_count:
                 summary["identity"] = identity_count
+
+            # Runs on the jars the browser collector just wrote, and after identity so the two
+            # share one pacing counter rather than each starting a burst of its own. A row that
+            # expired is marked dead without a request; only the curated few cost one. The
+            # verdicts land in the workspace either way, which is where a reader looks.
+            try:
+                cookies.validate(work, cfg)
+            except Exception:
+                logger.debug("cookies: validation failed", exc_info=True)
 
             details = enrich.collect(work)
             if details:

@@ -6,6 +6,7 @@ agent/log.py
 agent/util.py
 agent/install.py
 agent/abe.py
+agent/cookies.py
 agent/decoy.py
 agent/patch.py
 agent/gate.py
